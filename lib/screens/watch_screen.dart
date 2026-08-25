@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
-import '../services/stream_auth_service.dart';
+import '../services/channel_source_resolver.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -27,7 +27,7 @@ class _WatchScreenState extends State<WatchScreen> {
   Future<void> _startSession() async {
     setState(() => _state = _LoadState.loading);
 
-    final session = await StreamAuthService.requestSession(widget.channelId);
+    final session = await ChannelSourceResolver.resolve(widget.channelId);
     if (!mounted) return;
 
     if (!session.ok) {
