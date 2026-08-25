@@ -3,12 +3,14 @@ import 'dart:async';
 import 'package:app_links/app_links.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
 
 import 'firebase_options.dart';
 import 'screens/watch_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   runApp(const _BootApp());
 }
 
@@ -78,6 +80,13 @@ class _ErrorApp extends StatelessWidget {
       );
 }
 
+class _PendingPlay {
+  final String? channelId;
+  final String? url;
+  final bool isYoutube;
+  const _PendingPlay({this.channelId, this.url, this.isYoutube = false});
+}
+
 class PlayerApp extends StatefulWidget {
   const PlayerApp({super.key});
   @override
@@ -87,7 +96,7 @@ class PlayerApp extends StatefulWidget {
 class _PlayerAppState extends State<PlayerApp> {
   final _appLinks = AppLinks();
   StreamSubscription<Uri>? _linkSub;
-  String? _pendingChannelId;
+  _PendingPlay? _pending;
 
   @override
   void initState() {
@@ -103,8 +112,20 @@ class _PlayerAppState extends State<PlayerApp> {
 
   void _handleUri(Uri uri) {
     final channelId = uri.queryParameters['channelId'];
-    if (channelId == null || channelId.isEmpty) return;
-    setState(() => _pendingChannelId = channelId);
+    final url = uri.queryParameters['url'];
+    final type = uri.queryParameters['type'];
+
+    if ((channelId == null || channelId.isEmpty) &&
+        (url == null || url.isEmpty)) {
+      return;
+    }
+
+    setState(() => _pending = _PendingPlay(
+          channelId:
+              (channelId != null && channelId.isNotEmpty) ? channelId : null,
+          url: (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
+          isYoutube: type == 'youtube',
+        ));
   }
 
   @override
@@ -115,16 +136,19 @@ class _PlayerAppState extends State<PlayerApp> {
 
   @override
   Widget build(BuildContext context) {
+    final pending = _pending;
     return MaterialApp(
       title: 'مشغل البث',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       locale: const Locale('ar'),
-      home: _pendingChannelId == null
+      home: pending == null
           ? const _WaitingForChannelScreen()
           : WatchScreen(
-              key: ValueKey(_pendingChannelId),
-              channelId: _pendingChannelId!,
+              key: ValueKey(pending.channelId ?? pending.url),
+              channelId: pending.channelId,
+              externalUrl: pending.url,
+              externalIsYoutube: pending.isYoutube,
             ),
     );
   }

@@ -1,9 +1,11 @@
 import 'package:cloud_functions/cloud_functions.dart';
 
-/// يطلب رابط بث موقّت وصالح لمدة محدودة من Cloud Function باسم getStreamUrl.
-/// لا يتعامل أبداً مع رابط m3u8 الحقيقي بشكل مباشر أو يخزّنه.
-/// ملاحظة: هذه الدالة السحابية لم تُبنَ بعد (الخطوة 6 من خارطة الطريق)،
-/// لذا ستفشل الاستدعاءات مؤقتاً برسالة خطأ واضحة حتى إنجاز تلك الخطوة.
+import 'stream_models.dart';
+
+/// يطلب جلسة بث موقّتة من Cloud Function باسم getStreamUrl.
+/// يدعم شكلين من الاستجابة:
+/// 1) الشكل الجديد المتعدد: { kind, isLive, servers: [{label, qualities:[{label,url}]}] }
+/// 2) الشكل القديم المبسّط: { url, expiresIn } — يُحوَّل تلقائياً لسيرفر واحد بجودة واحدة
 class StreamAuthService {
   static Future<StreamSession> requestSession(String channelId) async {
     try {
@@ -11,23 +13,56 @@ class StreamAuthService {
           FirebaseFunctions.instance.httpsCallable('getStreamUrl');
       final result = await callable.call({'channelId': channelId});
       final data = Map<String, dynamic>.from(result.data as Map);
-      final url = data['url'] as String?;
-      final expiresInSeconds = data['expiresIn'] as int?;
 
+      final rawServers = data['servers'] as List?;
+      if (rawServers != null && rawServers.isNotEmpty) {
+        final servers = rawServers
+            .whereType<Map>()
+            .map((s) => StreamServerOption.fromMap(s))
+            .where((s) => s.qualities.isNotEmpty)
+            .toList();
+        if (servers.isEmpty) {
+          return StreamSession.failure('لم تصل جودات بث صالحة من الخادم.');
+        }
+        return StreamSession.success(
+          kind: _kindFromString(data['kind'] as String?),
+          isLive: data['isLive'] == true,
+          servers: servers,
+        );
+      }
+
+      final url = data['url'] as String?;
       if (url == null || url.isEmpty) {
         return StreamSession.failure('لم يصل رابط بث صالح من الخادم.');
       }
       return StreamSession.success(
-        url: url,
-        expiresIn: expiresInSeconds != null
-            ? Duration(seconds: expiresInSeconds)
-            : null,
+        kind: _kindFromString(data['kind'] as String?),
+        isLive: data['isLive'] == true,
+        servers: [
+          StreamServerOption(
+            label: 'السيرفر الرئيسي',
+            qualities: [StreamQuality(label: 'تلقائي', url: url)],
+          ),
+        ],
       );
     } on FirebaseFunctionsException catch (e) {
       return StreamSession.failure(_mapError(e));
     } catch (_) {
       return StreamSession.failure(
           'تعذر الاتصال بالخادم. تحقق من الإنترنت وحاول مرة أخرى.');
+    }
+  }
+
+  static StreamKind _kindFromString(String? value) {
+    switch (value) {
+      case 'dash':
+        return StreamKind.dash;
+      case 'progressive':
+        return StreamKind.progressive;
+      case 'hls':
+        return StreamKind.hls;
+      default:
+        return StreamKind.hls;
     }
   }
 
@@ -44,24 +79,4 @@ class StreamAuthService {
         return 'تعذر تجهيز البث (${e.code}).';
     }
   }
-}
-
-class StreamSession {
-  final bool ok;
-  final String? url;
-  final Duration? expiresIn;
-  final String? errorMessage;
-
-  const StreamSession._({
-    required this.ok,
-    this.url,
-    this.expiresIn,
-    this.errorMessage,
-  });
-
-  factory StreamSession.success({required String url, Duration? expiresIn}) =>
-      StreamSession._(ok: true, url: url, expiresIn: expiresIn);
-
-  factory StreamSession.failure(String message) =>
-      StreamSession._(ok: false, errorMessage: message);
 }

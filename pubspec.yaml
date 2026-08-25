@@ -13,8 +13,18 @@ dependencies:
   firebase_core: ^2.32.0
   cloud_firestore: ^4.15.5
   cloud_functions: ^4.6.8
-  video_player: ^2.9.2
   app_links: ^6.3.2
+
+  # محرك تشغيل يدعم كل صيغ الفيديو والبث (HLS, DASH, MP4, RTMP, MKV...) بحجم صغير
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_android_video: ^1.3.6
+
+  # استخراج روابط يوتيوب (فيديو عادي أو بث مباشر) لتشغيلها داخل نفس المشغل
+  youtube_explode_dart: ^2.3.9
+
+  # إبقاء الشاشة مضاءة أثناء المشاهدة
+  wakelock_plus: ^1.2.8
 
 dev_dependencies:
   flutter_test:
