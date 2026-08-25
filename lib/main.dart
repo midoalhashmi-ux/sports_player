@@ -96,7 +96,7 @@ class _PlayerAppState extends State<PlayerApp> {
   }
 
   Future<void> _listenForLinks() async {
-    final initialUri = await _appLinks.getInitialAppLink();
+    final initialUri = await _appLinks.getInitialLink();
     if (initialUri != null) _handleUri(initialUri);
     _linkSub = _appLinks.uriLinkStream.listen(_handleUri, onError: (_) {});
   }
