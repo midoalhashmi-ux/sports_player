@@ -37,12 +37,6 @@ android {
         targetSdk flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
-        // نحصر مكتبات التشغيل الأصلية (libmpv) على المعماريتين الحقيقيتين
-        // لأجهزة أندرويد الفعلية فقط — هذا وحده يقلّل الحجم بشكل كبير جداً
-        // لأن x86/x86_64 غير مستخدمة إلا في المحاكيات.
-        ndk {
-            abiFilters "armeabi-v7a", "arm64-v8a"
-        }
     }
 
     buildTypes {
