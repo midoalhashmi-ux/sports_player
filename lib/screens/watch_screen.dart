@@ -308,11 +308,10 @@ class _WatchScreenState extends State<WatchScreen> {
     if (_savingScreenshot || _state != _LoadState.ready) return;
     setState(() => _savingScreenshot = true);
     try {
-      final file = await _videoController.screenshot(
-        format: VideoScreenshotFormat.png,
+      final bytes = await _player.screenshot(
+        format: 'image/png',
       );
-      if (file == null) throw Exception('فشل التقاط الصورة.');
-      final bytes = await file.readAsBytes();
+      if (bytes == null) throw Exception('فشل التقاط الصورة.');
       if (Platform.isAndroid || Platform.isIOS) {
         final result = await ImageGallerySaverPlus.saveImage(bytes,
             quality: 100, name: 'sports_player_${DateTime.now().millisecondsSinceEpoch}');
