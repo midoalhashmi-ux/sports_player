@@ -31,7 +31,7 @@ dependencies:
 
   # حفظ لقطات الشاشة في المعرض
   path_provider: ^2.1.4
-  image_gallery_saver: ^2.0.3
+  image_gallery_saver_plus: ^3.0.5
 
 dev_dependencies:
   flutter_test:
