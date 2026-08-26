@@ -54,6 +54,12 @@ class _WatchScreenState extends State<WatchScreen> {
   bool _muted = false;
   bool _fullscreen = false;
 
+  // عناصر تحكم إضافية (القسم 2)
+  bool _locked = false;
+  BoxFit _fit = BoxFit.contain;
+  String? _seekFeedback; // 'left' أو 'right' لحظة النقر المزدوج
+  Timer? _seekFeedbackTimer;
+
   StreamSubscription? _playingSub;
   StreamSubscription? _bufferingSub;
   StreamSubscription? _positionSub;
@@ -164,11 +170,14 @@ class _WatchScreenState extends State<WatchScreen> {
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _isPlaying) setState(() => _controlsVisible = false);
+      if (mounted && _isPlaying && !_locked) {
+        setState(() => _controlsVisible = false);
+      }
     });
   }
 
   void _toggleControls() {
+    if (_locked) return;
     setState(() => _controlsVisible = !_controlsVisible);
     if (_controlsVisible) _scheduleHide();
   }
@@ -207,6 +216,41 @@ class _WatchScreenState extends State<WatchScreen> {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     }
+  }
+
+  void _toggleLock() {
+    setState(() => _locked = !_locked);
+    if (!_locked) {
+      setState(() => _controlsVisible = true);
+      _scheduleHide();
+    }
+  }
+
+  void _toggleFit() {
+    setState(
+        () => _fit = _fit == BoxFit.contain ? BoxFit.cover : BoxFit.contain);
+  }
+
+  void _jumpToLive() {
+    if (_duration > Duration.zero) {
+      _player.seek(_duration);
+    }
+    if (!_isPlaying) _player.play();
+    _scheduleHide();
+  }
+
+  void _handleDoubleTapDown(TapDownDetails details) {
+    if (_locked || _state != _LoadState.ready) return;
+    final isLive = _session?.isLive ?? false;
+    if (isLive) return; // النقر المزدوج للتقديم/الترجيع متاح فقط للفيديو العادي
+    final width = MediaQuery.of(context).size.width;
+    final isRight = details.globalPosition.dx > width / 2;
+    _seekBy(Duration(seconds: isRight ? 10 : -10));
+    _seekFeedbackTimer?.cancel();
+    setState(() => _seekFeedback = isRight ? 'right' : 'left');
+    _seekFeedbackTimer = Timer(const Duration(milliseconds: 500), () {
+      if (mounted) setState(() => _seekFeedback = null);
+    });
   }
 
   void _openQualitySheet() {
@@ -265,6 +309,7 @@ class _WatchScreenState extends State<WatchScreen> {
   @override
   void dispose() {
     _hideTimer?.cancel();
+    _seekFeedbackTimer?.cancel();
     _playingSub?.cancel();
     _bufferingSub?.cancel();
     _positionSub?.cancel();
@@ -284,6 +329,7 @@ class _WatchScreenState extends State<WatchScreen> {
       body: SafeArea(
         child: GestureDetector(
           onTap: _toggleControls,
+          onDoubleTapDown: _handleDoubleTapDown,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -291,13 +337,37 @@ class _WatchScreenState extends State<WatchScreen> {
                 Center(
                     child: Video(
                         controller: _videoController,
+                        fit: _fit,
                         controls: NoVideoControls)),
               if (_state == _LoadState.loading) _buildLoading(),
               if (_state == _LoadState.error) _buildError(),
               if (_state == _LoadState.ready && _isBuffering)
                 const Center(
                     child: CircularProgressIndicator(color: Colors.white)),
-              if (_state == _LoadState.ready)
+              if (_seekFeedback != null)
+                Align(
+                  alignment: _seekFeedback == 'right'
+                      ? Alignment.centerRight
+                      : Alignment.centerLeft,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 36),
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: const BoxDecoration(
+                        color: Colors.black45,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        _seekFeedback == 'right'
+                            ? Icons.forward_10
+                            : Icons.replay_10,
+                        color: Colors.white,
+                        size: 36,
+                      ),
+                    ),
+                  ),
+                ),
+              if (_state == _LoadState.ready && !_locked)
                 AnimatedOpacity(
                   opacity: _controlsVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -306,14 +376,25 @@ class _WatchScreenState extends State<WatchScreen> {
                     child: _buildControls(),
                   ),
                 ),
-              Positioned(
-                top: 8,
-                right: 8,
-                child: IconButton(
-                  icon: const Icon(Icons.close, color: Colors.white),
-                  onPressed: () => Navigator.of(context).maybePop(),
+              if (_state == _LoadState.ready && !_locked)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => Navigator.of(context).maybePop(),
+                  ),
                 ),
-              ),
+              if (_state == _LoadState.ready)
+                Positioned(
+                  top: 8,
+                  left: 8,
+                  child: IconButton(
+                    icon: Icon(_locked ? Icons.lock : Icons.lock_open,
+                        color: Colors.white),
+                    onPressed: _toggleLock,
+                  ),
+                ),
             ],
           ),
         ),
@@ -393,7 +474,7 @@ class _WatchScreenState extends State<WatchScreen> {
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 48, 0),
+            padding: const EdgeInsets.fromLTRB(48, 8, 48, 0),
             child: Row(
               children: [
                 if (isLive)
@@ -408,6 +489,17 @@ class _WatchScreenState extends State<WatchScreen> {
                         style: TextStyle(color: Colors.white, fontSize: 12)),
                   ),
                 const Spacer(),
+                if (isLive)
+                  IconButton(
+                    icon: const Icon(Icons.live_tv, color: Colors.white),
+                    tooltip: 'القفز للبث المباشر',
+                    onPressed: _jumpToLive,
+                  ),
+                IconButton(
+                  icon: const Icon(Icons.aspect_ratio, color: Colors.white),
+                  tooltip: 'وضع العرض',
+                  onPressed: _toggleFit,
+                ),
                 IconButton(
                   icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
                       color: Colors.white),
