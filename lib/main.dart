@@ -6,7 +6,10 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 
 import 'firebase_options.dart';
+import 'screens/splash_screen.dart';
 import 'screens/watch_screen.dart';
+
+final navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -80,13 +83,6 @@ class _ErrorApp extends StatelessWidget {
       );
 }
 
-class _PendingPlay {
-  final String? channelId;
-  final String? url;
-  final bool isYoutube;
-  const _PendingPlay({this.channelId, this.url, this.isYoutube = false});
-}
-
 class PlayerApp extends StatefulWidget {
   const PlayerApp({super.key});
   @override
@@ -96,7 +92,6 @@ class PlayerApp extends StatefulWidget {
 class _PlayerAppState extends State<PlayerApp> {
   final _appLinks = AppLinks();
   StreamSubscription<Uri>? _linkSub;
-  _PendingPlay? _pending;
 
   @override
   void initState() {
@@ -120,12 +115,20 @@ class _PlayerAppState extends State<PlayerApp> {
       return;
     }
 
-    setState(() => _pending = _PendingPlay(
+    // نفتح شاشة التشغيل فوق الشاشة الرئيسية (وليس بدلاً منها) — بهذا الشكل
+    // يقدر المستخدم دائماً يغلق/يرجع بدون ما يعلق ويضطر يقفل التطبيق.
+    navigatorKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (_) => WatchScreen(
+          key: ValueKey(channelId ?? url),
           channelId:
               (channelId != null && channelId.isNotEmpty) ? channelId : null,
-          url: (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
-          isYoutube: type == 'youtube',
-        ));
+          externalUrl:
+              (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
+          externalIsYoutube: type == 'youtube',
+        ),
+      ),
+    );
   }
 
   @override
@@ -136,45 +139,13 @@ class _PlayerAppState extends State<PlayerApp> {
 
   @override
   Widget build(BuildContext context) {
-    final pending = _pending;
     return MaterialApp(
+      navigatorKey: navigatorKey,
       title: 'مشغل البث',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       locale: const Locale('ar'),
-      home: pending == null
-          ? const _WaitingForChannelScreen()
-          : WatchScreen(
-              key: ValueKey(pending.channelId ?? pending.url),
-              channelId: pending.channelId,
-              externalUrl: pending.url,
-              externalIsYoutube: pending.isYoutube,
-            ),
+      home: const SplashScreen(),
     );
   }
-}
-
-class _WaitingForChannelScreen extends StatelessWidget {
-  const _WaitingForChannelScreen();
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: const [
-                Icon(Icons.live_tv, size: 56, color: Colors.white54),
-                SizedBox(height: 12),
-                Text(
-                  'افتح قناة من تطبيق المحتوى ليبدأ التشغيل هنا تلقائياً.',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: Colors.white70),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
 }

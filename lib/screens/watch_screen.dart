@@ -16,15 +16,17 @@ class WatchScreen extends StatefulWidget {
   /// معرّف قناة مُدارة من لوحة التحكم (المسار الآمن المعتاد).
   final String? channelId;
 
-  /// رابط خارجي أرسله المستخدم مباشرة (مثلاً من صفحة "شغّل رابط").
+  /// رابط خارجي أرسله المستخدم مباشرة (مثلاً من شاشة "Add URL").
   final String? externalUrl;
   final bool externalIsYoutube;
+  final String? externalUserAgent;
 
   const WatchScreen({
     super.key,
     this.channelId,
     this.externalUrl,
     this.externalIsYoutube = false,
+    this.externalUserAgent,
   });
 
   @override
@@ -40,6 +42,7 @@ class _WatchScreenState extends State<WatchScreen> {
   StreamSession? _session;
   StreamServerOption? _activeServer;
   StreamQuality? _activeQuality;
+  Map<String, String>? _headers;
 
   bool _controlsVisible = true;
   Timer? _hideTimer;
@@ -92,6 +95,11 @@ class _WatchScreenState extends State<WatchScreen> {
   Future<void> _startSession() async {
     setState(() => _state = _LoadState.loading);
 
+    _headers = (widget.externalUserAgent != null &&
+            widget.externalUserAgent!.isNotEmpty)
+        ? {'user-agent': widget.externalUserAgent!}
+        : null;
+
     final StreamSession session;
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
       session = widget.externalIsYoutube
@@ -139,7 +147,7 @@ class _WatchScreenState extends State<WatchScreen> {
       _activeQuality = quality;
     });
     try {
-      await _player.open(Media(quality.url));
+      await _player.open(Media(quality.url, httpHeaders: _headers));
       await _player.play();
       await WakelockPlus.enable();
       if (!mounted) return;
@@ -356,6 +364,12 @@ class _WatchScreenState extends State<WatchScreen> {
                     label: const Text('تغيير السيرفر'),
                   ),
                 ],
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context).maybePop(),
+                  icon: const Icon(Icons.arrow_back),
+                  label: const Text('رجوع'),
+                ),
               ],
             ),
           ],

@@ -26,6 +26,9 @@ dependencies:
   # إبقاء الشاشة مضاءة أثناء المشاهدة
   wakelock_plus: ^1.2.8
 
+  # حفظ الروابط المضافة يدوياً على الجهاز (شاشة "Add URL")
+  shared_preferences: ^2.3.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

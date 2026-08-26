@@ -7,7 +7,10 @@ workflows:
     scripts:
       - name: جلب الحزم
         script: flutter pub get
-      - name: بناء APK
-        script: flutter build apk --release
+      - name: بناء APK منفصل لكل معمارية (لتصغير الحجم)
+        script: flutter build apk --release --split-per-abi
+      # ملاحظة: عند النشر النهائي على Google Play استخدم بدل هذا السطر:
+      # flutter build appbundle --release
+      # لأن جوجل حينها ترسل تلقائياً لكل جهاز فقط الحجم المناسب له.
     artifacts:
       - build/**/outputs/**/*.apk
