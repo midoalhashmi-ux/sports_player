@@ -41,21 +41,8 @@ android {
         versionName flutterVersionName
     }
 
-    // نحصر مكتبات التشغيل الأصلية (libmpv) على المعماريتين الحقيقيتين
-    // لأجهزة أندرويد الفعلية فقط، وننتج APK منفصل لكل معمارية لتصغير الحجم.
-    // x86/x86_64 غير مستخدمة إلا في المحاكيات فتم استبعادها.
-    splits {
-        abi {
-            enable true
-            reset()
-            include "armeabi-v7a", "arm64-v8a"
-            universalApk false
-        }
-    }
-
     buildTypes {
         release {
-            // مؤقتاً نوقّع بمفتاح debug حتى تجهيز مفتاح توقيع حقيقي قبل النشر النهائي على Google Play
             signingConfig signingConfigs.debug
             minifyEnabled true
             shrinkResources true

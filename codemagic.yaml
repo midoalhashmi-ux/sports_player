@@ -1,9 +1,9 @@
 workflows:
   android-workflow:
     name: بناء أندرويد - تطبيق المشغل
-    max_build_duration: 60
+    max_build_duration: 90
     environment:
-      flutter: stable
+      flutter: 3.27.0
     scripts:
       - name: جلب الحزم
         script: flutter pub get
