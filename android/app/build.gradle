@@ -41,7 +41,6 @@ android {
 
     buildTypes {
         release {
-            // مؤقتاً نوقّع بمفتاح debug حتى تجهيز مفتاح توقيع حقيقي قبل النشر النهائي على Google Play
             signingConfig signingConfigs.debug
             minifyEnabled true
             shrinkResources true
