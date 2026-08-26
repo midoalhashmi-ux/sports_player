@@ -8,7 +8,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:image_gallery_saver/image_gallery_saver.dart';
+import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
@@ -314,7 +314,7 @@ class _WatchScreenState extends State<WatchScreen> {
       if (file == null) throw Exception('فشل التقاط الصورة.');
       final bytes = await file.readAsBytes();
       if (Platform.isAndroid || Platform.isIOS) {
-        final result = await ImageGallerySaver.saveImage(bytes,
+        final result = await ImageGallerySaverPlus.saveImage(bytes,
             quality: 100, name: 'sports_player_${DateTime.now().millisecondsSinceEpoch}');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
