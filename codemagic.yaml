@@ -1,0 +1,18 @@
+workflows:
+  android-workflow:
+    name: بناء أندرويد - تطبيق المشغل
+    max_build_duration: 60
+    environment:
+      flutter: stable
+    scripts:
+      - name: مسح كاش Gradle
+        script: |
+          rm -rf ~/.gradle/caches/
+          rm -rf android/.gradle/
+          rm -rf ~/.pub-cache/
+      - name: جلب الحزم
+        script: flutter pub get
+      - name: بناء APK
+        script: flutter build apk --release --android-skip-build-dependency-validation
+    artifacts:
+      - build/**/outputs/**/*.apk

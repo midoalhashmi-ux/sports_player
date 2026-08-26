@@ -1,0 +1,38 @@
+name: sports_player
+description: تطبيق المشغل الآمن لمنظومة البث الرياضي
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  firebase_core: ^2.32.0
+  cloud_firestore: ^4.15.5
+  cloud_functions: ^4.6.8
+  app_links: ^6.3.2
+
+  # محرك تشغيل يدعم كل صيغ الفيديو والبث (HLS, DASH, MP4, RTMP, MKV...) بحجم صغير
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.5
+  media_kit_libs_android_video: ^1.3.6
+
+  # استخراج روابط يوتيوب (فيديو عادي أو بث مباشر) لتشغيلها داخل نفس المشغل
+  youtube_explode_dart: ^2.3.9
+
+  # إبقاء الشاشة مضاءة أثناء المشاهدة
+  wakelock_plus: ^1.2.8
+
+  # حفظ الروابط المضافة يدوياً على الجهاز (شاشة "Add URL")
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
