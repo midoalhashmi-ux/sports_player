@@ -29,6 +29,10 @@ dependencies:
   # حفظ الروابط المضافة يدوياً على الجهاز (شاشة "Add URL")
   shared_preferences: ^2.3.2
 
+  # حفظ لقطات الشاشة في المعرض
+  path_provider: ^2.1.4
+  image_gallery_saver: ^2.0.3
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

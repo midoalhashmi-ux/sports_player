@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:image_gallery_saver/image_gallery_saver.dart';
 
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
@@ -13,10 +17,7 @@ import '../services/youtube_resolver.dart';
 enum _LoadState { loading, error, ready }
 
 class WatchScreen extends StatefulWidget {
-  /// معرّف قناة مُدارة من لوحة التحكم (المسار الآمن المعتاد).
   final String? channelId;
-
-  /// رابط خارجي أرسله المستخدم مباشرة (مثلاً من شاشة "Add URL").
   final String? externalUrl;
   final bool externalIsYoutube;
   final String? externalUserAgent;
@@ -54,17 +55,30 @@ class _WatchScreenState extends State<WatchScreen> {
   bool _muted = false;
   bool _fullscreen = false;
 
-  // عناصر تحكم إضافية (القسم 2)
   bool _locked = false;
   BoxFit _fit = BoxFit.contain;
-  String? _seekFeedback; // 'left' أو 'right' لحظة النقر المزدوج
+  String? _seekFeedback;
   Timer? _seekFeedbackTimer;
+
+  // speed / screenshot
+  double _playbackSpeed = 1.0;
+  bool _savingScreenshot = false;
+  bool _showSpeedSheet = false;
 
   StreamSubscription? _playingSub;
   StreamSubscription? _bufferingSub;
   StreamSubscription? _positionSub;
   StreamSubscription? _durationSub;
   StreamSubscription? _errorSub;
+
+  // swipe
+  Offset? _swipeStart;
+  bool _seekingFromSwipe = false;
+  double _lastBrightness = 1.0;
+  bool _brightnessMode = false;
+
+  static const _swipeThreshold = 28.0;
+  static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
   @override
   void initState() {
@@ -76,6 +90,7 @@ class _WatchScreenState extends State<WatchScreen> {
     _scheduleHide();
   }
 
+  // ---------------------- streams ----------------------
   void _bindPlayerStreams() {
     _playingSub = _player.stream.playing.listen((playing) {
       if (mounted) setState(() => _isPlaying = playing);
@@ -98,6 +113,7 @@ class _WatchScreenState extends State<WatchScreen> {
     });
   }
 
+  // ---------------------- session ----------------------
   Future<void> _startSession() async {
     setState(() => _state = _LoadState.loading);
 
@@ -145,6 +161,7 @@ class _WatchScreenState extends State<WatchScreen> {
     );
   }
 
+  // ---------------------- play ----------------------
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality) async {
     setState(() {
@@ -154,6 +171,7 @@ class _WatchScreenState extends State<WatchScreen> {
     });
     try {
       await _player.open(Media(quality.url, httpHeaders: _headers));
+      await _player.setPlaybackRate(_playbackSpeed);
       await _player.play();
       await WakelockPlus.enable();
       if (!mounted) return;
@@ -167,6 +185,7 @@ class _WatchScreenState extends State<WatchScreen> {
     }
   }
 
+  // ---------------------- controls ----------------------
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 4), () {
@@ -239,10 +258,97 @@ class _WatchScreenState extends State<WatchScreen> {
     _scheduleHide();
   }
 
+  Future<void> _changeSpeed(double speed) async {
+    await _player.setPlaybackRate(speed);
+    setState(() {
+      _playbackSpeed = speed;
+      _showSpeedSheet = false;
+    });
+    _scheduleHide();
+  }
+
+  void _openSpeedSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF141414),
+      builder: (context) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+                child: Text('سرعة التشغيل',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+              ..._speedOptions.map((speed) {
+                final selected = speed == _playbackSpeed;
+                return ListTile(
+                  title: Text(
+                    '${speed}x',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  trailing: selected
+                      ? const Icon(Icons.check, color: Colors.greenAccent)
+                      : null,
+                  onTap: () => _changeSpeed(speed),
+                );
+              }),
+            ],
+          ),
+        );
+      },
+    ).then((_) {
+      if (mounted) setState(() => _showSpeedSheet = false);
+    });
+  }
+
+  // ---------------------- screenshot ----------------------
+  Future<void> _takeScreenshot() async {
+    if (_savingScreenshot || _state != _LoadState.ready) return;
+    setState(() => _savingScreenshot = true);
+    try {
+      final file = await _videoController.screenshot(
+        format: VideoScreenshotFormat.png,
+      );
+      if (file == null) throw Exception('فشل التقاط الصورة.');
+      final bytes = await file.readAsBytes();
+      if (Platform.isAndroid || Platform.isIOS) {
+        final result = await ImageGallerySaver.saveImage(bytes,
+            quality: 100, name: 'sports_player_${DateTime.now().millisecondsSinceEpoch}');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+                content: Text(
+                    result['isSuccess'] == true ? 'تم حفظ الصورة.' : 'تعذر حفظ الصورة.')),
+          );
+        }
+      } else {
+        final dir = await getApplicationDocumentsDirectory();
+        final saved = File('${dir.path}/screenshot_${DateTime.now().millisecondsSinceEpoch}.png');
+        await saved.writeAsBytes(bytes);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('تم حفظ الصورة في:\n${saved.path}')),
+          );
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تعذر التقاط صورة.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _savingScreenshot = false);
+    }
+  }
+
+  // ---------------------- gestures ----------------------
   void _handleDoubleTapDown(TapDownDetails details) {
     if (_locked || _state != _LoadState.ready) return;
     final isLive = _session?.isLive ?? false;
-    if (isLive) return; // النقر المزدوج للتقديم/الترجيع متاح فقط للفيديو العادي
+    if (isLive) return;
     final width = MediaQuery.of(context).size.width;
     final isRight = details.globalPosition.dx > width / 2;
     _seekBy(Duration(seconds: isRight ? 10 : -10));
@@ -253,6 +359,54 @@ class _WatchScreenState extends State<WatchScreen> {
     });
   }
 
+  void _onHorizontalDragStart(DragStartDetails details) {
+    if (_locked || _state != _LoadState.ready) return;
+    final isLive = _session?.isLive ?? false;
+    if (isLive) return;
+    _swipeStart = details.globalPosition;
+    _seekingFromSwipe = false;
+  }
+
+  void _onHorizontalDragUpdate(DragUpdateDetails details) {
+    if (_swipeStart == null || _seekingFromSwipe) return;
+    final delta = details.globalPosition.dx - _swipeStart!.dx;
+    if (delta.abs() > _swipeThreshold) {
+      _seekingFromSwipe = true;
+      final seconds = (delta / _swipeThreshold).round() * 5;
+      _seekBy(Duration(seconds: seconds));
+      _seekFeedbackTimer?.cancel();
+      setState(() => _seekFeedback = delta > 0 ? 'right' : 'left');
+      _seekFeedbackTimer = Timer(const Duration(milliseconds: 600), () {
+        if (mounted) setState(() => _seekFeedback = null);
+      });
+      _swipeStart = details.globalPosition;
+    }
+  }
+
+  void _onHorizontalDragEnd(DragEndDetails details) {
+    _swipeStart = null;
+    _seekingFromSwipe = false;
+  }
+
+  void _onVerticalDragStart(DragStartDetails details) {
+    if (_locked || _state != _LoadState.ready) return;
+    _swipeStart = details.globalPosition;
+    _brightnessMode = details.globalPosition.dx >
+        MediaQuery.of(context).size.width / 2;
+    _lastBrightness =
+        _brightnessMode ? (_muted ? 0 : _volume) : _lastBrightness;
+  }
+
+  void _onVerticalDragUpdate(DragUpdateDetails details) {
+    if (_swipeStart == null || _brightnessMode) return;
+    final height = MediaQuery.of(context).size.height;
+    final delta = (_swipeStart!.dy - details.globalPosition.dy) / height;
+    final newVolume = (_lastBrightness + delta * 100).clamp(0.0, 100.0);
+    _setVolume(newVolume);
+    _scheduleHide();
+  }
+
+  // ---------------------- sheets ----------------------
   void _openQualitySheet() {
     final session = _session;
     if (session == null) return;
@@ -267,7 +421,8 @@ class _WatchScreenState extends State<WatchScreen> {
               if (session.hasMultipleServers) ...[
                 const Padding(
                   padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  child: Text('السيرفر', style: TextStyle(color: Colors.white70)),
+                  child:
+                      Text('السيرفر', style: TextStyle(color: Colors.white70)),
                 ),
                 ...session.servers.map((server) => ListTile(
                       title: Text(server.label,
@@ -285,7 +440,8 @@ class _WatchScreenState extends State<WatchScreen> {
                   _activeServer!.qualities.length > 1) ...[
                 const Padding(
                   padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-                  child: Text('الجودة', style: TextStyle(color: Colors.white70)),
+                  child:
+                      Text('الجودة', style: TextStyle(color: Colors.white70)),
                 ),
                 ..._activeServer!.qualities.map((quality) => ListTile(
                       title: Text(quality.label,
@@ -306,6 +462,7 @@ class _WatchScreenState extends State<WatchScreen> {
     );
   }
 
+  // ---------------------- lifecycle ----------------------
   @override
   void dispose() {
     _hideTimer?.cancel();
@@ -322,6 +479,7 @@ class _WatchScreenState extends State<WatchScreen> {
     super.dispose();
   }
 
+  // ---------------------- build ----------------------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -330,6 +488,11 @@ class _WatchScreenState extends State<WatchScreen> {
         child: GestureDetector(
           onTap: _toggleControls,
           onDoubleTapDown: _handleDoubleTapDown,
+          onHorizontalDragStart: _onHorizontalDragStart,
+          onHorizontalDragUpdate: _onHorizontalDragUpdate,
+          onHorizontalDragEnd: _onHorizontalDragEnd,
+          onVerticalDragStart: _onVerticalDragStart,
+          onVerticalDragUpdate: _onVerticalDragUpdate,
           child: Stack(
             fit: StackFit.expand,
             children: [
@@ -376,7 +539,7 @@ class _WatchScreenState extends State<WatchScreen> {
                     child: _buildControls(),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_locked)
+              if (_state == _LoadState.ready)
                 Positioned(
                   top: 8,
                   right: 8,
@@ -393,6 +556,24 @@ class _WatchScreenState extends State<WatchScreen> {
                     icon: Icon(_locked ? Icons.lock : Icons.lock_open,
                         color: Colors.white),
                     onPressed: _toggleLock,
+                  ),
+                ),
+              // speed badge
+              if (_state == _LoadState.ready && _playbackSpeed != 1.0)
+                Positioned(
+                  top: 12,
+                  left: 56,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      '${_playbackSpeed}x',
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
                   ),
                 ),
             ],
@@ -523,6 +704,22 @@ class _WatchScreenState extends State<WatchScreen> {
                     icon: const Icon(Icons.hd, color: Colors.white),
                     onPressed: _openQualitySheet,
                   ),
+                IconButton(
+                  icon: const Icon(Icons.speed, color: Colors.white),
+                  tooltip: 'سرعة التشغيل',
+                  onPressed: _openSpeedSheet,
+                ),
+                IconButton(
+                  icon: _savingScreenshot
+                      ? const SizedBox(
+                          height: 20,
+                          width: 20,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.camera_alt, color: Colors.white),
+                  tooltip: 'التقاط صورة',
+                  onPressed: _savingScreenshot ? null : _takeScreenshot,
+                ),
               ],
             ),
           ),
@@ -590,7 +787,9 @@ class _WatchScreenState extends State<WatchScreen> {
                   const Spacer(),
                 IconButton(
                   icon: Icon(
-                      _fullscreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                      _fullscreen
+                          ? Icons.fullscreen_exit
+                          : Icons.fullscreen,
                       color: Colors.white),
                   onPressed: _toggleFullscreen,
                 ),
