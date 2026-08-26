@@ -171,7 +171,7 @@ class _WatchScreenState extends State<WatchScreen> {
     });
     try {
       await _player.open(Media(quality.url, httpHeaders: _headers));
-      await _player.setPlaybackRate(_playbackSpeed);
+      await _player.setRate(_playbackSpeed);
       await _player.play();
       await WakelockPlus.enable();
       if (!mounted) return;
@@ -259,7 +259,7 @@ class _WatchScreenState extends State<WatchScreen> {
   }
 
   Future<void> _changeSpeed(double speed) async {
-    await _player.setPlaybackRate(speed);
+    await _player.setRate(speed);
     setState(() {
       _playbackSpeed = speed;
       _showSpeedSheet = false;
