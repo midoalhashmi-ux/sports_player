@@ -24,6 +24,7 @@ class _BootApp extends StatefulWidget {
 class _BootAppState extends State<_BootApp> {
   String? _error;
   bool _ready = false;
+  Uri? _initialUri;
 
   @override
   void initState() {
@@ -33,9 +34,23 @@ class _BootAppState extends State<_BootApp> {
 
   Future<void> _initialize() async {
     try {
-      await Firebase.initializeApp(
-          options: DefaultFirebaseOptions.currentPlatform);
-      if (mounted) setState(() => _ready = true);
+      // نبدأ تهيئة Firebase وفي نفس الوقت نتحقق هل التطبيق فُتح عبر رابط
+      // قادم من تطبيق المحتوى — قبل بناء أي واجهة. بهذا الشكل نقرر من أول
+      // لحظة: هل نعرض شاشة المشاهدة مباشرة كشاشة وحيدة (بدون شاشة بداية
+      // أو رئيسية خلفها إطلاقاً)، أو نمر بمسار شاشة البداية العادي.
+      final firebaseFuture =
+          Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+      final linkFuture = AppLinks().getInitialLink();
+
+      await firebaseFuture;
+      final initialUri = await linkFuture;
+
+      if (mounted) {
+        setState(() {
+          _ready = true;
+          _initialUri = initialUri;
+        });
+      }
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
@@ -45,7 +60,7 @@ class _BootAppState extends State<_BootApp> {
   Widget build(BuildContext context) {
     if (_error != null) return _ErrorApp(error: _error!);
     if (!_ready) return const _LoadingApp();
-    return const PlayerApp();
+    return PlayerApp(initialUri: _initialUri);
   }
 }
 
@@ -82,7 +97,8 @@ class _ErrorApp extends StatelessWidget {
 }
 
 class PlayerApp extends StatefulWidget {
-  const PlayerApp({super.key});
+  final Uri? initialUri;
+  const PlayerApp({super.key, this.initialUri});
   @override
   State<PlayerApp> createState() => _PlayerAppState();
 }
@@ -94,38 +110,44 @@ class _PlayerAppState extends State<PlayerApp> {
   @override
   void initState() {
     super.initState();
-    _listenForLinks();
+    // نستمع فقط للروابط التي تصل أثناء عمل التطبيق (رابط الإقلاع الأول
+    // تمت معالجته مسبقاً في _BootAppState قبل بناء الواجهة).
+    _linkSub = _appLinks.uriLinkStream.listen(_handleRuntimeUri, onError: (_) {});
   }
 
-  Future<void> _listenForLinks() async {
-    final initialUri = await _appLinks.getInitialLink();
-    if (initialUri != null) _handleUri(initialUri);
-    _linkSub = _appLinks.uriLinkStream.listen(_handleUri, onError: (_) {});
-  }
-
-  void _handleUri(Uri uri) {
+  // يبني شاشة المشاهدة من رابط، أو null إن لم يكن الرابط يحمل بيانات بث.
+  Widget? _watchScreenForUri(Uri uri) {
     final channelId = uri.queryParameters['channelId'];
     final url = uri.queryParameters['url'];
     final type = uri.queryParameters['type'];
 
     if ((channelId == null || channelId.isEmpty) &&
         (url == null || url.isEmpty)) {
-      return;
+      return null;
     }
 
-    // نفتح شاشة التشغيل فوق الشاشة الرئيسية (وليس بدلاً منها) — بهذا الشكل
-    // يقدر المستخدم دائماً يغلق/يرجع بدون ما يعلق ويضطر يقفل التطبيق.
-    navigatorKey.currentState?.push(
-      MaterialPageRoute(
-        builder: (_) => WatchScreen(
-          key: ValueKey(channelId ?? url),
-          channelId:
-              (channelId != null && channelId.isNotEmpty) ? channelId : null,
-          externalUrl:
-              (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
-          externalIsYoutube: type == 'youtube',
-        ),
-      ),
+    return WatchScreen(
+      key: ValueKey(channelId ?? url),
+      channelId:
+          (channelId != null && channelId.isNotEmpty) ? channelId : null,
+      externalUrl:
+          (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
+      externalIsYoutube: type == 'youtube',
+    );
+  }
+
+  void _handleRuntimeUri(Uri uri) {
+    final screen = _watchScreenForUri(uri);
+    if (screen == null) return;
+
+    // نفرّغ المكدس بالكامل ونجعل شاشة المشاهدة هي الشاشة الوحيدة — تماماً
+    // مثل حالة فتح التطبيق مباشرة عبر رابط. بهذا الشكل يبقى زر الخروج
+    // متسقاً دائماً: يغلق تطبيق المشغل بالكامل ويرجع المستخدم لتطبيق
+    // المحتوى، بدل ما "يعلّق" على شاشة داخلية للمشغل لم يكن يفترض بها
+    // الظهور أصلاً.
+    navigatorKey.currentState?.pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => screen),
+      (route) => false,
     );
   }
 
@@ -137,13 +159,20 @@ class _PlayerAppState extends State<PlayerApp> {
 
   @override
   Widget build(BuildContext context) {
+    final initialUri = widget.initialUri;
+    final initialWatchScreen =
+        initialUri != null ? _watchScreenForUri(initialUri) : null;
+
     return MaterialApp(
       navigatorKey: navigatorKey,
       title: 'مشغل البث',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       locale: const Locale('ar'),
-      home: const SplashScreen(),
+      // إذا فُتح التطبيق عبر رابط من تطبيق المحتوى، شاشة المشاهدة هي
+      // الشاشة الوحيدة من الأساس (بدون شاشة بداية/رئيسية خلفها). غير ذلك،
+      // نمر بمسار شاشة البداية العادي (تصفح داخلي للمشغل).
+      home: initialWatchScreen ?? const SplashScreen(),
     );
   }
 }

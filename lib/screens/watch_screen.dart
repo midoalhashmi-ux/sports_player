@@ -246,6 +246,19 @@ class _WatchScreenState extends State<WatchScreen> {
     }
   }
 
+  // نخرج من شاشة المشاهدة: لو فيه شاشة سابقة على المكدس نرجع لها عادي،
+  // ولو ما فيه (لأن التطبيق فُتح عبر رابط من تطبيق المحتوى وشاشة المشاهدة
+  // هي الشاشة الوحيدة) نغلق تطبيق المشغل بالكامل ونرجع المستخدم مباشرة
+  // لتطبيق المحتوى، بدل ما يعلّق على شاشة داخلية فارغة بالمشغل.
+  void _exit() {
+    final navigator = Navigator.of(context);
+    if (navigator.canPop()) {
+      navigator.pop();
+    } else {
+      SystemNavigator.pop();
+    }
+  }
+
   void _toggleLock() {
     setState(() => _locked = !_locked);
     if (!_locked) {
@@ -551,7 +564,7 @@ class _WatchScreenState extends State<WatchScreen> {
                   right: 8,
                   child: IconButton(
                     icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(context).maybePop(),
+                    onPressed: _exit,
                   ),
                 ),
               if (_state == _LoadState.ready)
@@ -655,7 +668,7 @@ class _WatchScreenState extends State<WatchScreen> {
                 ],
                 const SizedBox(width: 8),
                 OutlinedButton.icon(
-                  onPressed: () => Navigator.of(context).maybePop(),
+                  onPressed: _exit,
                   icon: const Icon(Icons.arrow_back),
                   label: const Text('رجوع'),
                 ),
