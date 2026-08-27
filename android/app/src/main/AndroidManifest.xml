@@ -32,5 +32,12 @@
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
+
+        <!-- معرّف تطبيق AdMob — هذا معرّف اختبار رسمي من Google، آمن للبناء
+             والتجربة الآن. قبل النشر النهائي على المتجر، استبدله بمعرّف
+             تطبيقك الحقيقي من حساب AdMob (Apps -> App settings -> App ID). -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713"/>
     </application>
 </manifest>

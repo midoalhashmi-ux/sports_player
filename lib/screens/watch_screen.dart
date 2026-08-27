@@ -10,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
+import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/youtube_resolver.dart';
@@ -77,8 +78,13 @@ class _WatchScreenState extends State<WatchScreen> {
   @override
   void initState() {
     super.initState();
-    _startSession();
     _scheduleHide();
+    // نعرض الإعلان البيني أولاً (إن وجد)، ولا نبدأ تحميل/تشغيل البث إلا
+    // بعد إغلاقه — بهذا الشكل لا يشتغل صوت أو صورة البث خلف الإعلان
+    // إطلاقاً.
+    AdService.instance.showInterstitialThenProceed(() {
+      if (mounted) _startSession();
+    });
   }
 
   // ---------------------- player listener ----------------------
