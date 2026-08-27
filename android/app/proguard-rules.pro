@@ -1,16 +1,13 @@
-# Flutter MediaKit + mpv
--keep class com.google.android.exoplayer2.** { *; }
--keep class io.github.dalton.** { *; }
--keep class xyz.ian.media.** { *; }
+# Flutter video_player (يعتمد داخلياً على AndroidX Media3 / ExoPlayer)
+-keep class androidx.media3.** { *; }
+-dontwarn androidx.media3.**
 
 # Firebase
 -keep class com.google.firebase.** { *; }
 -keep class io.flutter.plugins.firebase.** { *; }
 
 # App Links
--keep class dev.[*].links.** { *; }
+-keep class com.llfbandit.app_links.** { *; }
 
 # Obfuscation
--dontwarn com.google.android.exoplayer2.**
--dontwarn io.github.dalton.**
--dontwarn xyz.ian.media.**
+-dontwarn androidx.media3.**

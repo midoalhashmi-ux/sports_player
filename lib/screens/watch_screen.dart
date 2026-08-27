@@ -589,8 +589,8 @@ class _WatchScreenState extends State<WatchScreen> {
       return const SizedBox.shrink();
     }
     final size = controller.value.size;
-    final width = size.width == 0 ? 16 : size.width;
-    final height = size.height == 0 ? 9 : size.height;
+    final double width = size.width == 0 ? 16.0 : size.width;
+    final double height = size.height == 0 ? 9.0 : size.height;
     return RepaintBoundary(
       key: _videoBoundaryKey,
       child: FittedBox(
