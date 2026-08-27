@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/scheduler.dart';
-import 'package:media_kit/media_kit.dart';
-import 'package:media_kit_video/media_kit_video.dart';
+import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
@@ -35,8 +35,8 @@ class WatchScreen extends StatefulWidget {
 }
 
 class _WatchScreenState extends State<WatchScreen> {
-  late final Player _player;
-  late final VideoController _videoController;
+  VideoPlayerController? _controller;
+  final GlobalKey _videoBoundaryKey = GlobalKey();
 
   _LoadState _state = _LoadState.loading;
   String _errorMessage = '';
@@ -65,12 +65,6 @@ class _WatchScreenState extends State<WatchScreen> {
   bool _savingScreenshot = false;
   bool _showSpeedSheet = false;
 
-  StreamSubscription? _playingSub;
-  StreamSubscription? _bufferingSub;
-  StreamSubscription? _positionSub;
-  StreamSubscription? _durationSub;
-  StreamSubscription? _errorSub;
-
   // swipe
   Offset? _swipeStart;
   bool _seekingFromSwipe = false;
@@ -83,33 +77,27 @@ class _WatchScreenState extends State<WatchScreen> {
   @override
   void initState() {
     super.initState();
-    _player = Player();
-    _videoController = VideoController(_player);
-    _bindPlayerStreams();
     _startSession();
     _scheduleHide();
   }
 
-  // ---------------------- streams ----------------------
-  void _bindPlayerStreams() {
-    _playingSub = _player.stream.playing.listen((playing) {
-      if (mounted) setState(() => _isPlaying = playing);
-    });
-    _bufferingSub = _player.stream.buffering.listen((buffering) {
-      if (mounted) setState(() => _isBuffering = buffering);
-    });
-    _positionSub = _player.stream.position.listen((position) {
-      if (mounted) setState(() => _position = position);
-    });
-    _durationSub = _player.stream.duration.listen((duration) {
-      if (mounted) setState(() => _duration = duration);
-    });
-    _errorSub = _player.stream.error.listen((error) {
-      if (!mounted) return;
+  // ---------------------- player listener ----------------------
+  void _videoListener() {
+    final controller = _controller;
+    if (!mounted || controller == null) return;
+    final value = controller.value;
+    if (value.hasError) {
       setState(() {
         _state = _LoadState.error;
         _errorMessage = 'تعذر تشغيل رابط البث. جرّب مرة أخرى أو غيّر السيرفر.';
       });
+      return;
+    }
+    setState(() {
+      _isPlaying = value.isPlaying;
+      _isBuffering = value.isBuffering;
+      _position = value.position;
+      _duration = value.duration;
     });
   }
 
@@ -170,9 +158,20 @@ class _WatchScreenState extends State<WatchScreen> {
       _activeQuality = quality;
     });
     try {
-      await _player.open(Media(quality.url, httpHeaders: _headers));
-      await _player.setRate(_playbackSpeed);
-      await _player.play();
+      final oldController = _controller;
+      oldController?.removeListener(_videoListener);
+      await oldController?.dispose();
+
+      final newController = VideoPlayerController.networkUrl(
+        Uri.parse(quality.url),
+        httpHeaders: _headers ?? const {},
+      );
+      _controller = newController;
+      newController.addListener(_videoListener);
+      await newController.initialize();
+      await newController.setPlaybackSpeed(_playbackSpeed);
+      await newController.setVolume(_muted ? 0 : _volume / 100);
+      await newController.play();
       await WakelockPlus.enable();
       if (!mounted) return;
       setState(() => _state = _LoadState.ready);
@@ -202,19 +201,23 @@ class _WatchScreenState extends State<WatchScreen> {
   }
 
   void _togglePlay() {
-    _isPlaying ? _player.pause() : _player.play();
+    final controller = _controller;
+    if (controller == null) return;
+    _isPlaying ? controller.pause() : controller.play();
     _scheduleHide();
   }
 
   void _seekBy(Duration delta) {
+    final controller = _controller;
+    if (controller == null) return;
     final target = _position + delta;
-    _player.seek(target < Duration.zero ? Duration.zero : target);
+    controller.seekTo(target < Duration.zero ? Duration.zero : target);
     _scheduleHide();
   }
 
   void _toggleMute() {
     setState(() => _muted = !_muted);
-    _player.setVolume(_muted ? 0 : _volume);
+    _controller?.setVolume(_muted ? 0 : _volume / 100);
   }
 
   void _setVolume(double value) {
@@ -222,7 +225,7 @@ class _WatchScreenState extends State<WatchScreen> {
       _volume = value;
       _muted = value == 0;
     });
-    _player.setVolume(value);
+    _controller?.setVolume(_muted ? 0 : value / 100);
   }
 
   Future<void> _toggleFullscreen() async {
@@ -251,15 +254,17 @@ class _WatchScreenState extends State<WatchScreen> {
   }
 
   void _jumpToLive() {
+    final controller = _controller;
+    if (controller == null) return;
     if (_duration > Duration.zero) {
-      _player.seek(_duration);
+      controller.seekTo(_duration);
     }
-    if (!_isPlaying) _player.play();
+    if (!_isPlaying) controller.play();
     _scheduleHide();
   }
 
   Future<void> _changeSpeed(double speed) async {
-    await _player.setRate(speed);
+    await _controller?.setPlaybackSpeed(speed);
     setState(() {
       _playbackSpeed = speed;
       _showSpeedSheet = false;
@@ -308,10 +313,15 @@ class _WatchScreenState extends State<WatchScreen> {
     if (_savingScreenshot || _state != _LoadState.ready) return;
     setState(() => _savingScreenshot = true);
     try {
-      final bytes = await _player.screenshot(
-        format: 'image/png',
-      );
-      if (bytes == null) throw Exception('فشل التقاط الصورة.');
+      final boundaryContext = _videoBoundaryKey.currentContext;
+      if (boundaryContext == null) throw Exception('فشل التقاط الصورة.');
+      final boundary =
+          boundaryContext.findRenderObject() as RenderRepaintBoundary;
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      final ByteData? byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) throw Exception('فشل التقاط الصورة.');
+      final bytes = byteData.buffer.asUint8List();
       if (Platform.isAndroid || Platform.isIOS) {
         final result = await ImageGallerySaverPlus.saveImage(bytes,
             quality: 100, name: 'sports_player_${DateTime.now().millisecondsSinceEpoch}');
@@ -466,13 +476,9 @@ class _WatchScreenState extends State<WatchScreen> {
   void dispose() {
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
-    _playingSub?.cancel();
-    _bufferingSub?.cancel();
-    _positionSub?.cancel();
-    _durationSub?.cancel();
-    _errorSub?.cancel();
+    _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
-    _player.dispose();
+    _controller?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
@@ -495,12 +501,7 @@ class _WatchScreenState extends State<WatchScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              if (_state == _LoadState.ready)
-                Center(
-                    child: Video(
-                        controller: _videoController,
-                        fit: _fit,
-                        controls: NoVideoControls)),
+              if (_state == _LoadState.ready) Center(child: _buildVideo()),
               if (_state == _LoadState.loading) _buildLoading(),
               if (_state == _LoadState.error) _buildError(),
               if (_state == _LoadState.ready && _isBuffering)
@@ -577,6 +578,27 @@ class _WatchScreenState extends State<WatchScreen> {
                 ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideo() {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+    final size = controller.value.size;
+    final width = size.width == 0 ? 16 : size.width;
+    final height = size.height == 0 ? 9 : size.height;
+    return RepaintBoundary(
+      key: _videoBoundaryKey,
+      child: FittedBox(
+        fit: _fit,
+        child: SizedBox(
+          width: width,
+          height: height,
+          child: VideoPlayer(controller),
         ),
       ),
     );
@@ -775,8 +797,8 @@ class _WatchScreenState extends State<WatchScreen> {
                           : _duration.inMilliseconds.toDouble(),
                       activeColor: Colors.redAccent,
                       inactiveColor: Colors.white24,
-                      onChanged: (value) =>
-                          _player.seek(Duration(milliseconds: value.toInt())),
+                      onChanged: (value) => _controller
+                          ?.seekTo(Duration(milliseconds: value.toInt())),
                     ),
                   ),
                   Text(_formatDuration(_duration),
