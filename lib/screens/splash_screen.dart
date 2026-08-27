@@ -17,6 +17,14 @@ class _SplashScreenState extends State<SplashScreen> {
     super.initState();
     Timer(const Duration(seconds: 2), () {
       if (!mounted) return;
+
+      // إذا فُتحت شاشة أخرى فوق شاشة البداية في هذه الأثناء (مثلاً شاشة
+      // المشاهدة بسبب رابط قادم من تطبيق المحتوى)، فإن هذه الشاشة لم تعد
+      // "الحالية" على المكدس. في هذه الحالة يجب ألا ننتقل إطلاقاً، وإلا
+      // سنستبدل الشاشة الظاهرة فوقها بشاشة "إضافة روابط" خطأً.
+      final route = ModalRoute.of(context);
+      if (route != null && !route.isCurrent) return;
+
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const HomeScreen()),
       );
