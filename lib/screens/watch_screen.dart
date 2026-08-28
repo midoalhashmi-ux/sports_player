@@ -75,9 +75,34 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   static const _swipeThreshold = 28.0;
   static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
+  // ---------------------------------------------------------------------
+  // إصلاح جذري لمشكلة "صوت البث خلف الإعلان": يحدث هذا تحديداً عند اختيار
+  // قناة جديدة والمشغل يعمل بالفعل في الخلفية (المستخدم فتح قناة، رجع
+  // للتطبيق الرئيسي، ثم اختار قناة أخرى). في هذه الحالة تصل الشاشة الجديدة
+  // عبر رابط عميق وتستبدل المكدس، لكن شاشة المشاهدة *القديمة* تبقى حيّة
+  // (وصوتها يعمل) طوال مدة أنيميشن الانتقال قبل أن يُستدعى dispose() لها —
+  // وخلال هذه اللحظة بالذات يظهر إعلان الشاشة الجديدة فيبدو الصوت القديم
+  // "خلف" الإعلان. نحتفظ بمرجع ثابت لآخر شاشة مشاهدة نشطة، ونُسكتها فوراً
+  // (بشكل متزامن، قبل أي إعلان أو تحميل) بمجرد أن تبدأ شاشة جديدة.
+  static _WatchScreenState? _activeInstance;
+
+  void _forceSilenceInstantly() {
+    _hideTimer?.cancel();
+    _seekFeedbackTimer?.cancel();
+    final controller = _controller;
+    if (controller != null && controller.value.isInitialized) {
+      controller.setVolume(0);
+      controller.pause();
+    }
+  }
+
   @override
   void initState() {
     super.initState();
+    // أول شيء إطلاقاً قبل أي إعلان أو تحميل: نُسكت أي شاشة مشاهدة سابقة
+    // ما زالت حيّة، حتى لا يتداخل صوتها مع الإعلان الجديد.
+    _activeInstance?._forceSilenceInstantly();
+    _activeInstance = this;
     // نراقب دورة حياة التطبيق لنوقف الصوت/الفيديو فوراً إذا خرج المستخدم
     // من التطبيق (زر الرئيسية، تبديل تطبيق، إغلاقه من الأخير...) بدل ما
     // يستمر البث يشتغل بالخلفية بدون أي واجهة ظاهرة له.
@@ -522,6 +547,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();

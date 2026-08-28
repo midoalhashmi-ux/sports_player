@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 import 'firebase_options.dart';
 import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
-import 'services/ad_service.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -44,16 +43,6 @@ class _BootAppState extends State<_BootApp> {
       final linkFuture = AppLinks().getInitialLink();
 
       await firebaseFuture;
-
-      // نبدأ تحميل الإعلان البيني من هنا — أول لحظة ممكنة بعد جاهزية
-      // Firebase — بدل انتظار شاشة البداية (HomeScreen). هذا مهم خصوصاً
-      // عند فتح التطبيق مباشرة عبر رابط من تطبيق المحتوى (Deep Link)،
-      // لأن شاشة المشاهدة (WatchScreen) تكون حينها أول شاشة تُبنى إطلاقاً
-      // ولا تمر أبداً بـ HomeScreen. لا ننتظر (await) هذا الاستدعاء حتى لا
-      // نؤخر إقلاع التطبيق — هو تحميل بالخلفية فقط، ويحمي بنفسه من
-      // الاستدعاء المكرر.
-      unawaited(AdService.instance.initialize());
-
       final initialUri = await linkFuture;
 
       if (mounted) {
@@ -156,8 +145,15 @@ class _PlayerAppState extends State<PlayerApp> {
     // متسقاً دائماً: يغلق تطبيق المشغل بالكامل ويرجع المستخدم لتطبيق
     // المحتوى، بدل ما "يعلّق" على شاشة داخلية للمشغل لم يكن يفترض بها
     // الظهور أصلاً.
+    // نستخدم انتقالاً فورياً بلا أنيميشن (بدل MaterialPageRoute الافتراضي)
+    // حتى لا تبقى شاشة المشاهدة القديمة ظاهرة/مسموعة خلال مدة الأنيميشن
+    // فوق الشاشة الجديدة عند تبديل القناة والمشغل يعمل بالفعل في الخلفية.
     navigatorKey.currentState?.pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => screen),
+      PageRouteBuilder(
+        pageBuilder: (_, __, ___) => screen,
+        transitionDuration: Duration.zero,
+        reverseTransitionDuration: Duration.zero,
+      ),
       (route) => false,
     );
   }
