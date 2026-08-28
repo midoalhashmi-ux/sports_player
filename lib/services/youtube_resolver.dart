@@ -66,12 +66,43 @@ class YoutubeResolver {
         );
       }
 
-      final manifest = await yt.videos.streamsClient.getManifest(id);
+      // نطلب أكثر من "عميل" يوتيوب معاً (وليس العميل الافتراضي فقط) — بعض
+      // الفيديوهات ترفض تسليم الروابط لعميل معيّن أو تتطلب فك تشفير توقيع
+      // (signature) يفشل أحياناً مع العميل الافتراضي وحده. هذا يطابق توصية
+      // مكتبة youtube_explode_dart نفسها لزيادة نسبة نجاح الاستخراج.
+      final manifest = await yt.videos.streamsClient.getManifest(
+        id,
+        ytClients: const [
+          YoutubeApiClient.safari,
+          YoutubeApiClient.androidVr,
+          YoutubeApiClient.ios,
+        ],
+      );
       final muxed = manifest.muxed.toList()
         ..sort((a, b) => b.videoQuality.index.compareTo(a.videoQuality.index));
 
       if (muxed.isEmpty) {
-        return StreamSession.failure('لا توجد جودات متاحة لهذا الفيديو.');
+        // لا توجد صيغة واحدة تجمع الصورة والصوت معاً — هذا شائع في
+        // الفيديوهات الحديثة (يوتيوب توقف عملياً عن توفير muxed بجودة
+        // أعلى من 360p لكثير من الفيديوهات). نحاول كحل أخير أي بث HLS
+        // متاح لهذا الفيديو، لأن مشغلنا (video_player) يدعم HLS مباشرة
+        // بنفس طريقة الرابط المفرد تماماً مثل muxed.
+        try {
+          final hlsUrl = await yt.videos.streamsClient.getHttpLiveStreamUrl(id);
+          return StreamSession.success(
+            kind: StreamKind.hls,
+            isLive: false,
+            servers: [
+              StreamServerOption(
+                label: 'يوتيوب',
+                qualities: [StreamQuality(label: 'تلقائي', url: hlsUrl)],
+              ),
+            ],
+          );
+        } catch (_) {
+          return StreamSession.failure(
+              'هذا الفيديو لا يوفر صيغة تشغيل مباشرة مدعومة (يوتيوب لا يوفر رابطاً مدمجاً للصوت والصورة لبعض الفيديوهات الحديثة).');
+        }
       }
 
       return StreamSession.success(
@@ -89,7 +120,12 @@ class YoutubeResolver {
           ),
         ],
       );
-    } catch (_) {
+    } catch (error, stackTrace) {
+      // نسجّل الخطأ الحقيقي في سجلات التطبيق (تظهر في adb logcat / سجلات
+      // الأعطال) بدل ابتلاعه بصمت — بدون هذا يستحيل تشخيص أي فيديو تحديداً
+      // يفشل ولماذا.
+      // ignore: avoid_print
+      print('[YoutubeResolver] فشل استخراج الفيديو $videoId: $error\n$stackTrace');
       return StreamSession.failure(
           'تعذر تحميل فيديو يوتيوب. قد يكون خاصاً أو محذوفاً أو غير متاح في منطقتك.');
     } finally {
