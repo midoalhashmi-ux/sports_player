@@ -23,6 +23,7 @@ class AdService {
   static const _testBannerId = 'ca-app-pub-3940256099942544/6300978111';
 
   bool _initialized = false;
+  Future<void>? _initializing;
   bool _adsEnabled = true;
   String _interstitialAdUnitId = _testInterstitialId;
   String _bannerAdUnitId = _testBannerId;
@@ -35,18 +36,28 @@ class AdService {
 
   /// يهيّئ SDK ويجلب إعدادات الإعلانات من Firestore. استدعِها مرة واحدة
   /// عند بدء التطبيق (قبل أول استخدام لأي إعلان).
-  Future<void> initialize() async {
-    if (_initialized) return;
-    _initialized = true;
+  Future<void> initialize() {
+    // قد يُستدعى هذا من أكثر من مكان (main.dart عند الإقلاع، وHomeScreen)
+    // — نرجّع نفس الـ Future الجاري بدل تشغيل تهيئة ثانية متوازية تتسبب
+    // بحالات سباق (Race Conditions) غير متوقعة.
+    if (_initializing != null) return _initializing!;
+    if (_initialized) return Future.value();
+    _initializing = _doInitialize();
+    return _initializing!;
+  }
+
+  Future<void> _doInitialize() async {
     try {
       await MobileAds.instance.initialize();
     } catch (_) {
       // فشل تهيئة SDK (مثلاً بدون إنترنت) — نكمل بدون إعلانات بدل تعطيل
       // التطبيق كاملاً.
       _adsEnabled = false;
+      _initialized = true;
       return;
     }
     await _fetchConfig();
+    _initialized = true;
     if (_adsEnabled) _preloadInterstitial();
   }
 
@@ -97,14 +108,25 @@ class AdService {
   /// (البث لا يبدأ تحميله أو تشغيله إلا بعد استدعاء onComplete).
   Future<void> showInterstitialThenProceed(
     void Function() onComplete, {
-    Duration maxWait = const Duration(seconds: 4),
+    Duration maxWait = const Duration(seconds: 8),
   }) async {
-    if (!_initialized) await initialize();
+    // لو الاستدعاء الأول لـ initialize() ما زال شغّالاً (مثلاً بدأ من
+    // main.dart قبل قليل عند فتح التطبيق عبر رابط مباشرة) ننتظره بدل ما
+    // نبدأ تهيئة ثانية متوازية معه.
+    if (_initializing != null) {
+      await _initializing;
+    } else if (!_initialized) {
+      await initialize();
+    }
 
     if (!_adsEnabled) {
       onComplete();
       return;
     }
+
+    // لو التحميل ما بدأ أصلاً لأي سبب (مثلاً initialize() فشل بصمت أو لم
+    // يُستدعَ من قبل)، نبدأه الآن قبل الدخول لحلقة الانتظار.
+    _preloadInterstitial();
 
     final deadline = DateTime.now().add(maxWait);
     while (_interstitialAd == null &&
