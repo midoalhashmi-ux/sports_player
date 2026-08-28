@@ -12,7 +12,6 @@ dependencies:
   cupertino_icons: ^1.0.6
   firebase_core: ^2.32.0
   cloud_firestore: ^4.15.5
-  cloud_functions: ^4.6.8
   app_links: ^6.3.2
 
   # محرك تشغيل يدعم كل صيغ الفيديو والبث (HLS, DASH, MP4, RTMP, MKV...) بحجم صغير

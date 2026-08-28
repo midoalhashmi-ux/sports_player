@@ -5,7 +5,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
-import 'screens/splash_screen.dart';
+import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -165,14 +165,15 @@ class _PlayerAppState extends State<PlayerApp> {
 
     return MaterialApp(
       navigatorKey: navigatorKey,
-      title: 'مشغل البث',
+      title: 'BinSheikh Player',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(useMaterial3: true),
       locale: const Locale('ar'),
-      // إذا فُتح التطبيق عبر رابط من تطبيق المحتوى، شاشة المشاهدة هي
-      // الشاشة الوحيدة من الأساس (بدون شاشة بداية/رئيسية خلفها). غير ذلك،
-      // نمر بمسار شاشة البداية العادي (تصفح داخلي للمشغل).
-      home: initialWatchScreen ?? const SplashScreen(),
+      // لا توجد شاشة بداية (Splash) في تطبيق المشغل إطلاقاً — شاشة
+      // البداية موجودة فقط في التطبيق العادي (BinSheikh). إذا فُتح
+      // المشغل عبر رابط من تطبيق المحتوى، شاشة المشاهدة هي الشاشة
+      // الوحيدة مباشرة، وإلا يذهب مباشرة لشاشة التصفح الداخلية للمشغل.
+      home: initialWatchScreen ?? const HomeScreen(),
     );
   }
 }

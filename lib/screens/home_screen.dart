@@ -118,7 +118,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _shareApp() {
-    Share.share('جرّب مشغل البث الرياضي:\n$_storeUrl');
+    Share.share('جرّب BinSheikh Player:\n$_storeUrl');
   }
 
   Future<void> _rateApp() async {
@@ -130,7 +130,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('مشغل البث الرياضي'),
+        title: const Text('BinSheikh Player'),
       ),
       drawer: _buildDrawer(),
       body: Column(
@@ -213,7 +213,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   Icon(Icons.live_tv, size: 40, color: Colors.white),
                   SizedBox(height: 8),
-                  Text('مشغل البث الرياضي',
+                  Text('BinSheikh Player',
                       style: TextStyle(color: Colors.white, fontSize: 18)),
                 ],
               ),

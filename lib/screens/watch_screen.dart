@@ -35,7 +35,7 @@ class WatchScreen extends StatefulWidget {
   State<WatchScreen> createState() => _WatchScreenState();
 }
 
-class _WatchScreenState extends State<WatchScreen> {
+class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   VideoPlayerController? _controller;
   final GlobalKey _videoBoundaryKey = GlobalKey();
 
@@ -78,6 +78,10 @@ class _WatchScreenState extends State<WatchScreen> {
   @override
   void initState() {
     super.initState();
+    // نراقب دورة حياة التطبيق لنوقف الصوت/الفيديو فوراً إذا خرج المستخدم
+    // من التطبيق (زر الرئيسية، تبديل تطبيق، إغلاقه من الأخير...) بدل ما
+    // يستمر البث يشتغل بالخلفية بدون أي واجهة ظاهرة له.
+    WidgetsBinding.instance.addObserver(this);
     _scheduleHide();
     // نعرض الإعلان البيني أولاً (إن وجد)، ولا نبدأ تحميل/تشغيل البث إلا
     // بعد إغلاقه — بهذا الشكل لا يشتغل صوت أو صورة البث خلف الإعلان
@@ -491,8 +495,34 @@ class _WatchScreenState extends State<WatchScreen> {
   }
 
   // ---------------------- lifecycle ----------------------
+  // يُستدعى كل ما يغيّر التطبيق حالته: يذهب للخلفية، يرجع للمقدمة، أو
+  // يُغلق نهائياً. هذا هو الإصلاح الفعلي لمشكلة "البث يستمر بالخلفية":
+  // بدون هذه الدالة، مغادرة التطبيق (زر الرئيسية أو تبديل تطبيق) لا
+  // توقف الـ VideoPlayerController إطلاقاً، فيستمر الصوت يعمل بلا واجهة.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+        // التطبيق لم يعد ظاهراً للمستخدم (تصغير، تبديل تطبيق، أو إغلاق) —
+        // نوقف التشغيل فوراً بدل ما يستمر الصوت/الفيديو بالخلفية.
+        if (controller.value.isPlaying) controller.pause();
+        break;
+      case AppLifecycleState.resumed:
+        // لا نُعيد التشغيل تلقائياً عند الرجوع — نترك للمستخدم أن يضغط
+        // تشغيل بنفسه، تجنباً لتشغيل مفاجئ بالصوت بمجرد فتح التطبيق.
+        break;
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
     _controller?.removeListener(_videoListener);

@@ -1,18 +1,33 @@
-import 'package:cloud_functions/cloud_functions.dart';
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
 
 import 'stream_models.dart';
+import 'worker_config.dart';
 
-/// يطلب جلسة بث موقّتة من Cloud Function باسم getStreamUrl.
+/// يطلب جلسة بث موقّتة من نقطة /getStreamUrl على Cloudflare Worker
+/// (بديل Firebase Cloud Functions — راجع cloudflare-worker/README.md).
 /// يدعم شكلين من الاستجابة:
 /// 1) الشكل الجديد المتعدد: { kind, isLive, servers: [{label, qualities:[{label,url}]}] }
 /// 2) الشكل القديم المبسّط: { url, expiresIn } — يُحوَّل تلقائياً لسيرفر واحد بجودة واحدة
 class StreamAuthService {
   static Future<StreamSession> requestSession(String channelId) async {
     try {
-      final callable =
-          FirebaseFunctions.instance.httpsCallable('getStreamUrl');
-      final result = await callable.call({'channelId': channelId});
-      final data = Map<String, dynamic>.from(result.data as Map);
+      final response = await http
+          .post(
+            Uri.parse('$kWorkerBaseUrl/getStreamUrl'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({'channelId': channelId}),
+          )
+          .timeout(const Duration(seconds: 15));
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+
+      if (response.statusCode >= 400) {
+        return StreamSession.failure(
+          _mapError(data['error'] as String?, data['message'] as String?),
+        );
+      }
 
       final rawServers = data['servers'] as List?;
       if (rawServers != null && rawServers.isNotEmpty) {
@@ -45,8 +60,6 @@ class StreamAuthService {
           ),
         ],
       );
-    } on FirebaseFunctionsException catch (e) {
-      return StreamSession.failure(_mapError(e));
     } catch (_) {
       return StreamSession.failure(
           'تعذر الاتصال بالخادم. تحقق من الإنترنت وحاول مرة أخرى.');
@@ -66,8 +79,8 @@ class StreamAuthService {
     }
   }
 
-  static String _mapError(FirebaseFunctionsException e) {
-    switch (e.code) {
+  static String _mapError(String? code, String? message) {
+    switch (code) {
       case 'not-found':
         return 'هذه القناة غير متاحة حالياً.';
       case 'permission-denied':
@@ -76,7 +89,7 @@ class StreamAuthService {
       case 'resource-exhausted':
         return 'الخادم مشغول حالياً، حاول بعد قليل.';
       default:
-        return 'تعذر تجهيز البث (${e.code}).';
+        return message ?? 'تعذر تجهيز البث.';
     }
   }
 }
