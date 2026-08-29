@@ -12,6 +12,7 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
+import '../services/pip_service.dart';
 import '../services/stream_models.dart';
 
 enum _LoadState { loading, error, ready }
@@ -49,6 +50,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _hideTimer;
   bool _isPlaying = false;
   bool _isBuffering = false;
+  Timer? _slowConnectionTimer;
+  bool _slowConnectionHint = false;
+  bool _isInPip = false;
+  bool _pipSupported = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double _volume = 100;
@@ -107,6 +112,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     // يستمر البث يشتغل بالخلفية بدون أي واجهة ظاهرة له.
     WidgetsBinding.instance.addObserver(this);
     _scheduleHide();
+    // نتحقق هل PiP مدعوم أصلاً على هذا الجهاز (أندرويد 8+ فقط) حتى نظهر
+    // زره في التحكمات، ونسجّل مستمعاً لتغيّر وضع PiP الفعلي من الكود
+    // الأصلي.
+    PipService.instance.onPipModeChanged = _onPipModeChanged;
+    PipService.instance.isSupported().then((supported) {
+      if (mounted) setState(() => _pipSupported = supported);
+    });
     // نعرض الإعلان البيني أولاً (إن وجد)، ولا نبدأ تحميل/تشغيل البث إلا
     // بعد إغلاقه — بهذا الشكل لا يشتغل صوت أو صورة البث خلف الإعلان
     // إطلاقاً.
@@ -127,12 +139,37 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       });
       return;
     }
+    final wasBuffering = _isBuffering;
     setState(() {
       _isPlaying = value.isPlaying;
       _isBuffering = value.isBuffering;
       _position = value.position;
       _duration = value.duration;
     });
+    if (_isBuffering && !wasBuffering) {
+      _startSlowConnectionTimer();
+    } else if (!_isBuffering && wasBuffering) {
+      _cancelSlowConnectionTimer();
+    }
+  }
+
+  // بدأ تخزين مؤقت جديد — لو استمر أكثر من 6 ثوانٍ متواصلة نعتبرها إشارة
+  // على اتصال بطيء ونعرض رسالة توضيحية للمستخدم بدل مؤشر دوّار صامت لا
+  // يشرح له السبب. لا نقيس سرعة الشبكة فعلياً (video_player لا يوفرها)،
+  // فقط مدة الانتظار كمؤشر تقريبي معقول.
+  void _startSlowConnectionTimer() {
+    _cancelSlowConnectionTimer();
+    _slowConnectionTimer = Timer(const Duration(seconds: 6), () {
+      if (mounted && _isBuffering) {
+        setState(() => _slowConnectionHint = true);
+      }
+    });
+  }
+
+  void _cancelSlowConnectionTimer() {
+    _slowConnectionTimer?.cancel();
+    _slowConnectionTimer = null;
+    if (_slowConnectionHint) setState(() => _slowConnectionHint = false);
   }
 
   // ---------------------- session ----------------------
@@ -214,13 +251,45 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       await WakelockPlus.enable();
       if (!mounted) return;
       setState(() => _state = _LoadState.ready);
-    } catch (_) {
+    } catch (error) {
       if (!mounted) return;
       setState(() {
         _state = _LoadState.error;
-        _errorMessage = 'تعذر تشغيل هذا المصدر. جرّب سيرفر أو جودة أخرى.';
+        _errorMessage = _describePlaybackError(error);
       });
     }
+  }
+
+  // يحاول تمييز سبب فشل التشغيل الفعلي من رسالة الاستثناء (video_player
+  // يمرّر أخطاء ExoPlayer/AVPlayer الأصلية كما هي تقريباً غالباً) بدل
+  // رسالة عامة واحدة تُخفي كل الأسباب المختلفة. تصنيف تقريبي بأفضل جهد
+  // اعتماداً على نص الخطأ فقط (لا توجد طريقة أدق متاحة من video_player) —
+  // يرجع للرسالة العامة السابقة لو لم يتعرّف على أي نمط معروف.
+  String _describePlaybackError(Object error) {
+    final text = error.toString().toLowerCase();
+
+    if (text.contains('socketexception') ||
+        text.contains('failed host lookup') ||
+        text.contains('network is unreachable') ||
+        text.contains('unable to connect') ||
+        text.contains('connection refused')) {
+      return 'تعذر الاتصال بالخادم. تحقق من اتصال الإنترنت وحاول مرة أخرى.';
+    }
+    if (text.contains('timeout') || text.contains('timed out')) {
+      return 'انتهت مهلة الاتصال بالخادم. تحقق من سرعة الإنترنت وحاول مرة أخرى.';
+    }
+    if (text.contains('404') || text.contains('403') || text.contains('410') ||
+        text.contains('gone') || text.contains('forbidden')) {
+      return 'انتهت صلاحية هذا الرابط أو لم يعد متاحاً. جرّب سيرفر آخر.';
+    }
+    if (text.contains('unrecognized') ||
+        text.contains('unsupported') ||
+        text.contains('source error') ||
+        text.contains('parsererror') ||
+        text.contains('format')) {
+      return 'صيغة هذا المصدر غير مدعومة على جهازك. جرّب سيرفر أو جودة أخرى.';
+    }
+    return 'تعذر تشغيل هذا المصدر. جرّب سيرفر أو جودة أخرى.';
   }
 
   // ---------------------- controls ----------------------
@@ -538,8 +607,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       case AppLifecycleState.inactive:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
-        // التطبيق لم يعد ظاهراً للمستخدم (تصغير، تبديل تطبيق، أو إغلاق) —
-        // نوقف التشغيل فوراً بدل ما يستمر الصوت/الفيديو بالخلفية.
+        // استثناء وحيد: لو التطبيق "خرج للخلفية" لأن المستخدم بالضبط
+        // دخل وضع PiP بنفسه (زر مخصص)، فالبث ما زال ظاهراً فعلياً في
+        // نافذة عائمة — لا نوقفه هنا. أي خروج آخر (زر الرئيسية بدون
+        // PiP، تبديل تطبيق، إغلاق) يوقف التشغيل فوراً كما كان.
+        if (_isInPip) break;
         if (controller.value.isPlaying) controller.pause();
         break;
       case AppLifecycleState.resumed:
@@ -549,12 +621,41 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
+  // يُستدعى من الكود الأصلي (MainActivity) عند دخول/خروج وضع PiP فعلياً
+  // (وليس عند مجرد الطلب — قد يرفضه النظام). نحدّث الحالة فقط؛ الإيقاف
+  // التلقائي عند الخروج الفعلي من PiP يتكفّل به didChangeAppLifecycleState
+  // نفسه لأن أندرويد يرسل حالة دورة حياة تالية بعده على أي حال.
+  void _onPipModeChanged(bool isInPip) {
+    if (!mounted) return;
+    setState(() => _isInPip = isInPip);
+  }
+
+  Future<void> _enterPip() async {
+    // نحسب نسبة العرض/الارتفاع من الفيديو الفعلي إن توفرت، بدل افتراض
+    // 16:9 دائماً — أهم لمباريات أو لقطات بنسب مختلفة.
+    final size = _controller?.value.size;
+    int aspectWidth = 16;
+    int aspectHeight = 9;
+    if (size != null && size.width > 0 && size.height > 0) {
+      aspectWidth = size.width.round();
+      aspectHeight = size.height.round();
+    }
+    await PipService.instance.enter(
+      aspectWidth: aspectWidth,
+      aspectHeight: aspectHeight,
+    );
+  }
+
   @override
   void dispose() {
     if (identical(_activeInstance, this)) _activeInstance = null;
+    if (PipService.instance.onPipModeChanged == _onPipModeChanged) {
+      PipService.instance.onPipModeChanged = null;
+    }
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
+    _slowConnectionTimer?.cancel();
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
@@ -584,8 +685,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               if (_state == _LoadState.loading) _buildLoading(),
               if (_state == _LoadState.error) _buildError(),
               if (_state == _LoadState.ready && _isBuffering)
-                const Center(
-                    child: CircularProgressIndicator(color: Colors.white)),
+                Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const CircularProgressIndicator(color: Colors.white),
+                      if (_slowConnectionHint) ...[
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 8),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Text(
+                            'الاتصال بطيء — قد يستغرق التحميل وقتاً أطول',
+                            style: TextStyle(color: Colors.white70, fontSize: 13),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
               if (_seekFeedback != null)
                 Align(
                   alignment: _seekFeedback == 'right'
@@ -609,7 +731,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_locked)
+              if (_state == _LoadState.ready && !_locked && !_isInPip)
                 AnimatedOpacity(
                   opacity: _controlsVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -618,22 +740,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     child: _buildControls(),
                   ),
                 ),
-              if (_state == _LoadState.ready)
+              if (_state == _LoadState.ready && !_isInPip)
                 Positioned(
                   top: 8,
                   right: 8,
                   child: IconButton(
                     icon: const Icon(Icons.close, color: Colors.white),
+                    tooltip: 'إغلاق',
                     onPressed: _exit,
                   ),
                 ),
-              if (_state == _LoadState.ready)
+              if (_state == _LoadState.ready && !_isInPip)
                 Positioned(
                   top: 8,
                   left: 8,
                   child: IconButton(
                     icon: Icon(_locked ? Icons.lock : Icons.lock_open,
                         color: Colors.white),
+                    tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
                     onPressed: _toggleLock,
                   ),
                 ),
@@ -781,9 +905,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   tooltip: 'وضع العرض',
                   onPressed: _toggleFit,
                 ),
+                if (_pipSupported)
+                  IconButton(
+                    icon: const Icon(Icons.picture_in_picture_alt,
+                        color: Colors.white),
+                    tooltip: 'صورة داخل صورة',
+                    onPressed: _enterPip,
+                  ),
                 IconButton(
                   icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
                       color: Colors.white),
+                  tooltip: _muted ? 'إلغاء كتم الصوت' : 'كتم الصوت',
                   onPressed: _toggleMute,
                 ),
                 SizedBox(
