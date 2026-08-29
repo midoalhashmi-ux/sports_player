@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'firebase_options.dart';
 import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
+import 'services/ad_service.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -43,6 +44,18 @@ class _BootAppState extends State<_BootApp> {
       final linkFuture = AppLinks().getInitialLink();
 
       await firebaseFuture;
+
+      // مهم جداً: نبدأ تهيئة الإعلانات (وبالتالي تحميل الإعلان البيني
+      // مسبقاً) من هنا مباشرة — أبكر نقطة ممكنة بعد جاهزية Firebase —
+      // بدل انتظار وصول المستخدم لـ HomeScreen. لو الدخول كان عبر رابط
+      // عميق من تطبيق المحتوى، الكود يذهب مباشرة لـ WatchScreen ويتجاوز
+      // HomeScreen بالكامل؛ في تلك الحالة كان الإعلان البيني يبدأ تحميله
+      // فقط عند فتح شاشة المشاهدة نفسها (مهلة تحميل قصيرة جداً 4 ثوانٍ
+      // من بداية باردة)، فيفشل غالباً في اللحاق بالوقت رغم أنه يتحمّل
+      // بنجاح لاحقاً (ولهذا يظهر "جاهز" في التشخيص بعد فوات الأوان).
+      // لا ننتظر (`unawaited`) حتى لا نؤخر ظهور أول واجهة للمستخدم.
+      unawaited(AdService.instance.initialize());
+
       final initialUri = await linkFuture;
 
       if (mounted) {
