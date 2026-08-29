@@ -52,19 +52,28 @@ class AdService {
   String get bannerAdUnitId => _bannerAdUnitId;
 
   // ---------------------------------------------------------------------
-  // تشخيص — نص حالة حيّ يوثّق كل خطوة، حتى تقدر تتأكد من داخل التطبيق
-  // نفسه (بدون Logcat/أدوات مطوّر) هل الإعلانات اشتغلت أو لا ولماذا.
-  // اربطه بزر أو شاشة مؤقتة أثناء الاختبار.
+  // تشخيص — ثلاث حالات مستقلة تماماً (عامة/UMP، بيني، بانر) بدل متغيّر
+  // واحد مشترك كان يسبب مشكلة حقيقية: لما ينجح تحميل البانر بعد البيني،
+  // رسالة "البانر ظهر بنجاح" كانت تمسح رسالة حالة البيني بالكامل، فيبدو
+  // في نافذة التشخيص وكأن البيني "لم يظهر" وهو فعلياً قد يكون نجح أو
+  // فشل برسالة مختلفة تماماً — نعرض الثلاثة معاً حتى تُقرأ كل حالة على
+  // حدة دون أن تطغى واحدة على الأخرى.
   // ---------------------------------------------------------------------
-  String _debugStatus = 'لم تبدأ تهيئة الإعلانات بعد.';
-  String get debugStatus => _debugStatus;
+  String _generalStatus = 'لم تبدأ تهيئة الإعلانات بعد.';
+  String _interstitialStatus = 'لم يبدأ تحميل الإعلان البيني بعد.';
+  String _bannerStatus = 'لم يبدأ تحميل إعلان البانر بعد.';
+
+  String get debugStatus =>
+      'عام:\n$_generalStatus\n\n'
+      'الإعلان البيني:\n$_interstitialStatus\n\n'
+      'إعلان البانر:\n$_bannerStatus';
 
   /// يهيّئ SDK ويجلب إعدادات الإعلانات من Firestore. استدعِها مرة واحدة
   /// عند بدء التطبيق (قبل أول استخدام لأي إعلان).
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
-    _debugStatus = 'جارٍ التحقق من الموافقة (UMP)…';
+    _generalStatus = 'جارٍ التحقق من الموافقة (UMP)…';
 
     // خطوة إلزامية من Google قبل أي تهيئة/عرض إعلان: تحديث معلومات
     // الموافقة عبر UMP SDK، وعرض نموذج الموافقة تلقائياً إن كان مطلوباً
@@ -80,7 +89,7 @@ class AdService {
       // إمّا المستخدم لم يوافق بعد، أو تعذّر تحديد حالة الموافقة — لا نهيئ
       // الإعلانات إطلاقاً بدل عرضها بدون تفويض واضح من UMP.
       _adsEnabled = false;
-      _debugStatus = 'توقفت الإعلانات: فشل UMP في تأكيد إمكانية طلب '
+      _generalStatus = 'توقفت الإعلانات: فشل UMP في تأكيد إمكانية طلب '
           'الإعلانات (غالباً مشكلة اتصال بالإنترنت وقت فتح التطبيق). '
           'أعد المحاولة مع إنترنت مستقر.';
       return;
@@ -92,18 +101,18 @@ class AdService {
       // فشل تهيئة SDK (مثلاً بدون إنترنت) — نكمل بدون إعلانات بدل تعطيل
       // التطبيق كاملاً.
       _adsEnabled = false;
-      _debugStatus = 'توقفت الإعلانات: فشلت تهيئة SDK نفسه ($error).';
+      _generalStatus = 'توقفت الإعلانات: فشلت تهيئة SDK نفسه ($error).';
       return;
     }
     await _fetchConfig();
     if (!_adsEnabled) {
-      _debugStatus = 'الإعلانات موقوفة من لوحة التحكم (المفتاح العلوي '
+      _generalStatus = 'الإعلانات موقوفة من لوحة التحكم (المفتاح العلوي '
           'مطفأ في تبويب الإعلانات).';
       return;
     }
-    _debugStatus = 'التهيئة تمت بنجاح. جارٍ تحميل الإعلان البيني مسبقاً '
+    _generalStatus = 'التهيئة تمت بنجاح '
         '(bannerId: $_bannerAdUnitId, interstitialId: '
-        '$_interstitialAdUnitId)…';
+        '$_interstitialAdUnitId).';
     _preloadInterstitial();
   }
 
@@ -182,6 +191,8 @@ class AdService {
   void _preloadInterstitial() {
     if (_interstitialLoading || _interstitialAd != null) return;
     _interstitialLoading = true;
+    _interstitialStatus = 'جارٍ تحميل الإعلان البيني '
+        '(interstitialId: $_interstitialAdUnitId)…';
     InterstitialAd.load(
       adUnitId: _interstitialAdUnitId,
       request: const AdRequest(),
@@ -189,12 +200,12 @@ class AdService {
         onAdLoaded: (ad) {
           _interstitialAd = ad;
           _interstitialLoading = false;
-          _debugStatus = 'الإعلان البيني جاهز ✓ (سيظهر عند فتح قناة).';
+          _interstitialStatus = 'الإعلان البيني جاهز ✓ (سيظهر عند فتح قناة).';
         },
         onAdFailedToLoad: (error) {
           _interstitialAd = null;
           _interstitialLoading = false;
-          _debugStatus = 'فشل تحميل الإعلان البيني: '
+          _interstitialStatus = 'فشل تحميل الإعلان البيني: '
               '[${error.code}] ${error.message}';
         },
       ),
@@ -265,17 +276,18 @@ class AdService {
     required void Function(BannerAd ad) onAdLoaded,
     required void Function() onLoadFailed,
   }) {
+    _bannerStatus = 'جارٍ تحميل إعلان البانر (bannerId: $_bannerAdUnitId)…';
     return BannerAd(
       adUnitId: _bannerAdUnitId,
       size: AdSize.banner,
       request: const AdRequest(),
       listener: BannerAdListener(
         onAdLoaded: (ad) {
-          _debugStatus = 'إعلان البانر ظهر بنجاح ✓';
+          _bannerStatus = 'إعلان البانر ظهر بنجاح ✓';
           onAdLoaded(ad as BannerAd);
         },
         onAdFailedToLoad: (ad, error) {
-          _debugStatus = 'فشل تحميل إعلان البانر: '
+          _bannerStatus = 'فشل تحميل إعلان البانر: '
               '[${error.code}] ${error.message}';
           ad.dispose();
           onLoadFailed();
