@@ -51,35 +51,60 @@ class AdService {
   bool get adsEnabled => _adsEnabled;
   String get bannerAdUnitId => _bannerAdUnitId;
 
+  // ---------------------------------------------------------------------
+  // تشخيص — نص حالة حيّ يوثّق كل خطوة، حتى تقدر تتأكد من داخل التطبيق
+  // نفسه (بدون Logcat/أدوات مطوّر) هل الإعلانات اشتغلت أو لا ولماذا.
+  // اربطه بزر أو شاشة مؤقتة أثناء الاختبار.
+  // ---------------------------------------------------------------------
+  String _debugStatus = 'لم تبدأ تهيئة الإعلانات بعد.';
+  String get debugStatus => _debugStatus;
+
   /// يهيّئ SDK ويجلب إعدادات الإعلانات من Firestore. استدعِها مرة واحدة
   /// عند بدء التطبيق (قبل أول استخدام لأي إعلان).
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
+    _debugStatus = 'جارٍ التحقق من الموافقة (UMP)…';
 
     // خطوة إلزامية من Google قبل أي تهيئة/عرض إعلان: تحديث معلومات
     // الموافقة عبر UMP SDK، وعرض نموذج الموافقة تلقائياً إن كان مطلوباً
     // (المستخدمون في المنطقة الاقتصادية الأوروبية/بريطانيا أساساً حسب
     // إعدادات موافقة الإعلانات في AdMob Console). لا نبدأ تهيئة SDK
     // الإعلانات ولا تحميل أي إعلان قبل أن يسمح UMP بذلك صراحة.
+    //
+    // ملاحظة: خارج أوروبا/بريطانيا (مثل السعودية) عادةً UMP لا يطلب عرض
+    // أي نموذج موافقة إطلاقاً وتكمل هذه الخطوة مباشرة — فعدم ظهور نموذج
+    // الموافقة أثناء الاختبار غالباً طبيعي وليس خطأ.
     final canRequestAds = await _requestConsentAndShowFormIfRequired();
     if (!canRequestAds) {
       // إمّا المستخدم لم يوافق بعد، أو تعذّر تحديد حالة الموافقة — لا نهيئ
       // الإعلانات إطلاقاً بدل عرضها بدون تفويض واضح من UMP.
       _adsEnabled = false;
+      _debugStatus = 'توقفت الإعلانات: فشل UMP في تأكيد إمكانية طلب '
+          'الإعلانات (غالباً مشكلة اتصال بالإنترنت وقت فتح التطبيق). '
+          'أعد المحاولة مع إنترنت مستقر.';
       return;
     }
 
     try {
       await MobileAds.instance.initialize();
-    } catch (_) {
+    } catch (error) {
       // فشل تهيئة SDK (مثلاً بدون إنترنت) — نكمل بدون إعلانات بدل تعطيل
       // التطبيق كاملاً.
       _adsEnabled = false;
+      _debugStatus = 'توقفت الإعلانات: فشلت تهيئة SDK نفسه ($error).';
       return;
     }
     await _fetchConfig();
-    if (_adsEnabled) _preloadInterstitial();
+    if (!_adsEnabled) {
+      _debugStatus = 'الإعلانات موقوفة من لوحة التحكم (المفتاح العلوي '
+          'مطفأ في تبويب الإعلانات).';
+      return;
+    }
+    _debugStatus = 'التهيئة تمت بنجاح. جارٍ تحميل الإعلان البيني مسبقاً '
+        '(bannerId: $_bannerAdUnitId, interstitialId: '
+        '$_interstitialAdUnitId)…';
+    _preloadInterstitial();
   }
 
   /// يطلب تحديث حالة الموافقة (UMP) ويعرض نموذج الموافقة تلقائياً لو كان
@@ -164,10 +189,13 @@ class AdService {
         onAdLoaded: (ad) {
           _interstitialAd = ad;
           _interstitialLoading = false;
+          _debugStatus = 'الإعلان البيني جاهز ✓ (سيظهر عند فتح قناة).';
         },
-        onAdFailedToLoad: (_) {
+        onAdFailedToLoad: (error) {
           _interstitialAd = null;
           _interstitialLoading = false;
+          _debugStatus = 'فشل تحميل الإعلان البيني: '
+              '[${error.code}] ${error.message}';
         },
       ),
     );
@@ -233,13 +261,22 @@ class AdService {
     await ad.show();
   }
 
-  BannerAd createBannerAd({required void Function() onLoadFailed}) {
+  BannerAd createBannerAd({
+    required void Function(BannerAd ad) onAdLoaded,
+    required void Function() onLoadFailed,
+  }) {
     return BannerAd(
       adUnitId: _bannerAdUnitId,
       size: AdSize.banner,
       request: const AdRequest(),
       listener: BannerAdListener(
-        onAdFailedToLoad: (ad, _) {
+        onAdLoaded: (ad) {
+          _debugStatus = 'إعلان البانر ظهر بنجاح ✓';
+          onAdLoaded(ad as BannerAd);
+        },
+        onAdFailedToLoad: (ad, error) {
+          _debugStatus = 'فشل تحميل إعلان البانر: '
+              '[${error.code}] ${error.message}';
           ad.dispose();
           onLoadFailed();
         },

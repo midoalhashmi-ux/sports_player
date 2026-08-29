@@ -2,6 +2,14 @@
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <!-- مطلوب من Google Play لأي تطبيق يستخدم SDK إعلانات (يقرأ معرّف
+         الإعلانات AAID). حزمة google_mobile_ads تضيفه تلقائياً عادةً،
+         لكن وضعناه صراحةً هنا لأنه من الأشياء التي قد تُحذف بالخطأ عند
+         "تنظيف" الأذونات لإرضاء Google Play Console — وحذفه لا يمنع
+         الإعلانات من العمل لكنه يجعلها غير مخصّصة فقط، وأحياناً يسبب
+         رفض النشر بدل قبوله لو التطبيق يصرّح استخدام إعلانات في نموذج
+         "سلامة البيانات" (Data safety) دون أن يطابقه إذن AD_ID فعلي. -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
 
     <application
         android:label="BinSheikh Player"
