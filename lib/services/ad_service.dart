@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
@@ -38,6 +40,20 @@ class AdService {
   Future<void> initialize() async {
     if (_initialized) return;
     _initialized = true;
+
+    // خطوة إلزامية من Google قبل أي تهيئة/عرض إعلان: تحديث معلومات
+    // الموافقة عبر UMP SDK، وعرض نموذج الموافقة تلقائياً إن كان مطلوباً
+    // (المستخدمون في المنطقة الاقتصادية الأوروبية/بريطانيا أساساً حسب
+    // إعدادات موافقة الإعلانات في AdMob Console). لا نبدأ تهيئة SDK
+    // الإعلانات ولا تحميل أي إعلان قبل أن يسمح UMP بذلك صراحة.
+    final canRequestAds = await _requestConsentAndShowFormIfRequired();
+    if (!canRequestAds) {
+      // إمّا المستخدم لم يوافق بعد، أو تعذّر تحديد حالة الموافقة — لا نهيئ
+      // الإعلانات إطلاقاً بدل عرضها بدون تفويض واضح من UMP.
+      _adsEnabled = false;
+      return;
+    }
+
     try {
       await MobileAds.instance.initialize();
     } catch (_) {
@@ -48,6 +64,55 @@ class AdService {
     }
     await _fetchConfig();
     if (_adsEnabled) _preloadInterstitial();
+  }
+
+  /// يطلب تحديث حالة الموافقة (UMP) ويعرض نموذج الموافقة تلقائياً لو كان
+  /// مطلوباً حسب منطقة/إعدادات المستخدم. يرجع true فقط لو أصبح مسموحاً
+  /// فعلياً طلب الإعلانات بعد انتهاء المسار بالكامل (سواء لأن الموافقة
+  /// غير مطلوبة أصلاً في منطقة المستخدم، أو لأنه وافق فعلاً).
+  Future<bool> _requestConsentAndShowFormIfRequired() async {
+    final completer = Completer<bool>();
+    final params = ConsentRequestParameters();
+
+    ConsentInformation.instance.requestConsentInfoUpdate(
+      params,
+      () async {
+        try {
+          await ConsentForm.loadAndShowConsentFormIfRequired((formError) {
+            // formError != null يعني فشل تحميل/عرض النموذج (مشكلة شبكة
+            // مثلاً) — نتحقق من canRequestAds() على أي حال، لأن SDK نفسه
+            // يمنع الإعلانات المخصّصة تلقائياً دون موافقة صريحة.
+          });
+        } catch (_) {
+          // نتجاهل ونكمل للتحقق من canRequestAds أدناه
+        }
+        if (!completer.isCompleted) {
+          final canRequest = await ConsentInformation.instance.canRequestAds();
+          completer.complete(canRequest);
+        }
+      },
+      (error) {
+        // فشل تحديث معلومات الموافقة (بدون إنترنت مثلاً) — لا نعرض أي
+        // إعلان في هذه الحالة حتى لا نخالف السياسة.
+        if (!completer.isCompleted) completer.complete(false);
+      },
+    );
+
+    return completer.future;
+  }
+
+  /// يعيد عرض نموذج خيارات الخصوصية يدوياً (زر "خصوصية الإعلانات" مثلاً
+  /// في شاشة الإعدادات) حتى يقدر المستخدم تغيير موافقته لاحقاً — مطلوب
+  /// من سياسة UMP بالإضافة إلى العرض التلقائي الأول. لا يفعل شيئاً لو
+  /// النموذج غير مطلوب لهذا المستخدم أصلاً.
+  Future<void> showPrivacyOptionsFormIfAvailable() async {
+    final status = await ConsentInformation.instance.getPrivacyOptionsRequirementStatus();
+    if (status != PrivacyOptionsRequirementStatus.required) return;
+    try {
+      await ConsentForm.showPrivacyOptionsForm((_) {});
+    } catch (_) {
+      // تجاهل — الزر تحسين إضافي، لا يجب أن يعطّل الشاشة عند الفشل
+    }
   }
 
   Future<void> _fetchConfig() async {

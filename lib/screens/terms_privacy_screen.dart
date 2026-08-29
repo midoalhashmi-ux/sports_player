@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
+import '../services/ad_service.dart';
+
 class TermsPrivacyScreen extends StatefulWidget {
   const TermsPrivacyScreen({super.key});
 
@@ -57,10 +59,30 @@ class _TermsPrivacyScreenState extends State<TermsPrivacyScreen> {
         ),
         body: _loading
             ? const Center(child: CircularProgressIndicator())
-            : TabBarView(
+            : Column(
                 children: [
-                  _buildTextTab(_terms),
-                  _buildTextTab(_privacy),
+                  Expanded(
+                    child: TabBarView(
+                      children: [
+                        _buildTextTab(_terms),
+                        _buildTextTab(_privacy),
+                      ],
+                    ),
+                  ),
+                  // زر لتغيير موافقة الإعلانات لاحقاً — يظهر فقط لو UMP
+                  // يعتبره مطلوباً لهذا المستخدم (لن يظهر شيء أو يفعل شيء
+                  // لغالبية المستخدمين خارج المنطقة الاقتصادية الأوروبية).
+                  SafeArea(
+                    top: false,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: TextButton(
+                        onPressed: () =>
+                            AdService.instance.showPrivacyOptionsFormIfAvailable(),
+                        child: const Text('خيارات خصوصية الإعلانات'),
+                      ),
+                    ),
+                  ),
                 ],
               ),
       ),

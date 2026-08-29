@@ -13,7 +13,6 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
-import '../services/youtube_resolver.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -147,8 +146,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
     final StreamSession session;
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
+      // تمت إزالة مسار استخراج روابط يوتيوب بالكامل (كان يخالف شروط
+      // استخدام يوتيوب). أي رابط يوتيوب يصل هنا (type=youtube بروابط
+      // Deep Link القديمة من التطبيق الرئيسي) يُرفض برسالة واضحة بدل
+      // محاولة استخراجه.
       session = widget.externalIsYoutube
-          ? await YoutubeResolver.resolve(widget.externalUrl!)
+          ? StreamSession.failure(
+              'روابط يوتيوب لم تعد مدعومة في هذا المشغل.')
           : StreamSession.success(
               kind: StreamKind.hls,
               isLive: false,
