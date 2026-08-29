@@ -8,12 +8,23 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 /// تحديث التطبيق: تشغيل/إيقاف الإعلانات بالكامل، أو تغيير معرّفات
 /// الوحدات الإعلانية.
 ///
-/// شكل المستند المتوقع في Firestore:
+/// شكل المستند المتوقع في Firestore (نفس ما تحفظه لوحة التحكم):
 /// settings/ads {
 ///   enabled: true,
-///   interstitialAdUnitId: "ca-app-pub-xxxx/xxxx",
-///   bannerAdUnitId: "ca-app-pub-xxxx/xxxx",
+///   admob: {
+///     appId: "ca-app-pub-xxxx~xxxx",       // ملاحظة: لا يُستخدم من هنا،
+///                                           // راجع الشرح أسفل initialize()
+///     bannerId: "ca-app-pub-xxxx/xxxx",
+///     interstitialId: "ca-app-pub-xxxx/xxxx",
+///     rewardedId: "ca-app-pub-xxxx/xxxx",  // محفوظ للاستخدام المستقبلي،
+///                                           // لا توجد شاشة تعرض إعلان
+///                                           // مكافئ حالياً
+///   },
 /// }
+///
+/// حالياً هذه الخدمة تدعم AdMob فقط (الحزمة المضافة فعلياً في
+/// pubspec.yaml). حقول applovin/unity في اللوحة محفوظة في قاعدة
+/// البيانات لكن لا تُقرأ من هنا إلى أن تُضاف حزم SDK الخاصة بها.
 ///
 /// إذا لم يوجد المستند أو أي حقل، يستخدم معرّفات اختبار Google الرسمية
 /// تلقائياً حتى لا يتعطل شيء قبل ما تضبط حسابك الحقيقي.
@@ -129,11 +140,12 @@ class AdService {
       final data = snapshot.data();
       if (data == null) return;
       _adsEnabled = data['enabled'] as bool? ?? true;
-      final interstitialId = data['interstitialAdUnitId'] as String?;
+      final admob = data['admob'] as Map<String, dynamic>?;
+      final interstitialId = admob?['interstitialId'] as String?;
       if (interstitialId != null && interstitialId.isNotEmpty) {
         _interstitialAdUnitId = interstitialId;
       }
-      final bannerId = data['bannerAdUnitId'] as String?;
+      final bannerId = admob?['bannerId'] as String?;
       if (bannerId != null && bannerId.isNotEmpty) {
         _bannerAdUnitId = bannerId;
       }
