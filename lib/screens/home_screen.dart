@@ -21,10 +21,16 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+// كود وصول احتياطي لشاشة "إضافة رابط" (المطوّر فقط) لو ما ضُبط
+// settings/app.devAccessCode من لوحة التحكم بعد. يُفضَّل ضبط كود
+// حقيقي من لوحة التحكم وعدم الاعتماد على هذا الاحتياطي.
+const _fallbackDevAccessCode = '112233';
+
 class _HomeScreenState extends State<HomeScreen> {
   List<SavedLink> _links = [];
   bool _loading = true;
   String _storeUrl = _fallbackStoreUrl;
+  String _devAccessCode = _fallbackDevAccessCode;
 
   BannerAd? _bannerAd;
   bool _bannerFailed = false;
@@ -63,13 +69,56 @@ class _HomeScreenState extends State<HomeScreen> {
           .collection('settings')
           .doc('app')
           .get();
-      final url = snapshot.data()?['storeUrl'] as String?;
-      if (url != null && url.isNotEmpty && mounted) {
-        setState(() => _storeUrl = url);
+      final data = snapshot.data();
+      final url = data?['storeUrl'] as String?;
+      final devCode = data?['devAccessCode'] as String?;
+      if (mounted) {
+        setState(() {
+          if (url != null && url.isNotEmpty) _storeUrl = url;
+          if (devCode != null && devCode.isNotEmpty) _devAccessCode = devCode;
+        });
       }
     } catch (_) {
-      // نبقي على الرابط الاحتياطي
+      // نبقي على القيم الاحتياطية
     }
+  }
+
+  // شاشة "إضافة رابط" لم تعد ظاهرة كزر عادي (كانت خطراً نشرياً: تسمح لأي
+  // مستخدم بتشغيل أي رابط بث خارجي داخل التطبيق، وليست ميزة تحتاجها
+  // الغالبية). صارت مقيّدة بكود وصول للمطوّر فقط عبر ضغط طويل مخفي.
+  Future<void> _requestAddUrlAccess() async {
+    final controller = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('كود الوصول'),
+        content: TextField(
+          controller: controller,
+          obscureText: true,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(hintText: 'أدخل الكود'),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('إلغاء'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('دخول'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    if (controller.text.trim() != _devAccessCode) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('كود غير صحيح.')),
+      );
+      return;
+    }
+    _openAddUrl();
   }
 
   void _loadBanner() {
@@ -130,7 +179,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('BinSheikh Player'),
+        title: GestureDetector(
+          onLongPress: _requestAddUrlAccess,
+          child: const Text('BinSheikh Player'),
+        ),
       ),
       drawer: _buildDrawer(),
       body: Column(
@@ -192,10 +244,6 @@ class _HomeScreenState extends State<HomeScreen> {
               child: AdWidget(ad: _bannerAd!),
             ),
         ],
-      ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _openAddUrl,
-        child: const Icon(Icons.add),
       ),
     );
   }

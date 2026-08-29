@@ -39,6 +39,11 @@ dependencies:
   # فتح متجر Google Play وروابط خارجية من صفحة "اتصل بنا"
   url_launcher: ^6.3.1
 
+  # مشغل يوتيوب الرسمي (IFrame Player API عبر WebView) — بديل متوافق مع
+  # شروط يوتيوب لمسار استخراج الروابط المحذوف، يُستخدم فقط لو
+  # settings/features.youtubeEnabled = true من لوحة التحكم
+  youtube_player_iframe: ^5.2.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

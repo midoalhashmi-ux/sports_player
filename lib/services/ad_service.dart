@@ -32,6 +32,11 @@ class AdService {
   InterstitialAd? _interstitialAd;
   bool _interstitialLoading = false;
 
+  // حد أدنى بين إعلانين بينيين متتاليين — يمنع إزعاج المستخدم بإعلان
+  // جديد في كل تبديل قناة سريع (كان يظهر في كل مرة بدون أي حد زمني).
+  DateTime? _lastInterstitialShownAt;
+  static const _minGapBetweenInterstitials = Duration(minutes: 3);
+
   bool get adsEnabled => _adsEnabled;
   String get bannerAdUnitId => _bannerAdUnitId;
 
@@ -171,6 +176,13 @@ class AdService {
       return;
     }
 
+    final lastShown = _lastInterstitialShownAt;
+    if (lastShown != null &&
+        DateTime.now().difference(lastShown) < _minGapBetweenInterstitials) {
+      onComplete();
+      return;
+    }
+
     final deadline = DateTime.now().add(maxWait);
     while (_interstitialAd == null &&
         _interstitialLoading &&
@@ -205,6 +217,7 @@ class AdService {
         complete();
       },
     );
+    _lastInterstitialShownAt = DateTime.now();
     await ad.show();
   }
 

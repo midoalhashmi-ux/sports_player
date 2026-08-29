@@ -12,8 +12,11 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
+import '../services/feature_flags_service.dart';
 import '../services/pip_service.dart';
 import '../services/stream_models.dart';
+import '../services/youtube_id_extractor.dart';
+import 'youtube_watch_screen.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -73,8 +76,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // swipe
   Offset? _swipeStart;
   bool _seekingFromSwipe = false;
-  double _lastBrightness = 1.0;
-  bool _brightnessMode = false;
 
   static const _swipeThreshold = 28.0;
   static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -183,14 +184,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
     final StreamSession session;
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
-      // تمت إزالة مسار استخراج روابط يوتيوب بالكامل (كان يخالف شروط
-      // استخدام يوتيوب). أي رابط يوتيوب يصل هنا (type=youtube بروابط
-      // Deep Link القديمة من التطبيق الرئيسي) يُرفض برسالة واضحة بدل
-      // محاولة استخراجه.
-      session = widget.externalIsYoutube
-          ? StreamSession.failure(
-              'روابط يوتيوب لم تعد مدعومة في هذا المشغل.')
-          : StreamSession.success(
+      // لم يعد يُستخرج أي رابط بث من يوتيوب (كان يخالف شروط الاستخدام).
+      // أي رابط يوتيوب يصل هنا (type=youtube) يُشغَّل عبر المشغل الرسمي
+      // (YoutubeWatchScreen) بدل استخراج رابط البث — فقط لو الميزة مفعّلة
+      // من لوحة التحكم (settings/features.youtubeEnabled).
+      if (widget.externalIsYoutube) {
+        await FeatureFlagsService.instance.ensureLoaded();
+        final videoId =
+            FeatureFlagsService.instance.youtubeEnabled
+                ? YoutubeIdExtractor.extract(widget.externalUrl!)
+                : null;
+        session = videoId != null
+            ? StreamSession.youtube(videoId)
+            : StreamSession.failure(
+                FeatureFlagsService.instance.youtubeEnabled
+                    ? 'رابط يوتيوب غير صالح أو غير مدعوم.'
+                    : 'روابط يوتيوب موقوفة مؤقتاً في هذا المشغل.');
+      } else {
+        session = StreamSession.success(
               kind: StreamKind.hls,
               isLive: false,
               servers: [
@@ -202,6 +213,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ),
               ],
             );
+      }
     } else if (widget.channelId != null) {
       session = await ChannelSourceResolver.resolve(widget.channelId!);
     } else {
@@ -209,6 +221,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
 
     if (!mounted) return;
+
+    // جلسة يوتيوب لا تُشغَّل هنا إطلاقاً — نستبدل شاشة المشاهدة الحالية
+    // بشاشة المشغل الرسمي بدل محاولة تمريرها لـ video_player.
+    if (session.ok && session.kind == StreamKind.youtube) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: (_) =>
+              YoutubeWatchScreen(videoId: session.youtubeVideoId!),
+        ),
+      );
+      return;
+    }
 
     if (!session.ok || session.servers.isEmpty) {
       setState(() {
@@ -518,20 +542,22 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _seekingFromSwipe = false;
   }
 
+  // سحب رأسي (أي مكان بالشاشة) = تحكم بالصوت. كان مقسّماً سابقاً
+  // يمين/يسار (يمين = سطوع)، لكن جزء السطوع لم يكن منفّذاً فعلياً
+  // (يرجع فوراً بدون أي تأثير) — أُزيل التقسيم وصار السحب كله للصوت.
+  double _dragStartVolume = 0;
+
   void _onVerticalDragStart(DragStartDetails details) {
     if (_locked || _state != _LoadState.ready) return;
     _swipeStart = details.globalPosition;
-    _brightnessMode = details.globalPosition.dx >
-        MediaQuery.of(context).size.width / 2;
-    _lastBrightness =
-        _brightnessMode ? (_muted ? 0 : _volume) : _lastBrightness;
+    _dragStartVolume = _muted ? 0 : _volume;
   }
 
   void _onVerticalDragUpdate(DragUpdateDetails details) {
-    if (_swipeStart == null || _brightnessMode) return;
+    if (_swipeStart == null) return;
     final height = MediaQuery.of(context).size.height;
     final delta = (_swipeStart!.dy - details.globalPosition.dy) / height;
-    final newVolume = (_lastBrightness + delta * 100).clamp(0.0, 100.0);
+    final newVolume = (_dragStartVolume + delta * 100).clamp(0.0, 100.0);
     _setVolume(newVolume);
     _scheduleHide();
   }
