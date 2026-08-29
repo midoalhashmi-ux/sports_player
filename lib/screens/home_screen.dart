@@ -185,37 +185,6 @@ class _HomeScreenState extends State<HomeScreen> {
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  // زر تشخيص مؤقت — يعرض حالة تهيئة الإعلانات الحيّة (نجاح/فشل كل خطوة
-  // مع رسالة الخطأ الحقيقية من Google لو فشلت) بدون حاجة لـ Logcat أو
-  // أي أدوات مطوّر. يمكن حذفه لاحقاً بعد التأكد أن كل شيء يعمل.
-  void _showAdsDiagnostics() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('تشخيص الإعلانات'),
-        content: SingleChildScrollView(
-          child: Text(
-            AdService.instance.debugStatus,
-            textAlign: TextAlign.right,
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              _showAdsDiagnostics();
-            },
-            child: const Text('تحديث'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('إغلاق'),
-          ),
-        ],
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -224,13 +193,6 @@ class _HomeScreenState extends State<HomeScreen> {
           onLongPress: _requestAddUrlAccess,
           child: const Text('BinSheikh Player'),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.bug_report_outlined),
-            tooltip: 'تشخيص الإعلانات',
-            onPressed: _showAdsDiagnostics,
-          ),
-        ],
       ),
       drawer: _buildDrawer(),
       body: Column(
