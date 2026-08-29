@@ -14,7 +14,9 @@ dependencies:
   cloud_firestore: ^4.15.5
   app_links: ^6.3.2
 
-  # محرك تشغيل يدعم كل صيغ الفيديو والبث (HLS, DASH, MP4, RTMP, MKV...) بحجم صغير
+  # محرك تشغيل يدعم HLS وMP4/التقدمي (Android عبر ExoPlayer) بحجم صغير —
+  # لا يدعم DASH/RTMP/MKV فعلياً رغم ما كان مكتوباً سابقاً (التطبيق أندرويد
+  # فقط حالياً وكل القنوات المحمية تُقدَّم HLS، فما فيه أثر عملي)
   video_player: ^2.9.2
 
   # طلبات HTTP بسيطة تُستخدم في خدمة مصادقة البث (StreamAuthService)

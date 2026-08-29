@@ -49,19 +49,19 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Add URL')),
+      appBar: AppBar(title: const Text('إضافة رابط')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
           children: [
             TextField(
               controller: _titleController,
-              decoration: const InputDecoration(labelText: 'Title'),
+              decoration: const InputDecoration(labelText: 'العنوان'),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: _urlController,
-              decoration: const InputDecoration(labelText: 'URL'),
+              decoration: const InputDecoration(labelText: 'الرابط'),
               keyboardType: TextInputType.url,
             ),
             const SizedBox(height: 12),
@@ -69,7 +69,7 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
               controller: _userAgentController,
               decoration: const InputDecoration(
                 labelText: 'User Agent',
-                helperText: 'Optional',
+                helperText: 'اختياري',
               ),
             ),
             const SizedBox(height: 20),
@@ -83,7 +83,7 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
                         width: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('SAVE'),
+                    : const Text('حفظ'),
               ),
             ),
           ],

@@ -960,6 +960,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         _session!.hasMultipleQualities))
                   IconButton(
                     icon: const Icon(Icons.hd, color: Colors.white),
+                    tooltip: 'الجودة والسيرفر',
                     onPressed: _openQualitySheet,
                   ),
                 IconButton(
@@ -989,6 +990,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   IconButton(
                     iconSize: 36,
                     icon: const Icon(Icons.replay_10, color: Colors.white),
+                    tooltip: 'تراجع 10 ثواني',
                     onPressed: () => _seekBy(const Duration(seconds: -10)),
                   ),
                 const SizedBox(width: 12),
@@ -999,6 +1001,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                           ? Icons.pause_circle_filled
                           : Icons.play_circle_filled,
                       color: Colors.white),
+                  tooltip: _isPlaying ? 'إيقاف مؤقت' : 'تشغيل',
                   onPressed: _togglePlay,
                 ),
                 const SizedBox(width: 12),
@@ -1006,6 +1009,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   IconButton(
                     iconSize: 36,
                     icon: const Icon(Icons.forward_10, color: Colors.white),
+                    tooltip: 'تقديم 10 ثواني',
                     onPressed: () => _seekBy(const Duration(seconds: 10)),
                   ),
               ],
@@ -1049,6 +1053,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                           ? Icons.fullscreen_exit
                           : Icons.fullscreen,
                       color: Colors.white),
+                  tooltip: _fullscreen ? 'الخروج من ملء الشاشة' : 'ملء الشاشة',
                   onPressed: _toggleFullscreen,
                 ),
               ],

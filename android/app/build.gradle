@@ -47,10 +47,22 @@ android {
         }
     }
 
+    signingConfigs {
+        release {
+            // CI=true مضبوط تلقائياً من Codemagic — يقرأ الكيستور اللي ترفعه
+            // في Code signing identities عبر android_signing بـ codemagic.yaml
+            if (System.getenv()["CI"]) {
+                storeFile file(System.getenv()["CM_KEYSTORE_PATH"])
+                storePassword System.getenv()["CM_KEYSTORE_PASSWORD"]
+                keyAlias System.getenv()["CM_KEY_ALIAS"]
+                keyPassword System.getenv()["CM_KEY_PASSWORD"]
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // مؤقتاً نوقّع بمفتاح debug حتى تجهيز مفتاح توقيع حقيقي قبل النشر النهائي على Google Play
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')

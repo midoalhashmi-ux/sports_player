@@ -78,6 +78,7 @@ class _YoutubeWatchScreenState extends State<YoutubeWatchScreen> {
                     children: [
                       IconButton(
                         icon: const Icon(Icons.arrow_back, color: Colors.white),
+                        tooltip: 'رجوع',
                         onPressed: _exit,
                       ),
                       if (widget.title != null && widget.title!.isNotEmpty)
