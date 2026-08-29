@@ -33,7 +33,6 @@ class _YoutubeWatchScreenState extends State<YoutubeWatchScreen> {
         showFullscreenButton: true,
         strictRelatedVideos: true,
         enableJavaScript: true,
-        playlist: [],
       ),
     );
     // نفس منطق شاشة المشاهدة العادية: نعرض الإعلان البيني أولاً (إن
