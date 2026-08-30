@@ -32,6 +32,14 @@ class _HomeScreenState extends State<HomeScreen> {
   String _storeUrl = _fallbackStoreUrl;
   String _devAccessCode = _fallbackDevAccessCode;
 
+  // زر "الاشتراك المميز" — مخفي تماماً افتراضياً، ولا يظهر إلا لو فعّله
+  // المطوّر من لوحة التحكم (settings/player.premiumEnabled) وعبّى رابطاً.
+  // أي فشل بجلب الإعدادات يبقيه مخفياً (fail-safe)، بعكس رابط المتجر
+  // الذي له قيمة احتياطية.
+  bool _premiumEnabled = false;
+  String _premiumUrl = '';
+  String _premiumButtonText = 'الاشتراك المميز';
+
   BannerAd? _bannerAd;
   bool _bannerFailed = false;
 
@@ -40,6 +48,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     _reload();
     _loadStoreUrl();
+    _loadPremiumSettings();
     // تهيئة خدمة الإعلانات هنا (بدل main.dart المحمي) — آمنة الاستدعاء
     // أكثر من مرة، وتضمن أن الإعلان البيني يكون جاهزاً غالباً قبل ما
     // يفتح المستخدم أول قناة.
@@ -81,6 +90,35 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (_) {
       // نبقي على القيم الاحتياطية
     }
+  }
+
+  Future<void> _loadPremiumSettings() async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('settings')
+          .doc('player')
+          .get();
+      final data = snapshot.data();
+      final enabled = data?['premiumEnabled'] == true;
+      final url = (data?['premiumUrl'] as String?)?.trim() ?? '';
+      final text = (data?['premiumButtonText'] as String?)?.trim() ?? '';
+      if (mounted) {
+        setState(() {
+          // يظهر فقط لو التفعيل صريح ورابط فعلي موجود، وإلا يبقى مخفياً.
+          _premiumEnabled = enabled && url.isNotEmpty;
+          _premiumUrl = url;
+          if (text.isNotEmpty) _premiumButtonText = text;
+        });
+      }
+    } catch (_) {
+      // أي خطأ (بدون إنترنت مثلاً) يبقي الزر مخفياً افتراضياً.
+    }
+  }
+
+  Future<void> _openPremium() async {
+    final uri = Uri.tryParse(_premiumUrl);
+    if (uri == null) return;
+    await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   // شاشة "إضافة رابط" لم تعد ظاهرة كزر عادي (كانت خطراً نشرياً: تسمح لأي
@@ -197,6 +235,26 @@ class _HomeScreenState extends State<HomeScreen> {
       drawer: _buildDrawer(),
       body: Column(
         children: [
+          // زر الاشتراك المميز — مخفي بالكامل ما لم يُفعَّل صراحةً من
+          // لوحة التحكم (راجع _loadPremiumSettings). لا يحجز أي مساحة
+          // ولا يظهر بشكل معطّل عند الإخفاء.
+          if (_premiumEnabled)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  onPressed: _openPremium,
+                  icon: const Icon(Icons.workspace_premium_outlined),
+                  label: Text(_premiumButtonText),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFC107),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                ),
+              ),
+            ),
           const Padding(
             padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
             child: Align(
