@@ -83,34 +83,44 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // (بشكل متزامن، قبل أي إعلان أو تحميل) بمجرد أن تبدأ شاشة جديدة.
   static _WatchScreenState? _activeInstance;
 
-  void _forceSilenceInstantly() {
+  Future<void> _stopBeforeInterstitial() async {
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
     final controller = _controller;
     if (controller != null && controller.value.isInitialized) {
-      controller.setVolume(0);
-      controller.pause();
+      try {
+        // لا نعرض الإعلان حتى يؤكد مشغل أندرويد وصول الكتم والإيقاف إليه.
+        // استدعاء pause بدون انتظار كان يترك الصوت يعمل للحظات خلف الإعلان.
+        await controller.setVolume(0);
+        await controller.pause();
+      } catch (_) {
+        // لو كان المشغل يُغلق أصلاً، لا نمنع المستخدم من متابعة المصدر التالي.
+      }
     }
+  }
+
+  Future<void> _prepareAndStartPlayback() async {
+    final previous = _activeInstance;
+    if (previous != null && !identical(previous, this)) {
+      await previous._stopBeforeInterstitial();
+    }
+    if (!mounted) return;
+
+    _activeInstance = this;
+    WidgetsBinding.instance.addObserver(this);
+    _scheduleHide();
+
+    await AdService.instance.showInterstitialThenProceed(() {
+      if (mounted && identical(_activeInstance, this)) _startSession();
+    });
   }
 
   @override
   void initState() {
     super.initState();
-    // أول شيء إطلاقاً قبل أي إعلان أو تحميل: نُسكت أي شاشة مشاهدة سابقة
-    // ما زالت حيّة، حتى لا يتداخل صوتها مع الإعلان الجديد.
-    _activeInstance?._forceSilenceInstantly();
-    _activeInstance = this;
-    // نراقب دورة حياة التطبيق لنوقف الصوت/الفيديو فوراً إذا خرج المستخدم
-    // من التطبيق (زر الرئيسية، تبديل تطبيق، إغلاقه من الأخير...) بدل ما
-    // يستمر البث يشتغل بالخلفية بدون أي واجهة ظاهرة له.
-    WidgetsBinding.instance.addObserver(this);
-    _scheduleHide();
-    // نعرض الإعلان البيني أولاً (إن وجد)، ولا نبدأ تحميل/تشغيل البث إلا
-    // بعد إغلاقه — بهذا الشكل لا يشتغل صوت أو صورة البث خلف الإعلان
-    // إطلاقاً.
-    AdService.instance.showInterstitialThenProceed(() {
-      if (mounted) _startSession();
-    });
+    // نوقف المصدر السابق ونتأكد من إيقافه فعلياً قبل فتح الإعلان. ثم لا
+    // يبدأ تحميل المصدر الجديد إلا بعد إغلاق الإعلان البيني.
+    unawaited(_prepareAndStartPlayback());
   }
 
   // ---------------------- player listener ----------------------
