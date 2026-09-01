@@ -334,6 +334,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (controller == null) return;
     final target = _position + delta;
     controller.seekTo(target < Duration.zero ? Duration.zero : target);
+    // كل عملية تقديم/تراجع يدوية تُعطى بداية عدّ جديدة (6 ثوانٍ) لمؤشر
+    // "الاتصال بطيء"، بدل ما يتراكم وقت التخزين المؤقت الناتج عن عدة
+    // نقرات متتالية على نفس المؤقت القديم فيظهر المؤشر مبكراً وبشكل
+    // مضلل وكأن الشبكة بطيئة فعلاً بينما السبب فقط تقديم/تراجع متكرر.
+    _cancelSlowConnectionTimer();
+    if (_isBuffering) _startSlowConnectionTimer();
     _scheduleHide();
   }
 
@@ -680,49 +686,56 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               if (_state == _LoadState.loading) _buildLoading(),
               if (_state == _LoadState.error) _buildError(),
               if (_state == _LoadState.ready && _isBuffering)
-                Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(color: Colors.white),
-                      if (_slowConnectionHint) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 14, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: Colors.black54,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: const Text(
-                            'الاتصال بطيء — قد يستغرق التحميل وقتاً أطول',
-                            style: TextStyle(color: Colors.white70, fontSize: 13),
-                          ),
-                        ),
+                const Center(
+                  child: CircularProgressIndicator(color: Colors.white),
+                ),
+              // شارة "الاتصال بطيء" — بركن الشاشة (أسفل يمين)، صغيرة الحجم،
+              // بدل ما تكون بمنتصف الشاشة أسفل مؤشر التحميل مباشرة (كانت
+              // تحجب جزءاً كبيراً من الصورة وتبدو مزعجة).
+              if (_state == _LoadState.ready &&
+                  _isBuffering &&
+                  _slowConnectionHint)
+                Positioned(
+                  bottom: 88,
+                  right: 12,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 8, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.signal_wifi_statusbar_connected_no_internet_4,
+                            color: Colors.white70, size: 13),
+                        SizedBox(width: 4),
+                        Text('اتصال بطيء',
+                            style: TextStyle(
+                                color: Colors.white70, fontSize: 11)),
                       ],
-                    ],
+                    ),
                   ),
                 ),
+              // أيقونة تأكيد النقر المزدوج (تقديم/تراجع) — أُبعدت أكثر نحو
+              // حافة الشاشة (بدل قرب المنتصف) حتى لا تتراكب مع أزرار
+              // التقديم/التراجع اليدوية الدائمة في منتصف الشاشة.
               if (_seekFeedback != null)
                 Align(
-                  alignment: _seekFeedback == 'right'
-                      ? Alignment.centerRight
-                      : Alignment.centerLeft,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 36),
-                    child: Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: const BoxDecoration(
-                        color: Colors.black45,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Icon(
-                        _seekFeedback == 'right'
-                            ? Icons.forward_10
-                            : Icons.replay_10,
-                        color: Colors.white,
-                        size: 36,
-                      ),
+                  alignment: Alignment(_seekFeedback == 'right' ? 0.78 : -0.78, 0),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: const BoxDecoration(
+                      color: Colors.black45,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      _seekFeedback == 'right'
+                          ? Icons.forward_10
+                          : Icons.replay_10,
+                      color: Colors.white,
+                      size: 36,
                     ),
                   ),
                 ),
@@ -904,6 +917,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
               child: Row(
                 children: [
+                  // مساحة فارغة تعادل عرض زر القفل الثابت (يُرسم فوق هذا
+                  // الشريط بشكل منفصل عند top:8,left:8) حتى لا يتراكب معه
+                  // زر الرجوع.
+                  const SizedBox(width: 48),
                   _circleIconButton(
                     icon: Icons.arrow_back,
                     tooltip: 'رجوع',
