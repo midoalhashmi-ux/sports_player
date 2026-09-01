@@ -9,12 +9,6 @@ workflows:
     scripts:
       - name: جلب الحزم
         script: flutter pub get
-      - name: طباعة بصمة SHA-1 (مؤقت - يُحذف بعد الاستخدام)
-        script: |
-          keytool -list -v \
-            -keystore "$CM_KEYSTORE_PATH" \
-            -storepass "$CM_KEYSTORE_PASSWORD" \
-            -alias "$CM_KEY_ALIAS"
       - name: بناء APK منفصل لكل معمارية (لتصغير الحجم)
         script: flutter build apk --release
       # ملاحظة: عند النشر النهائي على Google Play استخدم بدل هذا السطر:
