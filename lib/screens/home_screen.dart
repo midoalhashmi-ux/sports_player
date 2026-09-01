@@ -21,16 +21,10 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-// كود وصول احتياطي لشاشة "إضافة رابط" (المطوّر فقط) لو ما ضُبط
-// settings/app.devAccessCode من لوحة التحكم بعد. يُفضَّل ضبط كود
-// حقيقي من لوحة التحكم وعدم الاعتماد على هذا الاحتياطي.
-const _fallbackDevAccessCode = '112233';
-
 class _HomeScreenState extends State<HomeScreen> {
   List<SavedLink> _links = [];
   bool _loading = true;
   String _storeUrl = _fallbackStoreUrl;
-  String _devAccessCode = _fallbackDevAccessCode;
 
   // زر "الاشتراك المميز" — مخفي تماماً افتراضياً، ولا يظهر إلا لو فعّله
   // المطوّر من لوحة التحكم (settings/player.premiumEnabled) وعبّى رابطاً.
@@ -80,11 +74,9 @@ class _HomeScreenState extends State<HomeScreen> {
           .get();
       final data = snapshot.data();
       final url = data?['storeUrl'] as String?;
-      final devCode = data?['devAccessCode'] as String?;
       if (mounted) {
         setState(() {
           if (url != null && url.isNotEmpty) _storeUrl = url;
-          if (devCode != null && devCode.isNotEmpty) _devAccessCode = devCode;
         });
       }
     } catch (_) {
@@ -119,44 +111,6 @@ class _HomeScreenState extends State<HomeScreen> {
     final uri = Uri.tryParse(_premiumUrl);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
-  }
-
-  // شاشة "إضافة رابط" لم تعد ظاهرة كزر عادي (كانت خطراً نشرياً: تسمح لأي
-  // مستخدم بتشغيل أي رابط بث خارجي داخل التطبيق، وليست ميزة تحتاجها
-  // الغالبية). صارت مقيّدة بكود وصول للمطوّر فقط عبر ضغط طويل مخفي.
-  Future<void> _requestAddUrlAccess() async {
-    final controller = TextEditingController();
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('كود الوصول'),
-        content: TextField(
-          controller: controller,
-          obscureText: true,
-          autofocus: true,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(hintText: 'أدخل الكود'),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('إلغاء'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('دخول'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
-    if (controller.text.trim() != _devAccessCode) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('كود غير صحيح.')),
-      );
-      return;
-    }
-    _openAddUrl();
   }
 
   void _loadBanner() {
@@ -227,12 +181,21 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: GestureDetector(
-          onLongPress: _requestAddUrlAccess,
-          child: const Text('BinSheikh Player'),
-        ),
+        title: const Text('BinSheikh Player'),
+        actions: [
+          IconButton(
+            tooltip: 'إضافة رابط بث',
+            icon: const Icon(Icons.add_link),
+            onPressed: _openAddUrl,
+          ),
+        ],
       ),
       drawer: _buildDrawer(),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _openAddUrl,
+        icon: const Icon(Icons.add),
+        label: const Text('إضافة رابط'),
+      ),
       body: Column(
         children: [
           // زر الاشتراك المميز — مخفي بالكامل ما لم يُفعَّل صراحةً من
@@ -273,10 +236,32 @@ class _HomeScreenState extends State<HomeScreen> {
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _links.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'لا توجد روابط محفوظة',
-                          style: TextStyle(color: Colors.white54, fontSize: 16),
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.live_tv_outlined,
+                                size: 48, color: Colors.white38),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'لا توجد روابط محفوظة',
+                              style:
+                                  TextStyle(color: Colors.white54, fontSize: 16),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'اضغط "إضافة رابط" لإضافة رابط بث أو أي مصدر تشغيله',
+                              textAlign: TextAlign.center,
+                              style:
+                                  TextStyle(color: Colors.white38, fontSize: 13),
+                            ),
+                            const SizedBox(height: 16),
+                            OutlinedButton.icon(
+                              onPressed: _openAddUrl,
+                              icon: const Icon(Icons.add_link),
+                              label: const Text('إضافة رابط الآن'),
+                            ),
+                          ],
                         ),
                       )
                     : ListView.separated(

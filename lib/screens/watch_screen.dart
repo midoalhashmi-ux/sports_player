@@ -13,7 +13,6 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/feature_flags_service.dart';
-import '../services/pip_service.dart';
 import '../services/stream_models.dart';
 import '../services/youtube_id_extractor.dart';
 import 'youtube_watch_screen.dart';
@@ -55,8 +54,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _isBuffering = false;
   Timer? _slowConnectionTimer;
   bool _slowConnectionHint = false;
-  bool _isInPip = false;
-  bool _pipSupported = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double _volume = 100;
@@ -113,13 +110,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     // يستمر البث يشتغل بالخلفية بدون أي واجهة ظاهرة له.
     WidgetsBinding.instance.addObserver(this);
     _scheduleHide();
-    // نتحقق هل PiP مدعوم أصلاً على هذا الجهاز (أندرويد 8+ فقط) حتى نظهر
-    // زره في التحكمات، ونسجّل مستمعاً لتغيّر وضع PiP الفعلي من الكود
-    // الأصلي.
-    PipService.instance.onPipModeChanged = _onPipModeChanged;
-    PipService.instance.isSupported().then((supported) {
-      if (mounted) setState(() => _pipSupported = supported);
-    });
     // نعرض الإعلان البيني أولاً (إن وجد)، ولا نبدأ تحميل/تشغيل البث إلا
     // بعد إغلاقه — بهذا الشكل لا يشتغل صوت أو صورة البث خلف الإعلان
     // إطلاقاً.
@@ -620,9 +610,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   // ---------------------- lifecycle ----------------------
   // يُستدعى كل ما يغيّر التطبيق حالته: يذهب للخلفية، يرجع للمقدمة، أو
-  // يُغلق نهائياً. هذا هو الإصلاح الفعلي لمشكلة "البث يستمر بالخلفية":
-  // بدون هذه الدالة، مغادرة التطبيق (زر الرئيسية أو تبديل تطبيق) لا
-  // توقف الـ VideoPlayerController إطلاقاً، فيستمر الصوت يعمل بلا واجهة.
+  // يُغلق نهائياً. مسؤول عن أمرين:
+  // 1) إيقاف الصوت فوراً إذا خرج المستخدم فعلياً من التطبيق (زر الرئيسية،
+  //    تبديل تطبيق، إغلاقه) بدل استمرار البث بالخلفية بلا واجهة.
+  // 2) استئناف التشغيل تلقائياً عند الرجوع، بشرط أنه كان يعمل فعلاً قبل
+  //    الانقطاع (_wasPlayingBeforeBackground) — وهذا هو ما يجعل التشغيل
+  //    يرجع تلقائياً بعد إغلاق إعلان AdMob البيني (عرض الإعلان يُخرج
+  //    نشاط التطبيق مؤقتاً فيُطلق نفس مسار paused/resumed هذا) بدل ما
+  //    يحتاج المستخدم يضغط تشغيل يدوياً بعد كل إعلان.
+  bool _wasPlayingBeforeBackground = false;
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final controller = _controller;
@@ -633,51 +630,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       case AppLifecycleState.inactive:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
-        // استثناء وحيد: لو التطبيق "خرج للخلفية" لأن المستخدم بالضبط
-        // دخل وضع PiP بنفسه (زر مخصص)، فالبث ما زال ظاهراً فعلياً في
-        // نافذة عائمة — لا نوقفه هنا. أي خروج آخر (زر الرئيسية بدون
-        // PiP، تبديل تطبيق، إغلاق) يوقف التشغيل فوراً كما كان.
-        if (_isInPip) break;
-        if (controller.value.isPlaying) controller.pause();
+        if (controller.value.isPlaying) {
+          _wasPlayingBeforeBackground = true;
+          controller.pause();
+        }
         break;
       case AppLifecycleState.resumed:
-        // لا نُعيد التشغيل تلقائياً عند الرجوع — نترك للمستخدم أن يضغط
-        // تشغيل بنفسه، تجنباً لتشغيل مفاجئ بالصوت بمجرد فتح التطبيق.
+        if (_wasPlayingBeforeBackground) {
+          _wasPlayingBeforeBackground = false;
+          controller.play();
+        }
         break;
     }
-  }
-
-  // يُستدعى من الكود الأصلي (MainActivity) عند دخول/خروج وضع PiP فعلياً
-  // (وليس عند مجرد الطلب — قد يرفضه النظام). نحدّث الحالة فقط؛ الإيقاف
-  // التلقائي عند الخروج الفعلي من PiP يتكفّل به didChangeAppLifecycleState
-  // نفسه لأن أندرويد يرسل حالة دورة حياة تالية بعده على أي حال.
-  void _onPipModeChanged(bool isInPip) {
-    if (!mounted) return;
-    setState(() => _isInPip = isInPip);
-  }
-
-  Future<void> _enterPip() async {
-    // نحسب نسبة العرض/الارتفاع من الفيديو الفعلي إن توفرت، بدل افتراض
-    // 16:9 دائماً — أهم لمباريات أو لقطات بنسب مختلفة.
-    final size = _controller?.value.size;
-    int aspectWidth = 16;
-    int aspectHeight = 9;
-    if (size != null && size.width > 0 && size.height > 0) {
-      aspectWidth = size.width.round();
-      aspectHeight = size.height.round();
-    }
-    await PipService.instance.enter(
-      aspectWidth: aspectWidth,
-      aspectHeight: aspectHeight,
-    );
   }
 
   @override
   void dispose() {
     if (identical(_activeInstance, this)) _activeInstance = null;
-    if (PipService.instance.onPipModeChanged == _onPipModeChanged) {
-      PipService.instance.onPipModeChanged = null;
-    }
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
@@ -757,7 +726,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_locked && !_isInPip)
+              if (_state == _LoadState.ready && !_locked)
                 AnimatedOpacity(
                   opacity: _controlsVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -766,23 +735,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     child: _buildControls(),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_isInPip)
-                Positioned(
-                  top: 8,
-                  right: 8,
-                  child: IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    tooltip: 'إغلاق',
-                    onPressed: _exit,
-                  ),
-                ),
-              if (_state == _LoadState.ready && !_isInPip)
+              // زر القفل يبقى ظاهراً دوماً (حتى مع إخفاء بقية التحكمات أو
+              // أثناء القفل) عشان المستخدم يقدر دائماً يفتح القفل.
+              if (_state == _LoadState.ready)
                 Positioned(
                   top: 8,
                   left: 8,
-                  child: IconButton(
-                    icon: Icon(_locked ? Icons.lock : Icons.lock_open,
-                        color: Colors.white),
+                  child: _circleIconButton(
+                    icon: _locked ? Icons.lock : Icons.lock_open,
                     tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
                     onPressed: _toggleLock,
                   ),
@@ -890,6 +850,40 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     );
   }
 
+  // زر أيقونة دائري بخلفية شبه شفافة — نمط موحّد لكل أزرار المشغل الآن،
+  // بدل IconButton عادي بلا خلفية (كان يصعب تمييزه فوق فيديو فاتح).
+  Widget _circleIconButton({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback? onPressed,
+    double size = 40,
+    double iconSize = 20,
+    Widget? child,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: Tooltip(
+        message: tooltip,
+        child: Material(
+          color: Colors.black.withOpacity(0.35),
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onPressed,
+            child: SizedBox(
+              width: size,
+              height: size,
+              child: Center(
+                child: child ??
+                    Icon(icon, color: Colors.white, size: iconSize),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildControls() {
     final isLive = _session?.isLive ?? false;
     return Container(
@@ -897,170 +891,257 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black54, Colors.transparent, Colors.black87],
-          stops: [0, 0.5, 1],
+          colors: [Colors.black87, Colors.transparent, Colors.black87],
+          stops: [0, 0.45, 1],
         ),
       ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(48, 8, 48, 0),
-            child: Row(
-              children: [
-                if (isLive)
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Colors.redAccent,
-                      borderRadius: BorderRadius.circular(4),
+      child: SafeArea(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // --------- الشريط العلوي: رجوع + شارة مباشر/الجودة + صوت ---------
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+              child: Row(
+                children: [
+                  _circleIconButton(
+                    icon: Icons.arrow_back,
+                    tooltip: 'رجوع',
+                    onPressed: _exit,
+                  ),
+                  const SizedBox(width: 6),
+                  if (isLive)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 9, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.redAccent,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: const [
+                          Icon(Icons.circle, color: Colors.white, size: 8),
+                          SizedBox(width: 5),
+                          Text('مباشر',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w600)),
+                        ],
+                      ),
+                    )
+                  else if (_activeQuality != null)
+                    Text(
+                      _activeQuality!.label,
+                      style: const TextStyle(
+                          color: Colors.white70, fontSize: 12),
                     ),
-                    child: const Text('مباشر',
-                        style: TextStyle(color: Colors.white, fontSize: 12)),
-                  ),
-                const Spacer(),
-                if (isLive)
-                  IconButton(
-                    icon: const Icon(Icons.live_tv, color: Colors.white),
-                    tooltip: 'القفز للبث المباشر',
-                    onPressed: _jumpToLive,
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.aspect_ratio, color: Colors.white),
-                  tooltip: 'وضع العرض',
-                  onPressed: _toggleFit,
-                ),
-                if (_pipSupported)
-                  IconButton(
-                    icon: const Icon(Icons.picture_in_picture_alt,
-                        color: Colors.white),
-                    tooltip: 'صورة داخل صورة',
-                    onPressed: _enterPip,
-                  ),
-                IconButton(
-                  icon: Icon(_muted ? Icons.volume_off : Icons.volume_up,
-                      color: Colors.white),
-                  tooltip: _muted ? 'إلغاء كتم الصوت' : 'كتم الصوت',
-                  onPressed: _toggleMute,
-                ),
-                SizedBox(
-                  width: 90,
-                  child: Slider(
-                    value: _muted ? 0 : _volume,
-                    min: 0,
-                    max: 100,
-                    activeColor: Colors.white,
-                    inactiveColor: Colors.white24,
-                    onChanged: _setVolume,
-                  ),
-                ),
-                if (_session != null &&
-                    (_session!.hasMultipleServers ||
-                        _session!.hasMultipleQualities))
-                  IconButton(
-                    icon: const Icon(Icons.hd, color: Colors.white),
-                    tooltip: 'الجودة والسيرفر',
-                    onPressed: _openQualitySheet,
-                  ),
-                IconButton(
-                  icon: const Icon(Icons.speed, color: Colors.white),
-                  tooltip: 'سرعة التشغيل',
-                  onPressed: _openSpeedSheet,
-                ),
-                IconButton(
-                  icon: _savingScreenshot
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.camera_alt, color: Colors.white),
-                  tooltip: 'التقاط صورة',
-                  onPressed: _savingScreenshot ? null : _takeScreenshot,
-                ),
-              ],
-            ),
-          ),
-          Center(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (!isLive)
-                  IconButton(
-                    iconSize: 36,
-                    icon: const Icon(Icons.replay_10, color: Colors.white),
-                    tooltip: 'تراجع 10 ثواني',
-                    onPressed: () => _seekBy(const Duration(seconds: -10)),
-                  ),
-                const SizedBox(width: 12),
-                IconButton(
-                  iconSize: 56,
-                  icon: Icon(
-                      _isPlaying
-                          ? Icons.pause_circle_filled
-                          : Icons.play_circle_filled,
-                      color: Colors.white),
-                  tooltip: _isPlaying ? 'إيقاف مؤقت' : 'تشغيل',
-                  onPressed: _togglePlay,
-                ),
-                const SizedBox(width: 12),
-                if (!isLive)
-                  IconButton(
-                    iconSize: 36,
-                    icon: const Icon(Icons.forward_10, color: Colors.white),
-                    tooltip: 'تقديم 10 ثواني',
-                    onPressed: () => _seekBy(const Duration(seconds: 10)),
-                  ),
-              ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Row(
-              children: [
-                if (!isLive) ...[
-                  Text(_formatDuration(_position),
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12)),
-                  Expanded(
-                    child: Slider(
-                      value: _position.inMilliseconds
-                          .clamp(
-                              0,
-                              _duration.inMilliseconds == 0
-                                  ? 1
-                                  : _duration.inMilliseconds)
-                          .toDouble(),
-                      min: 0,
-                      max: _duration.inMilliseconds == 0
-                          ? 1
-                          : _duration.inMilliseconds.toDouble(),
-                      activeColor: Colors.redAccent,
-                      inactiveColor: Colors.white24,
-                      onChanged: (value) => _controller
-                          ?.seekTo(Duration(milliseconds: value.toInt())),
-                    ),
-                  ),
-                  Text(_formatDuration(_duration),
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12)),
-                ] else
                   const Spacer(),
-                IconButton(
-                  icon: Icon(
-                      _fullscreen
-                          ? Icons.fullscreen_exit
-                          : Icons.fullscreen,
-                      color: Colors.white),
-                  tooltip: _fullscreen ? 'الخروج من ملء الشاشة' : 'ملء الشاشة',
-                  onPressed: _toggleFullscreen,
-                ),
-              ],
+                  if (isLive)
+                    _circleIconButton(
+                      icon: Icons.live_tv,
+                      tooltip: 'القفز للبث المباشر',
+                      onPressed: _jumpToLive,
+                    ),
+                  _circleIconButton(
+                    icon: _muted ? Icons.volume_off : Icons.volume_up,
+                    tooltip: _muted ? 'إلغاء كتم الصوت' : 'كتم الصوت',
+                    onPressed: _toggleMute,
+                  ),
+                  SizedBox(
+                    width: 78,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 2.5,
+                        thumbShape: const RoundSliderThumbShape(
+                            enabledThumbRadius: 5),
+                        overlayShape:
+                            const RoundSliderOverlayShape(overlayRadius: 12),
+                      ),
+                      child: Slider(
+                        value: _muted ? 0 : _volume,
+                        min: 0,
+                        max: 100,
+                        activeColor: Colors.white,
+                        inactiveColor: Colors.white30,
+                        onChanged: _setVolume,
+                      ),
+                    ),
+                  ),
+                  _circleIconButton(
+                    icon: Icons.more_vert,
+                    tooltip: 'المزيد من الخيارات',
+                    onPressed: _openMoreOptionsSheet,
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+            // --------- منتصف الشاشة: تشغيل/إيقاف + تقديم/تراجع ---------
+            Center(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isLive)
+                    _circleIconButton(
+                      icon: Icons.replay_10,
+                      tooltip: 'تراجع 10 ثواني',
+                      size: 52,
+                      iconSize: 28,
+                      onPressed: () => _seekBy(const Duration(seconds: -10)),
+                    ),
+                  const SizedBox(width: 22),
+                  _circleIconButton(
+                    icon: _isPlaying ? Icons.pause : Icons.play_arrow,
+                    tooltip: _isPlaying ? 'إيقاف مؤقت' : 'تشغيل',
+                    size: 72,
+                    iconSize: 40,
+                    onPressed: _togglePlay,
+                  ),
+                  const SizedBox(width: 22),
+                  if (!isLive)
+                    _circleIconButton(
+                      icon: Icons.forward_10,
+                      tooltip: 'تقديم 10 ثواني',
+                      size: 52,
+                      iconSize: 28,
+                      onPressed: () => _seekBy(const Duration(seconds: 10)),
+                    ),
+                ],
+              ),
+            ),
+            // --------- الشريط السفلي: التقدّم + ملء الشاشة ---------
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 6, 4),
+              child: Row(
+                children: [
+                  if (!isLive) ...[
+                    Text(_formatDuration(_position),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12)),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3,
+                          thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6),
+                          overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 14),
+                        ),
+                        child: Slider(
+                          value: _position.inMilliseconds
+                              .clamp(
+                                  0,
+                                  _duration.inMilliseconds == 0
+                                      ? 1
+                                      : _duration.inMilliseconds)
+                              .toDouble(),
+                          min: 0,
+                          max: _duration.inMilliseconds == 0
+                              ? 1
+                              : _duration.inMilliseconds.toDouble(),
+                          activeColor: Colors.redAccent,
+                          inactiveColor: Colors.white30,
+                          onChanged: (value) => _controller
+                              ?.seekTo(Duration(milliseconds: value.toInt())),
+                        ),
+                      ),
+                    ),
+                    Text(_formatDuration(_duration),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 12)),
+                  ] else
+                    const Spacer(),
+                  _circleIconButton(
+                    icon: _fullscreen
+                        ? Icons.fullscreen_exit
+                        : Icons.fullscreen,
+                    tooltip:
+                        _fullscreen ? 'الخروج من ملء الشاشة' : 'ملء الشاشة',
+                    onPressed: _toggleFullscreen,
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+
+  // قائمة "المزيد" — تجمع الخيارات الثانوية (وضع العرض، الجودة والسيرفر،
+  // سرعة التشغيل، التقاط صورة) بورقة سفلية واحدة بدل ازدحام شريط علوي
+  // طويل بعدة أيقونات صغيرة، بنفس أسلوب مشغلات الاحتراف.
+  void _openMoreOptionsSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF141414),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: const Icon(Icons.aspect_ratio, color: Colors.white),
+                title: const Text('وضع العرض',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: Text(
+                  _fit == BoxFit.contain ? 'ملائم للشاشة' : 'تعبئة الشاشة',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _toggleFit();
+                },
+              ),
+              if (_session != null &&
+                  (_session!.hasMultipleServers ||
+                      _session!.hasMultipleQualities))
+                ListTile(
+                  leading: const Icon(Icons.hd, color: Colors.white),
+                  title: const Text('الجودة والسيرفر',
+                      style: TextStyle(color: Colors.white)),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _openQualitySheet();
+                  },
+                ),
+              ListTile(
+                leading: const Icon(Icons.speed, color: Colors.white),
+                title: const Text('سرعة التشغيل',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: Text('${_playbackSpeed}x',
+                    style:
+                        const TextStyle(color: Colors.white54, fontSize: 12)),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _openSpeedSheet();
+                },
+              ),
+              ListTile(
+                leading: _savingScreenshot
+                    ? const SizedBox(
+                        height: 20,
+                        width: 20,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white),
+                      )
+                    : const Icon(Icons.camera_alt, color: Colors.white),
+                title: const Text('التقاط صورة',
+                    style: TextStyle(color: Colors.white)),
+                onTap: _savingScreenshot
+                    ? null
+                    : () {
+                        Navigator.pop(sheetContext);
+                        _takeScreenshot();
+                      },
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
