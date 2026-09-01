@@ -1,16 +1,9 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
-import 'feature_flags_service.dart';
 import 'stream_auth_service.dart';
 import 'stream_models.dart';
-import 'youtube_id_extractor.dart';
 
 /// يقرأ حالة القناة أولاً (channels/{id}):
-/// - sourceType == 'youtube': تُشغَّل عبر مشغل يوتيوب الرسمي (لا يُستخرج
-///   أي رابط بث)، فقط لو settings/features.youtubeEnabled = true من لوحة
-///   التحكم. معرّف/رابط الفيديو يُقرأ من حقل youtubeUrl، وإن لم يوجد من
-///   directUrl كبديل. لو الميزة موقوفة أو الحقل فاضي/غير صالح، تُعامل
-///   كخطأ إعداد واضح بدل محاولة استخراج أي رابط.
 /// - protected == false: يستخدم servers/directUrl المخزّنة مباشرة في المستند.
 /// - غير ذلك (الوضع الافتراضي): يمر عبر StreamAuthService لجلسة موقّتة ومحمية.
 class ChannelSourceResolver {
@@ -21,24 +14,6 @@ class ChannelSourceResolver {
           .doc(channelId)
           .get();
       final data = snapshot.data();
-
-      if (data != null && data['sourceType'] == 'youtube') {
-        await FeatureFlagsService.instance.ensureLoaded();
-        if (!FeatureFlagsService.instance.youtubeEnabled) {
-          return StreamSession.failure(
-              'تشغيل يوتيوب موقوف مؤقتاً من لوحة التحكم لهذه القناة.');
-        }
-        final youtubeSource =
-            (data['youtubeUrl'] as String?) ?? (data['directUrl'] as String?);
-        final videoId = youtubeSource != null
-            ? YoutubeIdExtractor.extract(youtubeSource)
-            : null;
-        if (videoId == null) {
-          return StreamSession.failure(
-              'رابط يوتيوب لهذه القناة غير مضبوط أو غير صالح من لوحة التحكم.');
-        }
-        return StreamSession.youtube(videoId);
-      }
 
       final isProtected = data == null || data['protected'] != false;
 

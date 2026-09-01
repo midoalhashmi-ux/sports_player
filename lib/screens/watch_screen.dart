@@ -12,24 +12,19 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
-import '../services/feature_flags_service.dart';
 import '../services/stream_models.dart';
-import '../services/youtube_id_extractor.dart';
-import 'youtube_watch_screen.dart';
 
 enum _LoadState { loading, error, ready }
 
 class WatchScreen extends StatefulWidget {
   final String? channelId;
   final String? externalUrl;
-  final bool externalIsYoutube;
   final String? externalUserAgent;
 
   const WatchScreen({
     super.key,
     this.channelId,
     this.externalUrl,
-    this.externalIsYoutube = false,
     this.externalUserAgent,
   });
 
@@ -174,36 +169,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
     final StreamSession session;
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
-      // لم يعد يُستخرج أي رابط بث من يوتيوب (كان يخالف شروط الاستخدام).
-      // أي رابط يوتيوب يصل هنا (type=youtube) يُشغَّل عبر المشغل الرسمي
-      // (YoutubeWatchScreen) بدل استخراج رابط البث — فقط لو الميزة مفعّلة
-      // من لوحة التحكم (settings/features.youtubeEnabled).
-      if (widget.externalIsYoutube) {
-        await FeatureFlagsService.instance.ensureLoaded();
-        final videoId =
-            FeatureFlagsService.instance.youtubeEnabled
-                ? YoutubeIdExtractor.extract(widget.externalUrl!)
-                : null;
-        session = videoId != null
-            ? StreamSession.youtube(videoId)
-            : StreamSession.failure(
-                FeatureFlagsService.instance.youtubeEnabled
-                    ? 'رابط يوتيوب غير صالح أو غير مدعوم.'
-                    : 'روابط يوتيوب موقوفة مؤقتاً في هذا المشغل.');
-      } else {
-        session = StreamSession.success(
-              kind: StreamKind.hls,
-              isLive: false,
-              servers: [
-                StreamServerOption(
-                  label: 'الرابط المُدخل',
-                  qualities: [
-                    StreamQuality(label: 'تلقائي', url: widget.externalUrl!)
-                  ],
-                ),
-              ],
-            );
-      }
+      session = StreamSession.success(
+        kind: StreamKind.hls,
+        isLive: false,
+        servers: [
+          StreamServerOption(
+            label: 'الرابط المُدخل',
+            qualities: [
+              StreamQuality(label: 'تلقائي', url: widget.externalUrl!)
+            ],
+          ),
+        ],
+      );
     } else if (widget.channelId != null) {
       session = await ChannelSourceResolver.resolve(widget.channelId!);
     } else {
@@ -211,18 +188,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
 
     if (!mounted) return;
-
-    // جلسة يوتيوب لا تُشغَّل هنا إطلاقاً — نستبدل شاشة المشاهدة الحالية
-    // بشاشة المشغل الرسمي بدل محاولة تمريرها لـ video_player.
-    if (session.ok && session.kind == StreamKind.youtube) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) =>
-              YoutubeWatchScreen(videoId: session.youtubeVideoId!),
-        ),
-      );
-      return;
-    }
 
     if (!session.ok || session.servers.isEmpty) {
       setState(() {

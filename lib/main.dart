@@ -132,7 +132,6 @@ class _PlayerAppState extends State<PlayerApp> {
   Widget? _watchScreenForUri(Uri uri) {
     final channelId = uri.queryParameters['channelId'];
     final url = uri.queryParameters['url'];
-    final type = uri.queryParameters['type'];
 
     if ((channelId == null || channelId.isEmpty) &&
         (url == null || url.isEmpty)) {
@@ -145,7 +144,6 @@ class _PlayerAppState extends State<PlayerApp> {
           (channelId != null && channelId.isNotEmpty) ? channelId : null,
       externalUrl:
           (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
-      externalIsYoutube: type == 'youtube',
     );
   }
 
