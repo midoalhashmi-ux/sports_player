@@ -17,7 +17,6 @@ def flutterVersionName = localProperties.getProperty("flutter.versionName") ?: "
 
 android {
     namespace "com.midoalhashmi.zoltrastream"
-    // Google Play requires API level 36 for new app releases.
     compileSdk 36
     ndkVersion flutter.ndkVersion
 
@@ -37,7 +36,6 @@ android {
     defaultConfig {
         applicationId "com.midoalhashmi.zoltrastream"
         minSdk 21
-        // Required by Google Play: target API level 36.
         targetSdk 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
