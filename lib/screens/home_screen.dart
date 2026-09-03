@@ -140,6 +140,13 @@ class _HomeScreenState extends State<HomeScreen> {
     if (added == true) _reload();
   }
 
+  Future<void> _openEditUrl(SavedLink link) async {
+    final edited = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => AddUrlScreen(existingLink: link)),
+    );
+    if (edited == true) _reload();
+  }
+
   void _play(SavedLink link) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -279,9 +286,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                 overflow: TextOverflow.ellipsis,
                               ),
                               onTap: () => _play(link),
-                              trailing: IconButton(
-                                icon: const Icon(Icons.delete_outline),
-                                onPressed: () => _delete(link),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    tooltip: 'تعديل',
+                                    icon: const Icon(Icons.edit_outlined),
+                                    onPressed: () => _openEditUrl(link),
+                                  ),
+                                  IconButton(
+                                    tooltip: 'حذف',
+                                    icon: const Icon(Icons.delete_outline),
+                                    onPressed: () => _delete(link),
+                                  ),
+                                ],
                               ),
                             ),
                           );

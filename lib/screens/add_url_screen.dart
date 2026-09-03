@@ -3,16 +3,28 @@ import 'package:flutter/material.dart';
 import '../services/saved_link_service.dart';
 
 class AddUrlScreen extends StatefulWidget {
-  const AddUrlScreen({super.key});
+  // إذا مُرِّر رابط موجود، تعمل الشاشة في وضع "تعديل" وتعبّئ الحقول به
+  // بدل إضافة رابط جديد.
+  final SavedLink? existingLink;
+
+  const AddUrlScreen({super.key, this.existingLink});
+
+  bool get isEditing => existingLink != null;
 
   @override
   State<AddUrlScreen> createState() => _AddUrlScreenState();
 }
 
 class _AddUrlScreenState extends State<AddUrlScreen> {
-  final _titleController = TextEditingController();
-  final _urlController = TextEditingController();
-  final _userAgentController = TextEditingController();
+  late final _titleController = TextEditingController(
+    text: widget.existingLink?.title ?? '',
+  );
+  late final _urlController = TextEditingController(
+    text: widget.existingLink?.url ?? '',
+  );
+  late final _userAgentController = TextEditingController(
+    text: widget.existingLink?.userAgent ?? '',
+  );
   bool _saving = false;
 
   @override
@@ -34,14 +46,25 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
     }
 
     setState(() => _saving = true);
-    await SavedLinkService.add(SavedLink(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      title: title,
-      url: url,
-      userAgent: _userAgentController.text.trim().isEmpty
-          ? null
-          : _userAgentController.text.trim(),
-    ));
+    final userAgent = _userAgentController.text.trim().isEmpty
+        ? null
+        : _userAgentController.text.trim();
+
+    if (widget.isEditing) {
+      await SavedLinkService.update(SavedLink(
+        id: widget.existingLink!.id,
+        title: title,
+        url: url,
+        userAgent: userAgent,
+      ));
+    } else {
+      await SavedLinkService.add(SavedLink(
+        id: DateTime.now().microsecondsSinceEpoch.toString(),
+        title: title,
+        url: url,
+        userAgent: userAgent,
+      ));
+    }
     if (!mounted) return;
     Navigator.of(context).pop(true);
   }
@@ -49,7 +72,9 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('إضافة رابط')),
+      appBar: AppBar(
+        title: Text(widget.isEditing ? 'تعديل الرابط' : 'إضافة رابط'),
+      ),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -83,7 +108,7 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
                         width: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
-                    : const Text('حفظ'),
+                    : Text(widget.isEditing ? 'حفظ التعديلات' : 'حفظ'),
               ),
             ),
           ],

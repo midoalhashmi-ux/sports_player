@@ -48,6 +48,19 @@ class SavedLinkService {
     await prefs.setStringList(_key, raw);
   }
 
+  static Future<void> update(SavedLink link) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getStringList(_key) ?? [];
+    final updated = raw.map((e) {
+      final map = jsonDecode(e) as Map<String, dynamic>;
+      if (map['id'] == link.id) {
+        return jsonEncode(link.toJson());
+      }
+      return e;
+    }).toList();
+    await prefs.setStringList(_key, updated);
+  }
+
   static Future<void> delete(String id) async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getStringList(_key) ?? [];
