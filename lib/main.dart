@@ -5,9 +5,11 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
+import 'screens/force_update_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
 import 'services/ad_service.dart';
+import 'services/version_check_service.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -26,6 +28,7 @@ class _BootAppState extends State<_BootApp> {
   String? _error;
   bool _ready = false;
   Uri? _initialUri;
+  ForceUpdateInfo? _forceUpdateInfo;
 
   @override
   void initState() {
@@ -44,6 +47,20 @@ class _BootAppState extends State<_BootApp> {
       final linkFuture = AppLinks().getInitialLink();
 
       await firebaseFuture;
+
+      // فحص التحديث الإجباري أولاً — قبل أي شيء آخر (إعلانات، روابط
+      // عميقة). لو النتيجة غير null، نوقف كل مسار التهيئة العادي ونعرض
+      // شاشة التحديث فقط دون أي مسار للخروج منها.
+      final forceUpdate = await VersionCheckService.checkForceUpdate();
+      if (forceUpdate != null) {
+        if (mounted) {
+          setState(() {
+            _ready = true;
+            _forceUpdateInfo = forceUpdate;
+          });
+        }
+        return;
+      }
 
       // مهم جداً: نبدأ تهيئة الإعلانات (وبالتالي تحميل الإعلان البيني
       // مسبقاً) من هنا مباشرة — أبكر نقطة ممكنة بعد جاهزية Firebase —
@@ -73,6 +90,15 @@ class _BootAppState extends State<_BootApp> {
   Widget build(BuildContext context) {
     if (_error != null) return _ErrorApp(error: _error!);
     if (!_ready) return const _LoadingApp();
+    final forceUpdateInfo = _forceUpdateInfo;
+    if (forceUpdateInfo != null) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(useMaterial3: true),
+        locale: const Locale('ar'),
+        home: ForceUpdateScreen(info: forceUpdateInfo),
+      );
+    }
     return PlayerApp(initialUri: _initialUri);
   }
 }
