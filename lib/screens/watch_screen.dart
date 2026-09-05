@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'dart:ui' as ui;
+
+import 'package:http/http.dart' as http;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -233,18 +236,21 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _webDetectorTimer;
   bool _webSwitchingToNative = false;
   final Set<String> _webSeenSources = <String>{};
+  bool _webDrmDetected = false;
+  String? _webDrmSystem;
 
   bool _isAllowedWebNavigation(String target) {
     final uri = Uri.tryParse(target);
     if (uri == null || !uri.hasScheme) return false;
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
 
-    final sourceHost = _webSourceOrigin;
-    if (sourceHost == null || sourceHost.isEmpty) return true;
-
+    // المواقع الحديثة قد تستخدم CDN أو نطاق مشغل مختلف؛ لا نقفل WebView
+    // على نطاق المصدر الأصلي. نمنع فقط نطاقات الإعلانات المعروفة.
     final host = uri.host.toLowerCase();
-    final source = sourceHost.toLowerCase();
-    return host == source || host.endsWith('.$source');
+    return !RegExp(
+      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)',
+      caseSensitive: false,
+    ).hasMatch(host);
   }
 
   Future<void> _installWebProtection(WebViewController controller) async {
@@ -258,6 +264,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             const h = (u.hostname || '').toLowerCase();
             return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i.test(h);
           } catch (_) { return false; }
+        };
+        const report = (payload) => {
+          try {
+            if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
+              window.SportsPlayerSource.postMessage(JSON.stringify(payload));
+            }
+          } catch (_) {}
+        };
+        const addCandidate = (value) => {
+          try {
+            if (!value || typeof value !== 'string') return;
+            const v = value.trim();
+            if (!/^https?:\/\//i.test(v)) return;
+            window.__sportsPlayerMediaCandidates = window.__sportsPlayerMediaCandidates || [];
+            if (window.__sportsPlayerMediaCandidates.indexOf(v) === -1) {
+              window.__sportsPlayerMediaCandidates.push(v);
+            }
+          } catch (_) {}
         };
         window.open = function(url) {
           if (!url || blocked(url)) return null;
@@ -279,15 +303,53 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         }, true);
         const style = document.createElement('style');
         style.id = 'sports-player-ad-cleanup';
-        style.textContent = `[id*="popup" i],[class*="popup" i],[id*="popunder" i],[class*="popunder" i],[id*="advert" i],[class*="advert" i],[id*="adsbox" i],[class*="adsbox" i],[class*="overlay-ad" i],[class*="interstitial" i]{display:none!important;visibility:hidden!important;}`;
+        style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i]{display:none!important;visibility:hidden!important;}`;
         (document.head || document.documentElement).appendChild(style);
+
+        // DRM/EME detection only. Never bypass DRM or extract keys.
+        try {
+          const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
+          if (typeof originalRequestMediaKeySystemAccess === 'function' && !navigator.__sportsPlayerEmeHooked) {
+            navigator.__sportsPlayerEmeHooked = true;
+            navigator.requestMediaKeySystemAccess = function(keySystem, supportedConfigurations) {
+              report({type:'drm_detected', system:String(keySystem || 'unknown')});
+              return originalRequestMediaKeySystemAccess.apply(this, arguments);
+            };
+          }
+        } catch (_) {}
+
+        // Capture public media/API URLs exposed normally by fetch/XHR.
+        try {
+          if (window.fetch && !window.__sportsPlayerFetchHooked) {
+            window.__sportsPlayerFetchHooked = true;
+            const originalFetch = window.fetch;
+            window.fetch = function(input, init) {
+              try { addCandidate(typeof input === 'string' ? input : (input && input.url)); } catch (_) {}
+              return originalFetch.apply(this, arguments).then((response) => {
+                try { addCandidate(response && response.url); } catch (_) {}
+                return response;
+              });
+            };
+          }
+        } catch (_) {}
+        try {
+          if (window.XMLHttpRequest && !window.__sportsPlayerXhrHooked) {
+            window.__sportsPlayerXhrHooked = true;
+            const OriginalXHR = window.XMLHttpRequest;
+            const originalOpen = OriginalXHR.prototype.open;
+            OriginalXHR.prototype.open = function(method, url) {
+              try { addCandidate(url); } catch (_) {}
+              return originalOpen.apply(this, arguments);
+            };
+          }
+        } catch (_) {}
       } catch (_) {}
     })();''');
   }
 
   Future<List<String>> _detectPublicMediaSources(WebViewController controller) async {
     try {
-      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+      const js = r"""(() => {
         const out = new Set();
         const add = (value) => {
           if (!value || typeof value !== 'string') return;
@@ -300,9 +362,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           v.querySelectorAll('source').forEach(s => add(s.src));
         });
         document.querySelectorAll('source').forEach(s => add(s.src));
+        document.querySelectorAll('iframe').forEach(f => add(f.src));
         try { performance.getEntriesByType('resource').forEach(e => add(e.name)); } catch (_) {}
+        try { (window.__sportsPlayerMediaCandidates || []).forEach(add); } catch (_) {}
         return JSON.stringify(Array.from(out));
-      })();''');
+      })();""";
+      final result = await controller.runJavaScriptReturningResult(js);
       if (result is! String) return const [];
       var text = result;
       if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
@@ -317,35 +382,82 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   int _scoreDetectedSource(String url) {
     final lower = url.toLowerCase();
-    var score = lower.contains('.m3u8') ? 100 : 20;
+    var score = 0;
+    if (lower.contains('.m3u8')) score += 100;
+    else if (lower.contains('.mpd')) score += 85;
+    else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) score += 55;
     if (lower.contains('live')) score += 35;
     if (lower.contains('stream')) score += 25;
     if (lower.contains('channel')) score += 20;
     if (lower.contains('master')) score += 15;
     if (lower.contains('playlist')) score += 10;
     if (lower.contains('segment') || lower.contains('.ts')) score -= 100;
-    if (lower.contains('ads') || lower.contains('advert') || lower.contains('vast')) score -= 80;
+    if (lower.contains('ads') || lower.contains('advert') || lower.contains('vast') || lower.contains('doubleclick')) score -= 100;
     return score;
+  }
+
+  bool _looksLikeHls(String url) => RegExp(r'\.m3u8(?:$|[?#])', caseSensitive: false).hasMatch(url);
+  bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
+
+  Future<bool> _validatePublicMediaSource(String url) async {
+    try {
+      final uri = Uri.parse(url);
+      final headers = <String, String>{
+        'user-agent': _headers?['user-agent'] ?? 'Mozilla/5.0 (Android) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36',
+        'accept': '*/*',
+      };
+      if (_looksLikeHls(url)) {
+        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        if (response.statusCode < 200 || response.statusCode >= 300) return false;
+        final body = response.body;
+        return RegExp(r'#EXTM3U', caseSensitive: false).hasMatch(body) ||
+            RegExp(r'#EXT-X-(STREAM-INF|TARGETDURATION|MEDIA-SEQUENCE)', caseSensitive: false).hasMatch(body);
+      }
+      if (_looksLikeProgressiveVideo(url)) {
+        final response = await http.head(uri, headers: headers).timeout(const Duration(seconds: 8));
+        if (response.statusCode < 200 || response.statusCode >= 400) return false;
+        final type = (response.headers['content-type'] ?? '').toLowerCase();
+        return type.isEmpty || type.startsWith('video/') || type.contains('octet-stream');
+      }
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<void> _autoDetectWebSource(WebViewController controller) async {
     _webDetectorTimer?.cancel();
     var attempts = 0;
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-      if (!mounted || _webSwitchingToNative || attempts++ >= 15) { timer.cancel(); return; }
+      if (!mounted || _webSwitchingToNative || attempts++ >= 15) {
+        timer.cancel();
+        return;
+      }
+      if (_webDrmDetected) return;
       final sources = await _detectPublicMediaSources(controller);
-      for (final source in sources) {
+      final ranked = sources
+          .where((source) => _scoreDetectedSource(source) >= 80)
+          .toList()
+        ..sort((a, b) => _scoreDetectedSource(b).compareTo(_scoreDetectedSource(a)));
+
+      for (final source in ranked) {
         if (!_webSeenSources.add(source)) continue;
         final uri = Uri.tryParse(source);
         if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
-        final lower = source.toLowerCase();
-        if (lower.contains('.mpd') || _scoreDetectedSource(source) < 80) continue;
+        if (source.toLowerCase().contains('.mpd')) continue;
+
+        // لا ننقل المستخدم إلى Native Player لمجرد وجود امتداد m3u8/mp4.
+        // نتحقق أولاً أن المصدر نفسه حي وأنه فعلاً HLS/فيديو.
+        if (!await _validatePublicMediaSource(source)) continue;
+        if (!mounted || _webSwitchingToNative) return;
+
         _webSwitchingToNative = true;
         timer.cancel();
-        final quality = StreamQuality(label: 'تلقائي', url: source);
+        final quality = StreamQuality(label: 'المصدر المكتشف تلقائياً', url: source);
         await _playServerQuality(
           StreamServerOption(label: 'المصدر المكتشف تلقائياً', qualities: [quality]),
           quality,
+          fallbackToWeb: true,
         );
         return;
       }
@@ -358,6 +470,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _isWebSource = true;
       _webSwitchingToNative = false;
       _webSeenSources.clear();
+      _webDrmDetected = false;
+      _webDrmSystem = null;
     });
     try {
       final sourceUri = Uri.parse(url);
@@ -366,10 +480,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
+        ..addJavaScriptChannel(
+          'SportsPlayerSource',
+          onMessageReceived: (message) {
+            try {
+              final decoded = jsonDecode(message.message);
+              if (decoded is Map && decoded['type'] == 'drm_detected') {
+                if (!mounted) return;
+                setState(() {
+                  _webDrmDetected = true;
+                  _webDrmSystem = decoded['system']?.toString();
+                });
+                _webSwitchingToNative = false;
+              }
+            } catch (_) {}
+          },
+        )
         ..setNavigationDelegate(NavigationDelegate(
           onNavigationRequest: (request) {
             if (!request.isMainFrame) return NavigationDecision.navigate;
-            return _isAllowedWebNavigation(request.url) ? NavigationDecision.navigate : NavigationDecision.prevent;
+            return _isAllowedWebNavigation(request.url)
+                ? NavigationDecision.navigate
+                : NavigationDecision.prevent;
           },
           onPageFinished: (_) async {
             await _installWebProtection(controller);
@@ -381,24 +513,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             if (mounted && error.isForMainFrame == true && !_webSwitchingToNative) {
               setState(() {
                 _state = _LoadState.error;
-                _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط وحاول مرة أخرى.';
+                _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط والاتصال بالإنترنت ثم حاول مرة أخرى.';
               });
             }
           },
         ));
       await controller.loadRequest(sourceUri);
       if (!mounted) return;
-      setState(() { _webController = controller; _state = _LoadState.ready; });
+      _webController = controller;
+      setState(() => _state = _LoadState.ready);
       unawaited(_autoDetectWebSource(controller));
     } catch (_) {
       if (!mounted) return;
-      setState(() { _state = _LoadState.error; _errorMessage = 'تعذر فتح صفحة المصدر.'; });
+      setState(() {
+        _state = _LoadState.error;
+        _errorMessage = 'تعذر فتح صفحة المصدر. تحقق من الرابط وحاول مرة أخرى.';
+      });
     }
   }
 
   // ---------------------- play ----------------------
   Future<void> _playServerQuality(
-      StreamServerOption server, StreamQuality quality) async {
+      StreamServerOption server, StreamQuality quality, {bool fallbackToWeb = false}) async {
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = false;
@@ -425,6 +561,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       setState(() => _state = _LoadState.ready);
     } catch (error) {
       if (!mounted) return;
+      if (fallbackToWeb) {
+        _webSwitchingToNative = false;
+        setState(() {
+          _isWebSource = true;
+          _state = _LoadState.ready;
+          _errorMessage = '';
+        });
+        final web = _webController;
+        if (web != null) unawaited(_autoDetectWebSource(web));
+        return;
+      }
       setState(() {
         _state = _LoadState.error;
         _errorMessage = _describePlaybackError(error);
@@ -444,24 +591,31 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         text.contains('failed host lookup') ||
         text.contains('network is unreachable') ||
         text.contains('unable to connect') ||
-        text.contains('connection refused')) {
-      return 'تعذر الاتصال بالخادم. تحقق من اتصال الإنترنت وحاول مرة أخرى.';
+        text.contains('connection refused') ||
+        text.contains('connection reset') ||
+        text.contains('no route to host')) {
+      return 'لا يوجد اتصال بالخادم. تحقق من الإنترنت ثم حاول مرة أخرى.';
     }
     if (text.contains('timeout') || text.contains('timed out')) {
-      return 'انتهت مهلة الاتصال بالخادم. تحقق من سرعة الإنترنت وحاول مرة أخرى.';
+      return 'انتهت مهلة الاتصال بالخادم. قد يكون الخادم بطيئًا أو الاتصال غير مستقر.';
     }
-    if (text.contains('404') || text.contains('403') || text.contains('410') ||
-        text.contains('gone') || text.contains('forbidden')) {
-      return 'انتهت صلاحية هذا الرابط أو لم يعد متاحاً. جرّب سيرفر آخر.';
+    if (text.contains('404') || text.contains('410') || text.contains('not found') || text.contains('gone')) {
+      return 'المصدر غير موجود أو انتهت صلاحيته. جرّب سيرفرًا آخر.';
     }
-    if (text.contains('unrecognized') ||
-        text.contains('unsupported') ||
-        text.contains('source error') ||
-        text.contains('parsererror') ||
-        text.contains('format')) {
-      return 'صيغة هذا المصدر غير مدعومة على جهازك. جرّب سيرفر أو جودة أخرى.';
+    if (text.contains('403') || text.contains('401') || text.contains('forbidden') || text.contains('unauthorized')) {
+      return 'الخادم رفض الوصول إلى هذا المصدر. جرّب سيرفرًا أو جودة أخرى.';
     }
-    return 'تعذر تشغيل هذا المصدر. جرّب سيرفر أو جودة أخرى.';
+    if (text.contains('unrecognized') || text.contains('unsupported') || text.contains('source error') ||
+        text.contains('parsererror') || text.contains('decoder') || text.contains('mime') || text.contains('format')) {
+      return 'صيغة هذا المصدر غير مدعومة على جهازك. جرّب سيرفرًا أو جودة أخرى.';
+    }
+    if (text.contains('behind live window') || text.contains('live window') || text.contains('behindlivewindow')) {
+      return 'تعذر الوصول إلى نقطة البث المباشر الحالية. أعد المحاولة أو جرّب سيرفرًا آخر.';
+    }
+    if (text.contains('drm') || text.contains('widevine') || text.contains('encrypted')) {
+      return 'هذا المصدر يستخدم حماية DRM ولا يمكن تشغيله بالمشغل الأصلي.';
+    }
+    return 'حدث خطأ أثناء تشغيل المصدر. جرّب مرة أخرى أو اختر سيرفرًا آخر.';
   }
 
   // ---------------------- controls ----------------------

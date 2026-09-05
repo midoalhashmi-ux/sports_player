@@ -15,3 +15,14 @@ Recommended Rotana URL format:
 `https://rotana.net/ar/live#/live/rotana-comedy`
 
 The detector is intentionally best-effort: websites can change their player architecture, use cross-origin media, DRM, blob URLs, or encrypted delivery that cannot be converted to a native public URL.
+
+## Final detector hardening
+
+The web-source path now uses additional public-source signals:
+
+- DRM/EME detection via `requestMediaKeySystemAccess` (detection only; no DRM bypass or key extraction).
+- Fetch/XHR URL observation for media/API requests exposed normally by the page.
+- Existing DOM/video/iframe/performance detection remains enabled.
+- Candidate validation happens before switching to the native player.
+- If DRM is detected, the page stays in WebView rather than attempting native playback.
+- If a validated native source fails during playback, the player falls back to WebView automatically.
