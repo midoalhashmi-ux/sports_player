@@ -306,7 +306,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final sourceUri = Uri.parse(url);
       _webSourceOrigin = sourceUri.host;
 
-      final controller = WebViewController()
+      late final WebViewController controller;
+      controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
         ..setNavigationDelegate(
