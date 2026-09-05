@@ -1,5 +1,5 @@
 /// نوع مصدر البث — يحدد كيف يتعامل المشغل مع الرابط.
-enum StreamKind { hls, dash, progressive, other }
+enum StreamKind { hls, dash, progressive, web, other }
 
 /// جودة واحدة داخل سيرفر معيّن (مثلاً 1080p / 720p / تلقائي).
 class StreamQuality {

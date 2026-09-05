@@ -15,6 +15,29 @@ class ChannelSourceResolver {
           .get();
       final data = snapshot.data();
 
+      // يمكن للوحة التحكم تحديد أن المصدر صفحة ويب رسمية بدلاً من رابط
+      // فيديو مباشر. في هذه الحالة نعرض الصفحة داخل WebView ولا نحاول
+      // تمريرها إلى ExoPlayer كمصدر فيديو.
+      if (data != null && data['streamType'] == 'web') {
+        if (data['status'] == 'disabled') {
+          return StreamSession.failure('هذه القناة متوقفة مؤقتاً.');
+        }
+        final webUrl = (data['sourceUrl'] ?? data['streamUrl'] ?? data['directUrl'] ?? '').toString().trim();
+        if (webUrl.isEmpty) {
+          return StreamSession.failure('لم يتم ضبط رابط صفحة البث لهذه القناة بعد.');
+        }
+        return StreamSession.success(
+          kind: StreamKind.web,
+          isLive: data['status'] == 'live',
+          servers: [
+            StreamServerOption(
+              label: 'المصدر الرسمي',
+              qualities: [StreamQuality(label: 'صفحة البث', url: webUrl)],
+            ),
+          ],
+        );
+      }
+
       final isProtected = data == null || data['protected'] != false;
 
       if (!isProtected) {

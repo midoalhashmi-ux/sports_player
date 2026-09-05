@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
+import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
@@ -34,6 +35,8 @@ class WatchScreen extends StatefulWidget {
 
 class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   VideoPlayerController? _controller;
+  WebViewController? _webController;
+  bool _isWebSource = false;
   final GlobalKey _videoBoundaryKey = GlobalKey();
 
   _LoadState _state = _LoadState.loading;
@@ -179,14 +182,21 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
     final StreamSession session;
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
+      final external = widget.externalUrl!.trim();
+      final lower = external.toLowerCase();
+      final looksLikeVideo = lower.contains('.m3u8') ||
+          lower.contains('.mp4') ||
+          lower.contains('.m4v') ||
+          lower.contains('.mov') ||
+          lower.contains('.webm');
       session = StreamSession.success(
-        kind: StreamKind.hls,
-        isLive: false,
+        kind: looksLikeVideo ? StreamKind.hls : StreamKind.web,
+        isLive: !looksLikeVideo,
         servers: [
           StreamServerOption(
-            label: 'الرابط المُدخل',
+            label: looksLikeVideo ? 'الرابط المُدخل' : 'صفحة البث',
             qualities: [
-              StreamQuality(label: 'تلقائي', url: widget.externalUrl!)
+              StreamQuality(label: looksLikeVideo ? 'تلقائي' : 'صفحة البث', url: external)
             ],
           ),
         ],
@@ -208,10 +218,54 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
 
     _session = session;
+    if (session.kind == StreamKind.web) {
+      await _openWebSource(session.servers.first.qualities.first.url);
+      return;
+    }
     await _playServerQuality(
       session.servers.first,
       session.servers.first.qualities.first,
     );
+  }
+
+  // ---------------------- web source ----------------------
+  Future<void> _openWebSource(String url) async {
+    setState(() {
+      _state = _LoadState.loading;
+      _isWebSource = true;
+    });
+    try {
+      final controller = WebViewController()
+        ..setJavaScriptMode(JavaScriptMode.unrestricted)
+        ..setBackgroundColor(Colors.black)
+        ..setNavigationDelegate(
+          NavigationDelegate(
+            onPageFinished: (_) {
+              if (mounted) setState(() => _state = _LoadState.ready);
+            },
+            onWebResourceError: (error) {
+              if (mounted && error.isForMainFrame == true) {
+                setState(() {
+                  _state = _LoadState.error;
+                  _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط وحاول مرة أخرى.';
+                });
+              }
+            },
+          ),
+        );
+      await controller.loadRequest(Uri.parse(url));
+      if (!mounted) return;
+      setState(() {
+        _webController = controller;
+        _state = _LoadState.ready;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _state = _LoadState.error;
+        _errorMessage = 'تعذر فتح صفحة المصدر.';
+      });
+    }
   }
 
   // ---------------------- play ----------------------
@@ -219,6 +273,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       StreamServerOption server, StreamQuality quality) async {
     setState(() {
       _state = _LoadState.loading;
+      _isWebSource = false;
       _activeServer = server;
       _activeQuality = quality;
     });
@@ -657,10 +712,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              if (_state == _LoadState.ready) Center(child: _buildVideo()),
+              if (_state == _LoadState.ready && _isWebSource && _webController != null)
+                WebViewWidget(controller: _webController!),
+              if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
               if (_state == _LoadState.loading) _buildLoading(),
               if (_state == _LoadState.error) _buildError(),
-              if (_state == _LoadState.ready && _isBuffering)
+              if (_state == _LoadState.ready && !_isWebSource && _isBuffering)
                 const Center(
                   child: CircularProgressIndicator(color: Colors.white),
                 ),
@@ -668,6 +725,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               // بدل ما تكون بمنتصف الشاشة أسفل مؤشر التحميل مباشرة (كانت
               // تحجب جزءاً كبيراً من الصورة وتبدو مزعجة).
               if (_state == _LoadState.ready &&
+                  !_isWebSource &&
                   _isBuffering &&
                   _slowConnectionHint)
                 Positioned(
@@ -714,7 +772,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_locked)
+              if (_state == _LoadState.ready && !_isWebSource && !_locked)
                 AnimatedOpacity(
                   opacity: _controlsVisible ? 1 : 0,
                   duration: const Duration(milliseconds: 200),
@@ -725,7 +783,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ),
               // زر القفل يبقى ظاهراً دوماً (حتى مع إخفاء بقية التحكمات أو
               // أثناء القفل) عشان المستخدم يقدر دائماً يفتح القفل.
-              if (_state == _LoadState.ready)
+              if (_state == _LoadState.ready && !_isWebSource)
                 Positioned(
                   top: 8,
                   left: 8,
@@ -736,7 +794,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   ),
                 ),
               // speed badge
-              if (_state == _LoadState.ready && _playbackSpeed != 1.0)
+              if (_state == _LoadState.ready && !_isWebSource && _playbackSpeed != 1.0)
                 Positioned(
                   top: 12,
                   left: 56,
