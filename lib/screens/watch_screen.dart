@@ -230,6 +230,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   // ---------------------- web source ----------------------
   String? _webSourceOrigin;
+  Timer? _webDetectorTimer;
+  bool _webSwitchingToNative = false;
+  final Set<String> _webSeenSources = <String>{};
 
   bool _isAllowedWebNavigation(String target) {
     final uri = Uri.tryParse(target);
@@ -245,23 +248,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _installWebProtection(WebViewController controller) async {
-    // حماية على مستوى الصفحة: منع popups والتبويبات الجديدة والضغطات التي
-    // تفتح target=_blank أو تحاول نقل المستخدم إلى نافذة إعلانية.
     await controller.runJavaScript(r'''(() => {
       try {
         if (window.__sportsPlayerProtectionInstalled) return;
         window.__sportsPlayerProtectionInstalled = true;
-
         const blocked = (url) => {
           try {
             const u = new URL(url, location.href);
             const h = (u.hostname || '').toLowerCase();
-            const bad = /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i;
-            return bad.test(h);
+            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i.test(h);
           } catch (_) { return false; }
         };
-
-        const originalOpen = window.open;
         window.open = function(url) {
           if (!url || blocked(url)) return null;
           try {
@@ -270,7 +267,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           } catch (_) { return null; }
           return null;
         };
-
         document.addEventListener('click', (e) => {
           let el = e.target;
           while (el && el.tagName !== 'A') el = el.parentElement;
@@ -278,75 +274,125 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           const href = el.getAttribute('href') || '';
           const target = (el.getAttribute('target') || '').toLowerCase();
           if (target === '_blank' || target === '_new' || blocked(href)) {
-            e.preventDefault();
-            e.stopPropagation();
+            e.preventDefault(); e.stopPropagation();
           }
         }, true);
-
         const style = document.createElement('style');
         style.id = 'sports-player-ad-cleanup';
-        style.textContent = `
-          [id*="popup" i], [class*="popup" i],
-          [id*="popunder" i], [class*="popunder" i],
-          [id*="advert" i], [class*="advert" i],
-          [id*="adsbox" i], [class*="adsbox" i],
-          [class*="overlay-ad" i], [class*="interstitial" i] { display:none !important; visibility:hidden !important; }
-        `;
+        style.textContent = `[id*="popup" i],[class*="popup" i],[id*="popunder" i],[class*="popunder" i],[id*="advert" i],[class*="advert" i],[id*="adsbox" i],[class*="adsbox" i],[class*="overlay-ad" i],[class*="interstitial" i]{display:none!important;visibility:hidden!important;}`;
         (document.head || document.documentElement).appendChild(style);
       } catch (_) {}
     })();''');
+  }
+
+  Future<List<String>> _detectPublicMediaSources(WebViewController controller) async {
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        const out = new Set();
+        const add = (value) => {
+          if (!value || typeof value !== 'string') return;
+          const v = value.trim();
+          if (!/^https?:\/\//i.test(v)) return;
+          if (/\.(m3u8|mpd|mp4|m4v|webm|mov)(?:$|[?#])/i.test(v)) out.add(v);
+        };
+        document.querySelectorAll('video').forEach(v => {
+          add(v.currentSrc); add(v.src);
+          v.querySelectorAll('source').forEach(s => add(s.src));
+        });
+        document.querySelectorAll('source').forEach(s => add(s.src));
+        try { performance.getEntriesByType('resource').forEach(e => add(e.name)); } catch (_) {}
+        return JSON.stringify(Array.from(out));
+      })();''');
+      if (result is! String) return const [];
+      var text = result;
+      if (text.length >= 2 && text.startsWith('"') && text.endsWith('"')) {
+        text = text.substring(1, text.length - 1).replaceAll(r'\"', '"').replaceAll(r'\\', r'\');
+      }
+      final matches = RegExp(r'https?://[^"\s\]]+').allMatches(text);
+      return matches.map((m) => m.group(0)!).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  int _scoreDetectedSource(String url) {
+    final lower = url.toLowerCase();
+    var score = lower.contains('.m3u8') ? 100 : 20;
+    if (lower.contains('live')) score += 35;
+    if (lower.contains('stream')) score += 25;
+    if (lower.contains('channel')) score += 20;
+    if (lower.contains('master')) score += 15;
+    if (lower.contains('playlist')) score += 10;
+    if (lower.contains('segment') || lower.contains('.ts')) score -= 100;
+    if (lower.contains('ads') || lower.contains('advert') || lower.contains('vast')) score -= 80;
+    return score;
+  }
+
+  Future<void> _autoDetectWebSource(WebViewController controller) async {
+    _webDetectorTimer?.cancel();
+    var attempts = 0;
+    _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!mounted || _webSwitchingToNative || attempts++ >= 15) { timer.cancel(); return; }
+      final sources = await _detectPublicMediaSources(controller);
+      for (final source in sources) {
+        if (!_webSeenSources.add(source)) continue;
+        final uri = Uri.tryParse(source);
+        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
+        final lower = source.toLowerCase();
+        if (lower.contains('.mpd') || _scoreDetectedSource(source) < 80) continue;
+        _webSwitchingToNative = true;
+        timer.cancel();
+        final quality = StreamQuality(label: 'تلقائي', url: source);
+        await _playServerQuality(
+          StreamServerOption(label: 'المصدر المكتشف تلقائياً', qualities: [quality]),
+          quality,
+        );
+        return;
+      }
+    });
   }
 
   Future<void> _openWebSource(String url) async {
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
+      _webSwitchingToNative = false;
+      _webSeenSources.clear();
     });
     try {
       final sourceUri = Uri.parse(url);
       _webSourceOrigin = sourceUri.host;
-
       late final WebViewController controller;
       controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
-        ..setNavigationDelegate(
-          NavigationDelegate(
-            onNavigationRequest: (request) {
-              // لا نسمح للصفحة الرئيسية بالانتقال إلى نطاق إعلاني/مزعج.
-              // موارد الفيديو وiframes لا تتأثر لأننا نطبق الحماية على
-              // التنقل الرئيسي فقط.
-              if (!request.isMainFrame) return NavigationDecision.navigate;
-              return _isAllowedWebNavigation(request.url)
-                  ? NavigationDecision.navigate
-                  : NavigationDecision.prevent;
-            },
-            onPageFinished: (_) async {
-              await _installWebProtection(controller);
-              if (mounted) setState(() => _state = _LoadState.ready);
-            },
-            onWebResourceError: (error) {
-              if (mounted && error.isForMainFrame == true) {
-                setState(() {
-                  _state = _LoadState.error;
-                  _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط وحاول مرة أخرى.';
-                });
-              }
-            },
-          ),
-        );
+        ..setNavigationDelegate(NavigationDelegate(
+          onNavigationRequest: (request) {
+            if (!request.isMainFrame) return NavigationDecision.navigate;
+            return _isAllowedWebNavigation(request.url) ? NavigationDecision.navigate : NavigationDecision.prevent;
+          },
+          onPageFinished: (_) async {
+            await _installWebProtection(controller);
+            if (!mounted || _webSwitchingToNative) return;
+            setState(() => _state = _LoadState.ready);
+            unawaited(_autoDetectWebSource(controller));
+          },
+          onWebResourceError: (error) {
+            if (mounted && error.isForMainFrame == true && !_webSwitchingToNative) {
+              setState(() {
+                _state = _LoadState.error;
+                _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط وحاول مرة أخرى.';
+              });
+            }
+          },
+        ));
       await controller.loadRequest(sourceUri);
       if (!mounted) return;
-      setState(() {
-        _webController = controller;
-        _state = _LoadState.ready;
-      });
-    } catch (error) {
+      setState(() { _webController = controller; _state = _LoadState.ready; });
+      unawaited(_autoDetectWebSource(controller));
+    } catch (_) {
       if (!mounted) return;
-      setState(() {
-        _state = _LoadState.error;
-        _errorMessage = 'تعذر فتح صفحة المصدر.';
-      });
+      setState(() { _state = _LoadState.error; _errorMessage = 'تعذر فتح صفحة المصدر.'; });
     }
   }
 
@@ -764,6 +810,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _webDetectorTimer?.cancel();
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
