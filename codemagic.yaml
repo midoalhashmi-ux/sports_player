@@ -12,4 +12,4 @@ workflows:
       - name: بناء AAB (لرفعه على Google Play)
         script: flutter build appbundle --release
     artifacts:
-      - build/**/outputs/**/*.aab
+      - build/**/outputs/**/*.apk
