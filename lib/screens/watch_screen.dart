@@ -229,18 +229,99 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   // ---------------------- web source ----------------------
+  String? _webSourceOrigin;
+
+  bool _isAllowedWebNavigation(String target) {
+    final uri = Uri.tryParse(target);
+    if (uri == null || !uri.hasScheme) return false;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return false;
+
+    final sourceHost = _webSourceOrigin;
+    if (sourceHost == null || sourceHost.isEmpty) return true;
+
+    final host = uri.host.toLowerCase();
+    final source = sourceHost.toLowerCase();
+    return host == source || host.endsWith('.$source');
+  }
+
+  Future<void> _installWebProtection(WebViewController controller) async {
+    // حماية على مستوى الصفحة: منع popups والتبويبات الجديدة والضغطات التي
+    // تفتح target=_blank أو تحاول نقل المستخدم إلى نافذة إعلانية.
+    await controller.runJavaScript(r'''(() => {
+      try {
+        if (window.__sportsPlayerProtectionInstalled) return;
+        window.__sportsPlayerProtectionInstalled = true;
+
+        const blocked = (url) => {
+          try {
+            const u = new URL(url, location.href);
+            const h = (u.hostname || '').toLowerCase();
+            const bad = /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i;
+            return bad.test(h);
+          } catch (_) { return false; }
+        };
+
+        const originalOpen = window.open;
+        window.open = function(url) {
+          if (!url || blocked(url)) return null;
+          try {
+            const u = new URL(url, location.href);
+            if (u.origin !== location.origin) return null;
+          } catch (_) { return null; }
+          return null;
+        };
+
+        document.addEventListener('click', (e) => {
+          let el = e.target;
+          while (el && el.tagName !== 'A') el = el.parentElement;
+          if (!el) return;
+          const href = el.getAttribute('href') || '';
+          const target = (el.getAttribute('target') || '').toLowerCase();
+          if (target === '_blank' || target === '_new' || blocked(href)) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }, true);
+
+        const style = document.createElement('style');
+        style.id = 'sports-player-ad-cleanup';
+        style.textContent = `
+          [id*="popup" i], [class*="popup" i],
+          [id*="popunder" i], [class*="popunder" i],
+          [id*="advert" i], [class*="advert" i],
+          [id*="adsbox" i], [class*="adsbox" i],
+          [class*="overlay-ad" i], [class*="interstitial" i] { display:none !important; visibility:hidden !important; }
+        `;
+        (document.head || document.documentElement).appendChild(style);
+      } catch (_) {}
+    })();''');
+  }
+
   Future<void> _openWebSource(String url) async {
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
     });
     try {
+      final sourceUri = Uri.parse(url);
+      _webSourceOrigin = sourceUri.host;
+
       final controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
         ..setNavigationDelegate(
           NavigationDelegate(
-            onPageFinished: (_) {
+            onNavigationRequest: (request) {
+              // لا نسمح للصفحة الرئيسية بالانتقال إلى نطاق إعلاني/مزعج.
+              // موارد الفيديو وiframes لا تتأثر لأننا نطبق الحماية على
+              // التنقل الرئيسي فقط.
+              if (!request.isMainFrame) return NavigationDecision.navigate;
+              return _isAllowedWebNavigation(request.url)
+                  ? NavigationDecision.navigate
+                  : NavigationDecision.prevent;
+            },
+            onPageFinished: (_) async {
+              await _installWebProtection(controller);
               if (mounted) setState(() => _state = _LoadState.ready);
             },
             onWebResourceError: (error) {
@@ -253,7 +334,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             },
           ),
         );
-      await controller.loadRequest(Uri.parse(url));
+      await controller.loadRequest(sourceUri);
       if (!mounted) return;
       setState(() {
         _webController = controller;
