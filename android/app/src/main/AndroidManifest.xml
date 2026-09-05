@@ -1,0 +1,63 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <!-- مطلوب من Google Play لأي تطبيق يستخدم SDK إعلانات (يقرأ معرّف
+         الإعلانات AAID). حزمة google_mobile_ads تضيفه تلقائياً عادةً،
+         لكن وضعناه صراحةً هنا لأنه من الأشياء التي قد تُحذف بالخطأ عند
+         "تنظيف" الأذونات لإرضاء Google Play Console — وحذفه لا يمنع
+         الإعلانات من العمل لكنه يجعلها غير مخصّصة فقط، وأحياناً يسبب
+         رفض النشر بدل قبوله لو التطبيق يصرّح استخدام إعلانات في نموذج
+         "سلامة البيانات" (Data safety) دون أن يطابقه إذن AD_ID فعلي. -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID"/>
+
+    <application
+        android:label="BinSheikh Player"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize"
+            android:supportsPictureInPicture="true"
+            android:resizeableActivity="true">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="sportsplayer" android:host="play" />
+            </intent-filter>
+        </activity>
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+
+        <!-- معرّف تطبيق AdMob — هذا معرّف اختبار رسمي من Google، آمن للبناء
+             والتجربة الآن. قبل النشر النهائي على المتجر، استبدله بمعرّف
+             تطبيقك الحقيقي من حساب AdMob (Apps -> App settings -> App ID).
+
+             ملاحظة مهمة: خانة "معرّف التطبيق (App ID)" في لوحة التحكم
+             (تبويب الإعلانات) لا تُطبَّق هنا تلقائياً — Google تتطلب هذا
+             المعرّف في AndroidManifest.xml وقت البناء، قبل أن يتصل
+             التطبيق بالإنترنت أصلاً، فلا يمكن جلبه من Firestore. عدّل
+             القيمة أدناه يدوياً ثم أعد البناء عند توفر معرّف تطبيقك
+             الحقيقي. أما أكواد البانر/البيني (وأكواد الوحدات الإعلانية
+             الأخرى) فتُقرأ ديناميكياً من settings/ads ولا تحتاج إعادة
+             بناء. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-3940256099942544~3347511713"/>
+    </application>
+</manifest>
