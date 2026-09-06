@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'dart:ui' as ui;
+import 'dart:math'; // للـ XOR
 
 import 'package:http/http.dart' as http;
 
@@ -95,14 +96,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
 
   // ---------------------------------------------------------------------
-  // إصلاح جذري لمشكلة "صوت البث خلف الإعلان": يحدث هذا تحديداً عند اختيار
-  // قناة جديدة والمشغل يعمل بالفعل في الخلفية (المستخدم فتح قناة، رجع
-  // للتطبيق الرئيسي، ثم اختار قناة أخرى). في هذه الحالة تصل الشاشة الجديدة
-  // عبر رابط عميق وتستبدل المكدس، لكن شاشة المشاهدة *القديمة* تبقى حيّة
-  // (وصوتها يعمل) طوال مدة أنيميشن الانتقال قبل أن يُستدعى dispose() لها —
-  // وخلال هذه اللحظة بالذات يظهر إعلان الشاشة الجديدة فيبدو الصوت القديم
-  // "خلف" الإعلان. نحتفظ بمرجع ثابت لآخر شاشة مشاهدة نشطة، ونُسكتها فوراً
-  // (بشكل متزامن، قبل أي إعلان أو تحميل) بمجرد أن تبدأ شاشة جديدة.
+  // إصلاح جذري لمشكلة "صوت البث خلف الإعلان"
   static _WatchScreenState? _activeInstance;
 
   Future<void> _stopBeforeInterstitial() async {
@@ -111,13 +105,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final controller = _controller;
     if (controller != null && controller.value.isInitialized) {
       try {
-        // لا نعرض الإعلان حتى يؤكد مشغل أندرويد وصول الكتم والإيقاف إليه.
-        // استدعاء pause بدون انتظار كان يترك الصوت يعمل للحظات خلف الإعلان.
         await controller.setVolume(0);
         await controller.pause();
-      } catch (_) {
-        // لو كان المشغل يُغلق أصلاً، لا نمنع المستخدم من متابعة المصدر التالي.
-      }
+      } catch (_) {}
     }
   }
 
@@ -140,8 +130,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    // نوقف المصدر السابق ونتأكد من إيقافه فعلياً قبل فتح الإعلان. ثم لا
-    // يبدأ تحميل المصدر الجديد إلا بعد إغلاق الإعلان البيني.
     unawaited(_prepareAndStartPlayback());
   }
 
@@ -171,10 +159,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  // بدأ تخزين مؤقت جديد — لو استمر أكثر من 6 ثوانٍ متواصلة نعتبرها إشارة
-  // على اتصال بطيء ونعرض رسالة توضيحية للمستخدم بدل مؤشر دوّار صامت لا
-  // يشرح له السبب. لا نقيس سرعة الشبكة فعلياً (video_player لا يوفرها)،
-  // فقط مدة الانتظار كمؤشر تقريبي معقول.
   void _startSlowConnectionTimer() {
     _cancelSlowConnectionTimer();
     _slowConnectionTimer = Timer(const Duration(seconds: 6), () {
@@ -190,64 +174,302 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (_slowConnectionHint) setState(() => _slowConnectionHint = false);
   }
 
-  // ---------------------- session ----------------------
-  Future<void> _startSession() async {
-    setState(() => _state = _LoadState.loading);
+  // ---------------------- دوال المعالجة المتسلسلة (المضافة حديثاً) ----------------------
+  
+  /// نقطة الدخول لمعالجة رابط القناة حسب الشجرة المطلوبة.
+  Future<StreamSession?> _resolveChannelUrl(String initialUrl) async {
+    try {
+      final resolvedUrl = await _resolveStreamUrl(initialUrl);
+      if (resolvedUrl == null) {
+        return StreamSession.failure('تعذر حل رابط البث.');
+      }
 
-    _headers = (widget.externalUserAgent != null &&
-            widget.externalUserAgent!.isNotEmpty)
-        ? {'user-agent': widget.externalUserAgent!}
-        : null;
+      final lower = resolvedUrl.toLowerCase();
+      final isHls = lower.contains('.m3u8') || lower.contains('m3u8');
+      final isDash = lower.contains('.mpd');
+      final isProgressive = lower.contains('.mp4') || lower.contains('.webm') || lower.contains('.mov');
+      final isWeb = !(isHls || isDash || isProgressive);
 
-    final StreamSession session;
-    if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
-      final external = widget.externalUrl!.trim();
-      final lower = external.toLowerCase();
-      final looksLikeVideo = lower.contains('.m3u8') ||
-          lower.contains('.mp4') ||
-          lower.contains('.m4v') ||
-          lower.contains('.mov') ||
-          lower.contains('.webm');
-      session = StreamSession.success(
-        kind: looksLikeVideo ? StreamKind.hls : StreamKind.web,
-        isLive: !looksLikeVideo,
+      StreamKind kind;
+      if (isHls) kind = StreamKind.hls;
+      else if (isDash) kind = StreamKind.dash;
+      else if (isProgressive) kind = StreamKind.progressive;
+      else kind = StreamKind.web;
+
+      return StreamSession.success(
+        kind: kind,
+        isLive: true,
         servers: [
           StreamServerOption(
-            label: looksLikeVideo ? 'الرابط المُدخل' : 'صفحة البث',
-            qualities: [
-              StreamQuality(label: looksLikeVideo ? 'تلقائي' : 'صفحة البث', url: external)
-            ],
+            label: 'المصدر المُستخرج',
+            qualities: [StreamQuality(label: 'تلقائي', url: resolvedUrl)],
           ),
         ],
       );
-    } else if (widget.channelId != null) {
-      session = await ChannelSourceResolver.resolve(widget.channelId!);
-    } else {
-      session = StreamSession.failure('لا يوجد مصدر بث لتشغيله.');
+    } catch (e) {
+      return StreamSession.failure(e.toString());
     }
-
-    if (!mounted) return;
-
-    if (!session.ok || session.servers.isEmpty) {
-      setState(() {
-        _state = _LoadState.error;
-        _errorMessage = session.errorMessage ?? 'تعذر تشغيل البث.';
-      });
-      return;
-    }
-
-    _session = session;
-    if (session.kind == StreamKind.web) {
-      await _openWebSource(session.servers.first.qualities.first.url);
-      return;
-    }
-    await _playServerQuality(
-      session.servers.first,
-      session.servers.first.qualities.first,
-    );
   }
 
-  // ---------------------- web source ----------------------
+  /// المعالجة المتسلسلة: تتبع إعادة التوجيه، فك التشفير، واستخراج الروابط.
+  Future<String?> _resolveStreamUrl(String url, {int maxDepth = 10}) async {
+    String currentUrl = url;
+    int depth = 0;
+
+    while (depth < maxDepth) {
+      depth++;
+      final client = http.Client();
+      try {
+        final response = await client
+            .get(Uri.parse(currentUrl), headers: {
+              'User-Agent': _headers?['user-agent'] ??
+                  'Mozilla/5.0 (Android) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36',
+              'Accept': '*/*',
+            })
+            .timeout(const Duration(seconds: 15));
+
+        final next = await _processResponse(response, currentUrl);
+        if (next == null) {
+          return null;
+        }
+        if (next == currentUrl) {
+          // لم يتغير، ربما وصلنا إلى رابط نهائي
+          return currentUrl;
+        }
+        currentUrl = next;
+        if (_isDirectPlayable(currentUrl)) {
+          return currentUrl;
+        }
+      } catch (e) {
+        return null;
+      } finally {
+        client.close();
+      }
+    }
+    return currentUrl;
+  }
+
+  /// تحليل الاستجابة وتحديد الرابط التالي أو null.
+  Future<String?> _processResponse(http.Response response, String currentUrl) async {
+    final status = response.statusCode;
+    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+
+    // 1. إعادة توجيه (3xx)
+    if (status >= 300 && status < 400) {
+      final location = response.headers['location'];
+      if (location != null && location.isNotEmpty) {
+        final uri = Uri.tryParse(location);
+        if (uri != null) {
+          if (!uri.isAbsolute) {
+            final base = Uri.parse(currentUrl);
+            return base.resolveUri(uri).toString();
+          }
+          return location;
+        }
+      }
+      return null;
+    }
+
+    // 2. M3U8 مباشر
+    if (contentType.contains('application/vnd.apple.mpegurl') ||
+        contentType.contains('audio/x-mpegurl') ||
+        currentUrl.toLowerCase().contains('.m3u8')) {
+      return currentUrl;
+    }
+
+    final body = response.body;
+
+    // 3. JSON صحيح
+    if (contentType.contains('application/json') || _looksLikeJson(body)) {
+      try {
+        final decoded = jsonDecode(body);
+        if (decoded is Map<String, dynamic>) {
+          final extracted = _extractUrlFromJson(decoded);
+          if (extracted != null) {
+            return _resolveRelativeUrl(extracted, currentUrl);
+          }
+          // محاولة فك التشفير من الحقول المشفرة
+          for (final key in ['data', 'payload', 'encoded', 'cipher', 'result']) {
+            if (decoded.containsKey(key) && decoded[key] is String) {
+              final decodedPayload = _decodePayload(decoded[key] as String);
+              if (decodedPayload != null) {
+                final maybeJson = _tryParseJson(decodedPayload);
+                if (maybeJson is Map<String, dynamic>) {
+                  final nestedUrl = _extractUrlFromJson(maybeJson);
+                  if (nestedUrl != null) return _resolveRelativeUrl(nestedUrl, currentUrl);
+                } else {
+                  if (_isDirectPlayable(decodedPayload) || decodedPayload.startsWith('http')) {
+                    return _resolveRelativeUrl(decodedPayload, currentUrl);
+                  }
+                }
+              }
+            }
+          }
+          // البحث عن قائمة تشغيل
+          if (decoded.containsKey('playlist') && decoded['playlist'] is List) {
+            final list = decoded['playlist'] as List;
+            if (list.isNotEmpty && list[0] is String) {
+              return _resolveRelativeUrl(list[0].toString(), currentUrl);
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 4. محاولة فك التشفير حتى لو لم يكن Content-Type JSON
+    final decodedBody = _decodePayload(body);
+    if (decodedBody != null && decodedBody != body) {
+      final maybeJson = _tryParseJson(decodedBody);
+      if (maybeJson is Map<String, dynamic>) {
+        final extracted = _extractUrlFromJson(maybeJson);
+        if (extracted != null) return _resolveRelativeUrl(extracted, currentUrl);
+      } else {
+        if (_isDirectPlayable(decodedBody) || decodedBody.startsWith('http')) {
+          return _resolveRelativeUrl(decodedBody, currentUrl);
+        }
+      }
+    }
+
+    // 5. HTML
+    if (contentType.contains('text/html') || body.trim().startsWith('<!DOCTYPE') || body.trim().startsWith('<html')) {
+      final extracted = _extractUrlFromHtml(body);
+      if (extracted != null) return _resolveRelativeUrl(extracted, currentUrl);
+    }
+
+    // 6. إذا لم نجد شيئاً، نعيد الرابط الحالي (قد يكون صفحة ويب)
+    return currentUrl;
+  }
+
+  /// محاولة فك تشفير الحمولة بطرق متعددة (Base64، XOR، Hex، ...)
+  String? _decodePayload(String input) {
+    // 1. Base64 (عادي)
+    try {
+      final cleaned = input.replaceAll(RegExp(r'\s'), '');
+      final bytes = base64.decode(cleaned);
+      final decoded = utf8.decode(bytes);
+      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
+        return decoded;
+      }
+    } catch (_) {}
+
+    // 2. Base64 URL-safe
+    try {
+      final cleaned = input.replaceAll(RegExp(r'\s'), '').replaceAll('-', '+').replaceAll('_', '/');
+      final bytes = base64.decode(cleaned);
+      final decoded = utf8.decode(bytes);
+      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
+        return decoded;
+      }
+    } catch (_) {}
+
+    // 3. XOR بمفتاح ثابت (يمكن تغيير المفتاح حسب الحاجة)
+    try {
+      const key = 'mySecretKey123'; // غيّر هذا المفتاح إن لزم
+      final bytes = input.codeUnits;
+      final keyBytes = key.codeUnits;
+      final result = <int>[];
+      for (int i = 0; i < bytes.length; i++) {
+        result.add(bytes[i] ^ keyBytes[i % keyBytes.length]);
+      }
+      final decoded = utf8.decode(result);
+      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
+        return decoded;
+      }
+    } catch (_) {}
+
+    // 4. فك تشفير Hex (إذا كان النص يتكون من أزواج هيكسية)
+    try {
+      final cleaned = input.replaceAll(RegExp(r'\s'), '');
+      if (RegExp(r'^[0-9a-fA-F]+$').hasMatch(cleaned) && cleaned.length % 2 == 0) {
+        final bytes = List.generate(cleaned.length ~/ 2, (i) => int.parse(cleaned.substring(i*2, i*2+2), radix: 16));
+        final decoded = utf8.decode(bytes);
+        if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
+          return decoded;
+        }
+      }
+    } catch (_) {}
+
+    // 5. محاولة فك ضغط (إذا كان مضغوطاً بـ GZip أو ZLib) – نادر لكن ممكن
+    // نترك هذه كملاحظة لأنها تتطلب مكتبة إضافية
+
+    return null;
+  }
+
+  /// استخراج رابط من كائن JSON (يبحث في الحقول الشائعة).
+  String? _extractUrlFromJson(Map<String, dynamic> json) {
+    final candidates = ['url', 'link', 'src', 'source', 'playlist', 'stream', 'hls', 'dash', 'progressive', 'video', 'file', 'play', 'watch'];
+    for (final key in candidates) {
+      if (json.containsKey(key) && json[key] is String) {
+        final val = json[key].toString().trim();
+        if (val.isNotEmpty && (val.startsWith('http') || val.startsWith('/'))) {
+          return val;
+        }
+      }
+    }
+    // البحث في الحقول المتداخلة
+    for (final key in ['data', 'result', 'response', 'body']) {
+      if (json.containsKey(key) && json[key] is Map<String, dynamic>) {
+        final nested = _extractUrlFromJson(json[key] as Map<String, dynamic>);
+        if (nested != null) return nested;
+      }
+    }
+    return null;
+  }
+
+  /// استخراج رابط من HTML (يبحث عن video, source, iframe).
+  String? _extractUrlFromHtml(String html) {
+    final regex = RegExp(r'(?:src|data-src|href)\s*=\s*"([^"]+)"', caseSensitive: false);
+    final matches = regex.allMatches(html);
+    for (final match in matches) {
+      final url = match.group(1);
+      if (url != null && url.isNotEmpty && (url.startsWith('http') || url.startsWith('/'))) {
+        if (url.contains('.m3u8') || url.contains('.mp4') || url.contains('.webm') || url.contains('.mpd')) {
+          return url;
+        }
+      }
+    }
+    // البحث عن روابط تشغيلية في النص
+    final fallbackRegex = RegExp(r'https?://[^\s<>"\'\)]+(?:\.m3u8|\.mpd|\.mp4|\.webm|\.m4v|/live/|/stream/)', caseSensitive: false);
+    final fallbackMatch = fallbackRegex.firstMatch(html);
+    if (fallbackMatch != null) {
+      return fallbackMatch.group(0);
+    }
+    return null;
+  }
+
+  /// تحويل الرابط النسبي إلى مطلق.
+  String _resolveRelativeUrl(String url, String baseUrl) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return url;
+    if (uri.isAbsolute) return url;
+    final base = Uri.parse(baseUrl);
+    return base.resolveUri(uri).toString();
+  }
+
+  /// التحقق من أن الرابط قابل للتشغيل مباشرة.
+  bool _isDirectPlayable(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('.m3u8') || lower.contains('.mpd') ||
+        lower.contains('.mp4') || lower.contains('.webm') ||
+        lower.contains('.m4v') || lower.contains('.mov');
+  }
+
+  /// محاولة تحليل JSON مع تجاهل الأخطاء.
+  dynamic _tryParseJson(String text) {
+    try {
+      return jsonDecode(text);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _looksLikeJson(String text) {
+    final trimmed = text.trim();
+    return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+        (trimmed.startsWith('[') && trimmed.endsWith(']'));
+  }
+
+  // ---------------------- web source (بقيت كما هي) ----------------------
   String? _webSourceOrigin;
   Timer? _webDetectorTimer;
   _WebSessionState _webSessionState = _WebSessionState.idle;
@@ -279,8 +501,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   String _normalizeCandidate(String url) {
     final uri = Uri.tryParse(url.trim());
     if (uri == null) return url.trim();
-    // Keep the full URL by default: query parameters can be security/signing
-    // material for live streams. Only normalize casing/fragment noise.
     return uri.replace(fragment: '').toString();
   }
 
@@ -301,9 +521,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final uri = Uri.tryParse(target);
     if (uri == null || !uri.hasScheme) return false;
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
-
-    // المواقع الحديثة قد تستخدم CDN أو نطاق مشغل مختلف؛ لا نقفل WebView
-    // على نطاق المصدر الأصلي. نمنع فقط نطاقات الإعلانات المعروفة.
     final host = uri.host.toLowerCase();
     return !RegExp(
       r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)',
@@ -364,7 +581,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i]{display:none!important;visibility:hidden!important;}`;
         (document.head || document.documentElement).appendChild(style);
 
-        // DRM/EME detection only. Never bypass DRM or extract keys.
         try {
           const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
           if (typeof originalRequestMediaKeySystemAccess === 'function' && !navigator.__sportsPlayerEmeHooked) {
@@ -376,7 +592,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         } catch (_) {}
 
-        // Capture public media/API URLs exposed normally by fetch/XHR.
         try {
           if (window.fetch && !window.__sportsPlayerFetchHooked) {
             window.__sportsPlayerFetchHooked = true;
@@ -646,7 +861,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         }
         return;
       }
-      // Single-flight guard: a slow HTTP validation must never overlap the next tick.
       if (_webDetectionInFlight || _webSessionState == _WebSessionState.candidateTrial) return;
       if (_webDrmDetected) {
         _setWebSessionState(_WebSessionState.drmWebOnly);
@@ -661,8 +875,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
       _webDetectionInFlight = true;
       try {
-        // V4 Web Playback Sentinel: if WebView is already playing real media,
-        // preserve that success and never force an unnecessary Native switch.
         if (await _webPlaybackSentinel(controller)) {
           if (_webSessionIsActive(generation)) {
             _setWebSessionState(_WebSessionState.webReady);
@@ -675,8 +887,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final sources = await _detectPublicMediaSources(controller);
         if (!_webSessionIsActive(generation)) return;
 
-        // V4 Smart Interaction: some legitimate players expose no media URL
-        // until their real visible Play/Watch control is activated.
         if (sources.isEmpty && _webInteractionAttempts < _webMaxInteractionAttempts) {
           final interacted = await _runSmartInteraction(controller);
           if (interacted) {
@@ -698,8 +908,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           if (source.toLowerCase().contains('.mpd')) continue;
           if (!_canTrialNative(source)) continue;
 
-          // Candidate must be observed more than once OR have a strong HLS signature.
-          // This prevents jumping to a transient tracking/segment URL.
           final evidence = _webCandidateEvidence[source] ?? 0;
           final strongHls = _looksLikeHls(source) && score >= 100;
           if (evidence < 2 && !strongHls) continue;
@@ -724,7 +932,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
     });
   }
-
 
   Future<void> _openWebSource(String url) async {
     _webDetectorTimer?.cancel();
@@ -800,7 +1007,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       _webController = controller;
       setState(() => _state = _LoadState.ready);
-      // onPageFinished هو نقطة بدء الكشف الوحيدة. لا نطلق Timer ثانيًا هنا.
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -878,8 +1084,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _state = _LoadState.ready;
           _errorMessage = '';
         });
-        // Return to the already-working WebView. A new detector run is only
-        // allowed if the session still has budget and cannot reuse this URL.
         final web = _webController;
         if (web != null && _webNativeAttempts < _webMaxNativeAttempts && !_webDrmDetected) {
           _setWebSessionState(_WebSessionState.webFallback);
@@ -903,11 +1107,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  // يحاول تمييز سبب فشل التشغيل الفعلي من رسالة الاستثناء (video_player
-  // يمرّر أخطاء ExoPlayer/AVPlayer الأصلية كما هي تقريباً غالباً) بدل
-  // رسالة عامة واحدة تُخفي كل الأسباب المختلفة. تصنيف تقريبي بأفضل جهد
-  // اعتماداً على نص الخطأ فقط (لا توجد طريقة أدق متاحة من video_player) —
-  // يرجع للرسالة العامة السابقة لو لم يتعرّف على أي نمط معروف.
   String _describePlaybackError(Object error) {
     final text = error.toString().toLowerCase();
 
@@ -970,10 +1169,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (controller == null) return;
     final target = _position + delta;
     controller.seekTo(target < Duration.zero ? Duration.zero : target);
-    // كل عملية تقديم/تراجع يدوية تُعطى بداية عدّ جديدة (6 ثوانٍ) لمؤشر
-    // "الاتصال بطيء"، بدل ما يتراكم وقت التخزين المؤقت الناتج عن عدة
-    // نقرات متتالية على نفس المؤقت القديم فيظهر المؤشر مبكراً وبشكل
-    // مضلل وكأن الشبكة بطيئة فعلاً بينما السبب فقط تقديم/تراجع متكرر.
     _cancelSlowConnectionTimer();
     if (_isBuffering) _startSlowConnectionTimer();
     _scheduleHide();
@@ -1004,10 +1199,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  // نخرج من شاشة المشاهدة: لو فيه شاشة سابقة على المكدس نرجع لها عادي،
-  // ولو ما فيه (لأن التطبيق فُتح عبر رابط من تطبيق المحتوى وشاشة المشاهدة
-  // هي الشاشة الوحيدة) نغلق تطبيق المشغل بالكامل ونرجع المستخدم مباشرة
-  // لتطبيق المحتوى، بدل ما يعلّق على شاشة داخلية فارغة بالمشغل.
   void _exit() {
     final navigator = Navigator.of(context);
     if (navigator.canPop()) {
@@ -1174,9 +1365,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _seekingFromSwipe = false;
   }
 
-  // سحب رأسي (أي مكان بالشاشة) = تحكم بالصوت. كان مقسّماً سابقاً
-  // يمين/يسار (يمين = سطوع)، لكن جزء السطوع لم يكن منفّذاً فعلياً
-  // (يرجع فوراً بدون أي تأثير) — أُزيل التقسيم وصار السحب كله للصوت.
   double _dragStartVolume = 0;
 
   void _onVerticalDragStart(DragStartDetails details) {
@@ -1251,15 +1439,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   // ---------------------- lifecycle ----------------------
-  // يُستدعى كل ما يغيّر التطبيق حالته: يذهب للخلفية، يرجع للمقدمة، أو
-  // يُغلق نهائياً. مسؤول عن أمرين:
-  // 1) إيقاف الصوت فوراً إذا خرج المستخدم فعلياً من التطبيق (زر الرئيسية،
-  //    تبديل تطبيق، إغلاقه) بدل استمرار البث بالخلفية بلا واجهة.
-  // 2) استئناف التشغيل تلقائياً عند الرجوع، بشرط أنه كان يعمل فعلاً قبل
-  //    الانقطاع (_wasPlayingBeforeBackground) — وهذا هو ما يجعل التشغيل
-  //    يرجع تلقائياً بعد إغلاق إعلان AdMob البيني (عرض الإعلان يُخرج
-  //    نشاط التطبيق مؤقتاً فيُطلق نفس مسار paused/resumed هذا) بدل ما
-  //    يحتاج المستخدم يضغط تشغيل يدوياً بعد كل إعلان.
   bool _wasPlayingBeforeBackground = false;
 
   @override
@@ -1302,6 +1481,70 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     super.dispose();
   }
 
+  // ---------------------- تعديل _startSession (استخدام المعالجة الجديدة) ----------------------
+  Future<void> _startSession() async {
+    setState(() => _state = _LoadState.loading);
+
+    _headers = (widget.externalUserAgent != null &&
+            widget.externalUserAgent!.isNotEmpty)
+        ? {'user-agent': widget.externalUserAgent!}
+        : null;
+
+    StreamSession? session;
+
+    if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
+      final external = widget.externalUrl!.trim();
+      final lower = external.toLowerCase();
+      final looksLikeVideo = lower.contains('.m3u8') ||
+          lower.contains('.mp4') ||
+          lower.contains('.m4v') ||
+          lower.contains('.mov') ||
+          lower.contains('.webm');
+      session = StreamSession.success(
+        kind: looksLikeVideo ? StreamKind.hls : StreamKind.web,
+        isLive: !looksLikeVideo,
+        servers: [
+          StreamServerOption(
+            label: looksLikeVideo ? 'الرابط المُدخل' : 'صفحة البث',
+            qualities: [
+              StreamQuality(label: looksLikeVideo ? 'تلقائي' : 'صفحة البث', url: external)
+            ],
+          ),
+        ],
+      );
+    } else if (widget.channelId != null) {
+      // استخدام المعالجة الجديدة
+      String apiUrl = widget.channelId!;
+      if (!apiUrl.startsWith('http')) {
+        // نفترض أن هناك host أساسي، قم بتغيير هذا الرابط حسب خادمك
+        apiUrl = 'https://def.ycnapi.com' + (apiUrl.startsWith('/') ? '' : '/') + apiUrl;
+      }
+      session = await _resolveChannelUrl(apiUrl);
+    } else {
+      session = StreamSession.failure('لا يوجد مصدر بث لتشغيله.');
+    }
+
+    if (!mounted) return;
+
+    if (session == null || !session.ok || session.servers.isEmpty) {
+      setState(() {
+        _state = _LoadState.error;
+        _errorMessage = session?.errorMessage ?? 'تعذر تشغيل البث.';
+      });
+      return;
+    }
+
+    _session = session;
+    if (session.kind == StreamKind.web) {
+      await _openWebSource(session.servers.first.qualities.first.url);
+      return;
+    }
+    await _playServerQuality(
+      session.servers.first,
+      session.servers.first.qualities.first,
+    );
+  }
+
   // ---------------------- build ----------------------
   @override
   Widget build(BuildContext context) {
@@ -1328,9 +1571,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 const Center(
                   child: CircularProgressIndicator(color: Colors.white),
                 ),
-              // شارة "الاتصال بطيء" — بركن الشاشة (أسفل يمين)، صغيرة الحجم،
-              // بدل ما تكون بمنتصف الشاشة أسفل مؤشر التحميل مباشرة (كانت
-              // تحجب جزءاً كبيراً من الصورة وتبدو مزعجة).
               if (_state == _LoadState.ready &&
                   !_isWebSource &&
                   _isBuffering &&
@@ -1358,9 +1598,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
-              // أيقونة تأكيد النقر المزدوج (تقديم/تراجع) — أُبعدت أكثر نحو
-              // حافة الشاشة (بدل قرب المنتصف) حتى لا تتراكب مع أزرار
-              // التقديم/التراجع اليدوية الدائمة في منتصف الشاشة.
               if (_seekFeedback != null)
                 Align(
                   alignment: Alignment(_seekFeedback == 'right' ? 0.78 : -0.78, 0),
@@ -1388,8 +1625,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     child: _buildControls(),
                   ),
                 ),
-              // زر القفل يبقى ظاهراً دوماً (حتى مع إخفاء بقية التحكمات أو
-              // أثناء القفل) عشان المستخدم يقدر دائماً يفتح القفل.
               if (_state == _LoadState.ready && !_isWebSource)
                 Positioned(
                   top: 8,
@@ -1400,7 +1635,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _toggleLock,
                   ),
                 ),
-              // speed badge
               if (_state == _LoadState.ready && !_isWebSource && _playbackSpeed != 1.0)
                 Positioned(
                   top: 12,
@@ -1503,8 +1737,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     );
   }
 
-  // زر أيقونة دائري بخلفية شبه شفافة — نمط موحّد لكل أزرار المشغل الآن،
-  // بدل IconButton عادي بلا خلفية (كان يصعب تمييزه فوق فيديو فاتح).
   Widget _circleIconButton({
     required IconData icon,
     required String tooltip,
@@ -1552,14 +1784,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            // --------- الشريط العلوي: رجوع + شارة مباشر/الجودة + صوت ---------
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
               child: Row(
                 children: [
-                  // مساحة فارغة تعادل عرض زر القفل الثابت (يُرسم فوق هذا
-                  // الشريط بشكل منفصل عند top:8,left:8) حتى لا يتراكب معه
-                  // زر الرجوع.
                   const SizedBox(width: 48),
                   _circleIconButton(
                     icon: Icons.arrow_back,
@@ -1634,7 +1862,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ],
               ),
             ),
-            // --------- منتصف الشاشة: تشغيل/إيقاف + تقديم/تراجع ---------
             Center(
               child: Row(
                 mainAxisSize: MainAxisSize.min,
@@ -1667,7 +1894,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ],
               ),
             ),
-            // --------- الشريط السفلي: التقدّم + ملء الشاشة ---------
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 0, 6, 4),
               child: Row(
@@ -1726,9 +1952,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     );
   }
 
-  // قائمة "المزيد" — تجمع الخيارات الثانوية (وضع العرض، الجودة والسيرفر،
-  // سرعة التشغيل، التقاط صورة) بورقة سفلية واحدة بدل ازدحام شريط علوي
-  // طويل بعدة أيقونات صغيرة، بنفس أسلوب مشغلات الاحتراف.
   void _openMoreOptionsSheet() {
     showModalBottomSheet(
       context: context,
