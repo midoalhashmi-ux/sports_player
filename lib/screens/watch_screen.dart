@@ -53,6 +53,13 @@ enum _WebSessionState {
   nativeFailed,
   drmWebOnly,
   webFallback,
+  // A Cloudflare/hCaptcha/reCAPTCHA-style human-verification challenge was
+  // detected on the page. We never attempt to solve, click through, or
+  // otherwise bypass it — we only detect it, pause automatic discovery, and
+  // let the real page (with the real challenge) become visible so the
+  // actual person watching can clear it themselves, exactly like in a
+  // normal browser.
+  humanVerificationRequired,
   stopped,
 }
 
@@ -647,6 +654,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _webPlayerFocusApplied = false;
   String? _webOriginalUrl;
   DateTime? _webStartupDeadline;
+  // Set once the channel's own page has finished loading successfully. Any
+  // *main-frame* navigation to a different host after that point is not
+  // normal player behaviour (players resolve their stream via background
+  // requests/iframes, not by replacing the whole page) — it is the "forced
+  // redirect" pattern ad/popup scripts use to hijack the page entirely (fake
+  // prize pages, app-store redirects, etc.), so it gets blocked to keep the
+  // original channel page intact.
+  bool _webInitialLoadCompleted = false;
+  // Mirrors _webDrmDetected's pattern: a flag + a dedicated state, never an
+  // attempt to defeat the check itself.
+  bool _webHumanVerificationDetected = false;
+  bool _webVerificationCheckInFlight = false;
 
   void _setWebSessionState(_WebSessionState next) {
     if (_webSessionState == next) return;
@@ -724,6 +743,27 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           // Never let a page-created secondary window steal the playback session.
           return null;
         };
+        // Some ad-laden pages spam a native "Allow notifications?" prompt on
+        // load or on first tap purely to farm push-subscriptions for later
+        // spam/ad campaigns — it has nothing to do with playing the channel.
+        // Answer it silently as denied instead of letting it interrupt the
+        // viewer or, on some WebView builds, open a system permission sheet.
+        try {
+          if (window.Notification) {
+            const deniedPromise = () => Promise.resolve('denied');
+            try {
+              Object.defineProperty(Notification, 'permission', { get: () => 'denied', configurable: true });
+            } catch (_) {}
+            Notification.requestPermission = function(cb) {
+              if (typeof cb === 'function') { try { cb('denied'); } catch (_) {} }
+              return deniedPromise();
+            };
+            const NoopNotification = function() { /* swallow: never actually shown */ };
+            NoopNotification.permission = 'denied';
+            NoopNotification.requestPermission = Notification.requestPermission;
+            window.Notification = NoopNotification;
+          }
+        } catch (_) {}
         const markUserInteraction = (el) => {
           try {
             const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
@@ -1136,6 +1176,33 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// كشف وجود تحقق بشري معروف (Cloudflare Turnstile / hCaptcha / reCAPTCHA
+  /// أو نص عام مثل "Verify you are human") — للكشف فقط، لا محاولة حل أو
+  /// تجاوز على الإطلاق. القرار الوحيد المبني على هذا الكشف هو إظهار الصفحة
+  /// الحقيقية للمستخدم ليكملها بنفسه.
+  Future<bool> _detectHumanVerification(WebViewController controller) async {
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        try {
+          const iframeHosts = /challenges\.cloudflare\.com|hcaptcha\.com|google\.com\/recaptcha|recaptcha\.net/i;
+          const hasChallengeIframe = Array.from(document.querySelectorAll('iframe')).some((f) => {
+            try { return iframeHosts.test(f.src || ''); } catch (_) { return false; }
+          });
+          const hasChallengeWidget = !!document.querySelector('.cf-turnstile,#cf-chl-widget,#challenge-form,#challenge-running,.g-recaptcha,.h-captcha');
+          const bodyText = ((document.body && document.body.innerText) || '').slice(0, 4000).toLowerCase();
+          const hasChallengeText = /verify you are human|checking your browser|attention required|complete the security check|verifying you are human|i'?m not a robot|prove you'?re human/.test(bodyText);
+          return JSON.stringify({ detected: !!(hasChallengeIframe || hasChallengeWidget || hasChallengeText) });
+        } catch (_) {
+          return JSON.stringify({ detected: false });
+        }
+      })();''');
+      final text = result is String ? result : result?.toString() ?? '';
+      return text.contains('"detected":true');
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _applyPlayerFocus(WebViewController controller) async {
     if (_webPlayerFocusApplied) return;
     try {
@@ -1235,7 +1302,49 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _setWebSessionState(_WebSessionState.discovering);
 
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-      if (!_webSessionIsActive(generation) || attempts++ >= 15) {
+      if (!_webSessionIsActive(generation)) {
+        timer.cancel();
+        return;
+      }
+
+      // Human verification is checked first, on every tick, and is
+      // deliberately exempted from the attempt budget below: solving it is
+      // entirely up to the real person watching and can take as long as it
+      // takes. We never solve it, click it, or otherwise interact with it —
+      // we only detect it, reveal the real page (see build()'s handling of
+      // _WebSessionState.humanVerificationRequired) and, once it is gone
+      // (cleared by the person themselves), resume automatic discovery
+      // exactly as if it had never appeared.
+      if (!_webVerificationCheckInFlight) {
+        _webVerificationCheckInFlight = true;
+        bool verifying = false;
+        try {
+          verifying = await _detectHumanVerification(controller);
+        } catch (_) {
+          verifying = false;
+        } finally {
+          _webVerificationCheckInFlight = false;
+        }
+        if (!_webSessionIsActive(generation)) {
+          timer.cancel();
+          return;
+        }
+        if (verifying) {
+          if (_webSessionState != _WebSessionState.humanVerificationRequired) {
+            _webHumanVerificationDetected = true;
+            _setWebSessionState(_WebSessionState.humanVerificationRequired);
+            if (mounted) setState(() {});
+          }
+          return;
+        }
+        if (_webHumanVerificationDetected) {
+          _webHumanVerificationDetected = false;
+          _setWebSessionState(_WebSessionState.discovering);
+          if (mounted) setState(() {});
+        }
+      }
+
+      if (attempts++ >= 15) {
         timer.cancel();
         if (_webSessionIsActive(generation) && _webSessionState == _WebSessionState.discovering) {
           _setWebSessionState(_WebSessionState.webReady);
@@ -1335,6 +1444,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webPlaybackReady = false;
     _webPlayerFocusApplied = false;
     _webOriginalUrl = url;
+    _webInitialLoadCompleted = false;
+    _webHumanVerificationDetected = false;
+    _webVerificationCheckInFlight = false;
     _webStartupDeadline = DateTime.now().add(const Duration(seconds: 20));
     _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
@@ -1375,11 +1487,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         ..setNavigationDelegate(NavigationDelegate(
           onNavigationRequest: (request) {
             if (!request.isMainFrame) return NavigationDecision.navigate;
-            return _isAllowedWebNavigation(request.url)
-                ? NavigationDecision.navigate
-                : NavigationDecision.prevent;
+            if (!_isAllowedWebNavigation(request.url)) {
+              return NavigationDecision.prevent;
+            }
+            if (_webInitialLoadCompleted) {
+              final requestHost = Uri.tryParse(request.url)?.host.toLowerCase() ?? '';
+              final originHost = _webSourceOrigin?.toLowerCase() ?? '';
+              if (requestHost.isNotEmpty && originHost.isNotEmpty && requestHost != originHost) {
+                return NavigationDecision.prevent;
+              }
+            }
+            return NavigationDecision.navigate;
           },
           onPageFinished: (_) async {
+            _webInitialLoadCompleted = true;
             await _installWebProtection(controller);
             await _captureWebContext(controller);
             if (!mounted) return;
@@ -1431,7 +1552,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   Map<String, String> _effectiveStreamHeaders() {
     return {
-      ...?_headers,
+      ..._headers ?? {},
       ...?_webContextHeaders,
       ...?_resolvedStreamHeaders,
     };
@@ -1907,10 +2028,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     setState(() => _state = _LoadState.loading);
 
     _resolvedStreamHeaders = null;
-    _headers = (widget.externalUserAgent != null &&
-            widget.externalUserAgent!.isNotEmpty)
-        ? {'user-agent': widget.externalUserAgent!}
-        : null;
+
+    // تحسين الهيدرز لمحاكاة مستخدم حقيقي
+    _headers = {
+      'user-agent': widget.externalUserAgent ??
+          'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.119 Mobile Safari/537.36',
+      'accept-language': 'ar,en-US;q=0.9,en;q=0.8',
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-origin',
+      ...?(_headers ?? {}),
+    };
 
     StreamSession? session;
 
@@ -2018,7 +2146,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               if (_isWebSource && _webController != null)
                 WebViewWidget(controller: _webController!),
               if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
-              if (_state == _LoadState.loading) _buildLoading(),
+              if (_state == _LoadState.loading &&
+                  _webSessionState != _WebSessionState.humanVerificationRequired)
+                _buildLoading(),
+              if (_webSessionState == _WebSessionState.humanVerificationRequired)
+                _buildHumanVerificationBanner(),
               if (_state == _LoadState.error) _buildError(),
               if (_state == _LoadState.ready && !_isWebSource && _isBuffering)
                 const Center(
@@ -2143,6 +2275,44 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           Text('جاري تشغيل المحتوى…',
               style: TextStyle(color: Colors.white70)),
         ],
+      ),
+    );
+  }
+
+  /// شريط توضيحي غير تفاعلي (IgnorePointer) يظهر أعلى الشاشة فقط أثناء
+  /// انتظار تحقق بشري حقيقي (Cloudflare/hCaptcha/reCAPTCHA). لا يحجب أي
+  /// جزء آخر من الصفحة ولا يعترض أي لمسة إطلاقاً — الصفحة الحقيقية تحتها
+  /// تبقى قابلة للتفاعل بالكامل، والمستخدم يحل التحقق بنفسه من داخلها.
+  Widget _buildHumanVerificationBanner() {
+    return IgnorePointer(
+      ignoring: true,
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: SafeArea(
+          bottom: false,
+          child: Container(
+            margin: const EdgeInsets.only(top: 12, left: 16, right: 16),
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.black.withOpacity(0.78),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white24),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.verified_user_outlined, color: Colors.amberAccent, size: 20),
+                SizedBox(width: 10),
+                Flexible(
+                  child: Text(
+                    'يرجى إكمال التحقق أدناه للمتابعة — سيستأنف التشغيل تلقائياً بعد ذلك.',
+                    style: TextStyle(color: Colors.white, fontSize: 13, height: 1.3),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
