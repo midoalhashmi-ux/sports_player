@@ -199,6 +199,33 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   /// نقطة الدخول لمعالجة رابط القناة حسب الشجرة المطلوبة.
   Future<StreamSession?> _resolveChannelUrl(String initialUrl) async {
     try {
+      // SPA/hash routes (for example Rotana /#/live/...) are client-side routes.
+      // A normal HTTP GET never sends the URL fragment, so resolving them as a
+      // server URL loses the actual channel route and can incorrectly produce
+      // "تعذر حل رابط البث". Keep the complete URL for WebView discovery.
+      final parsedInitial = Uri.tryParse(initialUrl);
+      final lowerInitial = initialUrl.toLowerCase();
+      final isSpaRoute = parsedInitial != null &&
+          parsedInitial.fragment.isNotEmpty &&
+          (parsedInitial.fragment.contains('/live/') ||
+              parsedInitial.fragment.contains('/watch/') ||
+              parsedInitial.fragment.contains('/channel/')) ;
+      final isKnownWebPage = lowerInitial.contains('rotana.net/') ||
+          lowerInitial.contains('/#/live/') ||
+          lowerInitial.contains('#/live/');
+      if (isSpaRoute || isKnownWebPage) {
+        return StreamSession.success(
+          kind: StreamKind.web,
+          isLive: true,
+          servers: [
+            StreamServerOption(
+              label: 'صفحة البث',
+              qualities: [StreamQuality(label: 'صفحة البث', url: initialUrl)],
+            ),
+          ],
+        );
+      }
+
       // First use the bounded API resolver so nested JSON/payload endpoints
       // are explored without relying on one specific response shape.
       final apiCandidates = await ApiSourceResolver.resolve(
@@ -825,11 +852,36 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             RegExp(r'#EXT-X-(STREAM-INF|TARGETDURATION|MEDIA-SEQUENCE)', caseSensitive: false).hasMatch(body);
       }
       if (_looksLikeProgressiveVideo(url)) {
-        final response = await http.head(uri, headers: headers).timeout(const Duration(seconds: 8));
-        if (response.statusCode < 200 || response.statusCode >= 400) return false;
-        final type = (response.headers['content-type'] ?? '').toLowerCase();
-        return type.isEmpty || type.startsWith('video/') || type.contains('octet-stream');
+        try {
+          final response = await http.head(uri, headers: headers).timeout(const Duration(seconds: 6));
+          if (response.statusCode >= 200 && response.statusCode < 400) {
+            final type = (response.headers['content-type'] ?? '').toLowerCase();
+            if (type.isEmpty || type.startsWith('video/') || type.contains('octet-stream')) return true;
+          }
+        } catch (_) {}
+        // Some CDNs reject HEAD (405) while allowing normal media requests.
+        try {
+          final rangeHeaders = <String, String>{...headers, 'range': 'bytes=0-1023'};
+          final response = await http.get(uri, headers: rangeHeaders).timeout(const Duration(seconds: 8));
+          if (response.statusCode >= 200 && response.statusCode < 400) {
+            final type = (response.headers['content-type'] ?? '').toLowerCase();
+            return type.isEmpty || type.startsWith('video/') || type.contains('octet-stream') ||
+                response.headers.containsKey('content-range');
+          }
+        } catch (_) {}
+        return false;
       }
+      // Frameworks sometimes expose signed media URLs without a file extension.
+      // Probe the response headers/body rather than requiring .m3u8/.mp4 in the URL.
+      try {
+        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        if (response.statusCode >= 200 && response.statusCode < 400) {
+          final type = (response.headers['content-type'] ?? '').toLowerCase();
+          if (type.contains('mpegurl') || type.contains('dash+xml') || type.startsWith('video/')) return true;
+          final bodyStart = response.body.length > 4096 ? response.body.substring(0, 4096) : response.body;
+          if (RegExp(r'#EXTM3U|#EXT-X-(STREAM-INF|TARGETDURATION|MEDIA-SEQUENCE)', caseSensitive: false).hasMatch(bodyStart)) return true;
+        }
+      } catch (_) {}
       return false;
     } catch (_) {
       return false;
@@ -926,7 +978,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         };
         const candidates = [];
         const seen = new Set();
-        document.querySelectorAll('button,[role=\"button\"],a,[aria-label],[title],input[type=\"button\"],input[type=\"submit\"]').forEach((el) => {
+        document.querySelectorAll('button,[role=\"button\"],a,[aria-label],[title],[onclick],[tabindex],input[type=\"button\"],input[type=\"submit\"],.jw-icon-play,.vjs-big-play-button,.plyr__control--overlaid,[data-play],[data-action*=\"play\" i]').forEach((el) => {
           if (!isVisible(el) || !enabled(el)) return;
           const label = normalize([
             el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText,
@@ -945,6 +997,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             if (distanceToVideo(el) < 250) score += 20;
           }
           if (/play|player|video|watch|live/.test(label)) score += 15;
+          if (el.matches && el.matches('.jw-icon-play,.vjs-big-play-button,.plyr__control--overlaid,[data-play]')) score += 50;
           if (/icon|control|btn|button/.test(label)) score += 5;
           if (el.closest('[id*=\"ad\" i],[class*=\"ad\" i],[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"overlay\" i]')) score -= 100;
           const key = `${el.tagName}|${label}|${Math.round(r.left)}|${Math.round(r.top)}`;
@@ -980,6 +1033,90 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (mounted && _webSessionState == _WebSessionState.interacting) {
         _setWebSessionState(_WebSessionState.webReady);
       }
+    }
+  }
+
+  /// Detect common web-player frameworks and inspect their public player configuration.
+  /// This is discovery only; it does not bypass DRM, authentication, or access controls.
+  Future<List<String>> _detectPlayerFrameworkSources(WebViewController controller) async {
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        const out = new Set();
+        const add = (value) => {
+          if (!value || typeof value !== 'string') return;
+          let v = value.trim();
+          if (!v) return;
+          try { v = new URL(v, location.href).toString(); } catch (_) { return; }
+          if (/^https?:\/\//i.test(v)) out.add(v);
+        };
+        const addDeep = (value, depth=0) => {
+          if (depth > 5 || value == null) return;
+          if (typeof value === 'string') {
+            if (/^https?:\/\//i.test(value.trim()) || /\.(m3u8|mpd|mp4|m4v|webm|mov)(?:$|[?#])/i.test(value)) add(value);
+            return;
+          }
+          if (Array.isArray(value)) { value.slice(0,40).forEach(v => addDeep(v, depth+1)); return; }
+          if (typeof value === 'object') {
+            Object.keys(value).slice(0,80).forEach(k => {
+              const v = value[k];
+              if (/^(file|src|source|url|uri|stream|streamUrl|playUrl|hls|dash|mpd|m3u8|playlist|media|sources)$/i.test(k)) addDeep(v, depth+1);
+              else if (depth < 2) addDeep(v, depth+1);
+            });
+          }
+        };
+        document.querySelectorAll('video,audio').forEach(v => {
+          add(v.currentSrc); add(v.src);
+          v.querySelectorAll('source').forEach(s => add(s.src || s.getAttribute('src')));
+        });
+        try {
+          if (window.jwplayer) {
+            document.querySelectorAll('[id],[class]').forEach(el => {
+              const id = el.id || '';
+              const cls = typeof el.className === 'string' ? el.className : '';
+              if (!/jwplayer|jw-video|jw-wrapper/i.test(id + ' ' + cls)) return;
+              try {
+                const p = window.jwplayer(id || el);
+                if (p) {
+                  try { addDeep(p.getPlaylist ? p.getPlaylist() : null); } catch (_) {}
+                  try { addDeep(p.getConfig ? p.getConfig() : null); } catch (_) {}
+                  try { addDeep(p.getPlaylistItem ? p.getPlaylistItem() : null); } catch (_) {}
+                }
+              } catch (_) {}
+            });
+          }
+        } catch (_) {}
+        try {
+          if (window.videojs) {
+            document.querySelectorAll('.video-js, video[id]').forEach(el => {
+              try { addDeep(window.videojs.getPlayer ? window.videojs.getPlayer(el.id || el) : window.videojs(el.id || el)); } catch (_) {}
+            });
+          }
+        } catch (_) {}
+        try {
+          if (window.player && typeof window.player === 'object') addDeep(window.player);
+          if (window.__INITIAL_STATE__) addDeep(window.__INITIAL_STATE__);
+          if (window.__NEXT_DATA__) addDeep(window.__NEXT_DATA__);
+          if (window.__NUXT__) addDeep(window.__NUXT__);
+        } catch (_) {}
+        try {
+          document.querySelectorAll('[data-src],[data-url],[data-file],[data-stream],[data-playlist],[data-config],[data-source]').forEach(el => {
+            ['data-src','data-url','data-file','data-stream','data-playlist','data-config','data-source'].forEach(a => addDeep(el.getAttribute(a)));
+          });
+          document.querySelectorAll('script').forEach(script => {
+            const text = script.textContent || '';
+            if (/jwplayer|videojs|playlist|m3u8|\.mpd|\.mp4|streamUrl|playUrl/i.test(text)) {
+              (text.match(/https?:\/\/[^\s"'<>]+/gi) || []).forEach(add);
+              (text.match(/['"]([^'"]+\.(?:m3u8|mpd|mp4|m4v|webm|mov)(?:\?[^'"]*)?)['"]/gi) || []).forEach(x => add(x.replace(/^['"]|['"]$/g,'')));
+            }
+          });
+        } catch (_) {}
+        return JSON.stringify(Array.from(out));
+      })();''');
+      final text = result is String ? result : result?.toString() ?? '';
+      final matches = RegExp(r'https?://[^"\s\]]+').allMatches(text);
+      return matches.map((m) => m.group(0)!).toList();
+    } catch (_) {
+      return const [];
     }
   }
 
@@ -1020,10 +1157,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           return;
         }
 
-        final sources = await _detectPublicMediaSources(controller);
+        final frameworkSources = await _detectPlayerFrameworkSources(controller);
+        final genericSources = await _detectPublicMediaSources(controller);
+        final sources = <String>{...frameworkSources, ...genericSources}.toList();
         if (!_webSessionIsActive(generation)) return;
 
-        if (sources.isEmpty && _webInteractionAttempts < _webMaxInteractionAttempts) {
+        if (_webInteractionAttempts < _webMaxInteractionAttempts &&
+            (sources.isEmpty || frameworkSources.isEmpty)) {
           final interacted = await _runSmartInteraction(controller);
           if (interacted) {
             timer.cancel();
@@ -1036,7 +1176,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
-          final score = _scoreDetectedSource(source);
+          final score = _scoreDetectedSource(source) + (frameworkSources.contains(sourceRaw) ? 85 : 0);
           _webCandidateEvidence[source] = (_webCandidateEvidence[source] ?? 0) + 1;
           if (score < 80) continue;
           final uri = Uri.tryParse(source);
@@ -1046,13 +1186,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
           final evidence = _webCandidateEvidence[source] ?? 0;
           final strongHls = _looksLikeHls(source) && score >= 100;
-          if (evidence < 2 && !strongHls) continue;
+          final strongFramework = frameworkSources.contains(sourceRaw) && score >= 80;
+          if (evidence < 2 && !strongHls && !strongFramework) continue;
 
           // Best-effort validation. A negative validation is not fatal when
           // the browser has already supplied strong evidence (for example a
           // stream requiring Referer/Origin/cookies).
           final validated = await _validatePublicMediaSource(source);
-          if (!validated && evidence < 3 && !strongHls) continue;
+          if (!validated && evidence < 3 && !strongHls && !strongFramework) continue;
 
           _setWebSessionState(_WebSessionState.candidateTrial);
           _webNativeAttempts++;
