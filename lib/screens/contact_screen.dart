@@ -32,7 +32,7 @@ class _ContactScreenState extends State<ContactScreen> {
 
     setState(() => _sending = true);
     try {
-      await FirebaseFirestore.instance.collection('contact_messages').add({
+      await FirebaseFirestore.instance.collection('contactMessages').add({
         'name': name.isEmpty ? 'بدون اسم' : name,
         'message': message,
         'createdAt': FieldValue.serverTimestamp(),

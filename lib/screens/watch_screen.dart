@@ -655,6 +655,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   String? _webOriginalUrl;
   DateTime? _webStartupDeadline;
   DateTime? _webStartupHardDeadline;
+  Timer? _webPromotionFallbackTimer;
+  bool _webIframePromotionInFlight = false;
+  bool _webPromotedPlayerMode = false;
+  int _webIframePromotionAttempts = 0;
+  String? _webLastPromotedIframeUrl;
+  int _webMediaEvidenceScore = 0;
+  int _webMediaResourceHits = 0;
+  DateTime? _webLastMediaEvidenceAt;
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -705,6 +713,74 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder)',
       caseSensitive: false,
     ).hasMatch(host);
+  }
+
+  void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
+    final type = decoded['type']?.toString() ?? '';
+    if (type == 'drm_detected') {
+      if (!mounted) return;
+      setState(() {
+        _webDrmDetected = true;
+        _webDrmSystem = decoded['system']?.toString();
+      });
+      _webDetectorTimer?.cancel();
+      _setWebSessionState(_WebSessionState.drmWebOnly);
+      return;
+    }
+    if (type == 'media_resource') {
+      _webMediaResourceHits++;
+      _webMediaEvidenceScore = (_webMediaEvidenceScore + 12).clamp(0, 100).toInt();
+      _webLastMediaEvidenceAt = DateTime.now();
+      _extendWebStartupDeadline(const Duration(seconds: 5));
+      return;
+    }
+    if (type != 'iframe_candidate') return;
+    final rawUrl = decoded['url']?.toString().trim() ?? '';
+    final score = int.tryParse(decoded['score']?.toString() ?? '') ?? 0;
+    final uri = Uri.tryParse(rawUrl);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) return;
+    if (rawUrl == _webLastPromotedIframeUrl || _webIframePromotionInFlight || _webIframePromotionAttempts >= 2) return;
+    if (_webPlaybackReady || _webDrmDetected) return;
+    final shouldPromote = score >= 88 || (_webInteractionAttempts > 0 && score >= 70);
+    if (!shouldPromote) return;
+    unawaited(_promoteIframeToPlayerDocument(controller, rawUrl, score));
+  }
+
+  Future<void> _promoteIframeToPlayerDocument(
+      WebViewController controller, String iframeUrl, int score) async {
+    if (!mounted || _webIframePromotionInFlight || _webIframePromotionAttempts >= 2 || _webPlaybackReady || _webDrmDetected) return;
+    _webIframePromotionInFlight = true;
+    _webIframePromotionAttempts++;
+    _webLastPromotedIframeUrl = iframeUrl;
+    _extendWebStartupDeadline(const Duration(seconds: 20));
+    _webPromotedPlayerMode = true;
+    _setWebSessionState(_WebSessionState.discovering);
+    final parentUrl = _webOriginalUrl;
+    final parentHeaders = <String, String>{..._effectiveStreamHeaders()};
+    if (parentUrl != null && parentUrl.startsWith('http')) parentHeaders['referer'] = parentUrl;
+    try {
+      _webSourceOrigin = Uri.parse(iframeUrl).host;
+      _webPromotionFallbackTimer?.cancel();
+      _webPromotionFallbackTimer = Timer(const Duration(seconds: 18), () async {
+        if (!mounted || _webPlaybackReady || !_webPromotedPlayerMode) return;
+        final current = _webController;
+        if (current == null) return;
+        final proof = await _webPlaybackSentinel(current);
+        if (proof || _webMediaEvidenceScore >= 60) return;
+        if (_webIframePromotionAttempts < 2 && parentUrl != null && parentUrl.isNotEmpty) {
+          _webPromotedPlayerMode = false;
+          _webSourceOrigin = Uri.tryParse(parentUrl)?.host;
+          try {
+            await current.loadRequest(Uri.parse(parentUrl), headers: _effectiveStreamHeaders());
+          } catch (_) {}
+        }
+      });
+      await controller.loadRequest(Uri.parse(iframeUrl), headers: parentHeaders);
+    } catch (_) {
+      _webPromotedPlayerMode = false;
+    } finally {
+      _webIframePromotionInFlight = false;
+    }
   }
 
   Future<void> _installWebProtection(WebViewController controller) async {
@@ -793,6 +869,52 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         style.id = 'sports-player-ad-cleanup';
         style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i]{display:none!important;visibility:hidden!important;}`;
         (document.head || document.documentElement).appendChild(style);
+
+        // Universal player intelligence: iframe URLs can appear/change only after Play.
+        const iframeKey = (f) => { try { return `${f.src || ''}|${f.id || ''}|${f.className || ''}`; } catch (_) { return ''; } };
+        const iframeSeen = new Set();
+        const inspectIframes = () => {
+          try {
+            document.querySelectorAll('iframe').forEach((f) => {
+              const src = (f.src || f.getAttribute('src') || '').trim();
+              if (!/^https?:\/\//i.test(src)) return;
+              const r = f.getBoundingClientRect();
+              const st = getComputedStyle(f);
+              if (r.width < 180 || r.height < 100 || st.display === 'none' || st.visibility === 'hidden') return;
+              const text = `${src} ${f.id || ''} ${f.className || ''}`.toLowerCase();
+              if (/(doubleclick|googlesyndication|adservice|adnxs|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
+              let score = 10;
+              if (r.width >= 320 && r.height >= 180) score += 25;
+              else if (r.width >= 250 && r.height >= 140) score += 15;
+              if (r.bottom >= 0 && r.top <= innerHeight) score += 15;
+              if (/(embed|shell|player|video|watch|stream|play|live)/i.test(text)) score += 30;
+              if (/(player|video|stream|embed)/i.test(`${f.id || ''} ${f.className || ''}`)) score += 20;
+              try { if (new URL(src, location.href).hostname !== location.hostname) score += 10; } catch (_) {}
+              const key = iframeKey(f);
+              if (!key || iframeSeen.has(key)) return;
+              iframeSeen.add(key);
+              report({type:'iframe_candidate', url:src, score, width:Math.round(r.width), height:Math.round(r.height)});
+            });
+          } catch (_) {}
+        };
+        inspectIframes();
+        try { new MutationObserver(() => inspectIframes()).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['src','id','class','style']}); } catch (_) {}
+        try { setInterval(inspectIframes, 1200); } catch (_) {}
+
+        const mediaResourceSeen = new Set();
+        const mediaResourceLike = (url) => {
+          try {
+            const u = new URL(url, location.href);
+            const h = `${u.hostname} ${u.pathname} ${u.search}`.toLowerCase();
+            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
+            return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(h) || /(manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/)/i.test(h);
+          } catch (_) { return false; }
+        };
+        const reportMediaResources = () => {
+          try { performance.getEntriesByType('resource').forEach((e) => { const name = e && e.name ? String(e.name) : ''; if (mediaResourceLike(name)) report({type:'media_resource', url:name}); }); } catch (_) {}
+        };
+        reportMediaResources();
+        try { setInterval(reportMediaResources, 1800); } catch (_) {}
 
         try {
           const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
@@ -976,19 +1098,30 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Future<Map<String, dynamic>?> _webPlaybackSnapshot(WebViewController controller) async {
     try {
       final result = await controller.runJavaScriptReturningResult(r'''(() => {
-        const v = document.querySelector('video');
-        if (!v) return JSON.stringify({found:false,playing:false,time:0,duration:0,seekable:false,src:''});
+        const videos = Array.from(document.querySelectorAll('video'));
+        let best = null;
+        for (const v of videos) {
+          try {
+            const r = v.getBoundingClientRect();
+            const score = (r.width * r.height) + (v.readyState >= 2 ? 1000000 : 0) + (!v.paused ? 500000 : 0);
+            if (!best || score > best.score) best = {v, score};
+          } catch (_) {}
+        }
+        const v = best ? best.v : null;
         let seekable = false;
-        try { seekable = v.seekable && v.seekable.length > 0 && (v.seekable.end(v.seekable.length - 1) - v.seekable.start(0)) > 1; } catch (_) {}
-        const duration = Number.isFinite(v.duration) ? (v.duration || 0) : 0;
-        return JSON.stringify({
-          found:true,
-          playing:!v.paused && v.readyState >= 2,
-          time:Number(v.currentTime || 0),
-          duration,
-          seekable,
-          src:v.currentSrc || v.src || ''
-        });
+        if (v) { try { seekable = v.seekable && v.seekable.length > 0 && (v.seekable.end(v.seekable.length - 1) - v.seekable.start(0)) > 1; } catch (_) {} }
+        const duration = v && Number.isFinite(v.duration) ? (v.duration || 0) : 0;
+        let mediaHits = 0;
+        let lastMedia = '';
+        try {
+          performance.getEntriesByType('resource').forEach((e) => {
+            const n = String(e.name || '').toLowerCase();
+            if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(n) || /(manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/)/.test(n)) {
+              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
+            }
+          });
+        } catch (_) {}
+        return JSON.stringify({found:!!v, playing:!!(v && !v.paused && v.readyState >= 2), time:Number(v && v.currentTime || 0), duration, seekable, src:v ? (v.currentSrc || v.src || '') : '', mediaHits, lastMedia});
       })();''');
       final text = result is String ? result : result?.toString() ?? '';
       if (text.isEmpty) return null;
@@ -1001,17 +1134,57 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Future<bool> _webPlaybackSentinel(WebViewController controller) async {
     try {
       final first = await _webPlaybackSnapshot(controller);
-      if (first == null || first['playing'] != true) return false;
-      await Future<void>.delayed(const Duration(milliseconds: 700));
-      if (!mounted || _webDrmDetected) return false;
-      final second = await _webPlaybackSnapshot(controller);
-      if (second == null || second['playing'] != true) return false;
+      if (first == null) return false;
+      final firstHits = (first['mediaHits'] as num?)?.toInt() ?? 0;
       final firstTime = (first['time'] as num?)?.toDouble() ?? 0;
-      final secondTime = (second['time'] as num?)?.toDouble() ?? 0;
-      return secondTime > firstTime + 0.05 || secondTime > 0.3;
+      if (first['playing'] == true) {
+        await Future<void>.delayed(const Duration(milliseconds: 700));
+        if (!mounted || _webDrmDetected) return false;
+        final second = await _webPlaybackSnapshot(controller);
+        if (second == null || second['playing'] != true) return false;
+        final secondTime = (second['time'] as num?)?.toDouble() ?? 0;
+        if (secondTime > firstTime + 0.05 || secondTime > 0.3) return true;
+      }
+      final second = await _webPlaybackSnapshot(controller);
+      final secondHits = (second?['mediaHits'] as num?)?.toInt() ?? 0;
+      if (secondHits >= firstHits + 2 || secondHits >= 5) {
+        _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
+        return true;
+      }
+      return _webMediaEvidenceScore >= 70 && _webMediaResourceHits >= 4;
     } catch (_) {
       return false;
     }
+  }
+
+  Future<String?> _findBestIframeCandidate(WebViewController controller) async {
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        const bad = /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|clickunder|interstitial)/i;
+        const out = [];
+        document.querySelectorAll('iframe').forEach((f) => {
+          const src = (f.src || f.getAttribute('src') || '').trim();
+          if (!/^https?:\/\//i.test(src) || bad.test(src)) return;
+          const r = f.getBoundingClientRect();
+          const s = getComputedStyle(f);
+          if (r.width < 220 || r.height < 120 || s.display === 'none' || s.visibility === 'hidden') return;
+          const text = `${src} ${f.id || ''} ${f.className || ''}`;
+          let score = 10;
+          if (r.width >= 320 && r.height >= 180) score += 25;
+          if (/(embed|shell|player|video|watch|stream|play|live)/i.test(text)) score += 35;
+          if (/(player|video|stream|embed)/i.test(`${f.id || ''} ${f.className || ''}`)) score += 20;
+          if (r.bottom >= 0 && r.top <= innerHeight) score += 15;
+          out.push({src,score,area:r.width*r.height});
+        });
+        out.sort((a,b) => (b.score-a.score) || (b.area-a.area));
+        return JSON.stringify(out[0] || null);
+      })();''');
+      final text = result is String ? result : result?.toString() ?? '';
+      if (text.isEmpty || text == 'null') return null;
+      final decoded = jsonDecode(text);
+      if (decoded is Map) return decoded['src']?.toString();
+    } catch (_) {}
+    return null;
   }
 
   Future<bool> _runSmartInteraction(WebViewController controller) async {
@@ -1142,7 +1315,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         await Future<void>.delayed(const Duration(milliseconds: 1800));
         if (!mounted || _webDrmDetected) return false;
         final snapshot = await _webPlaybackSnapshot(controller);
-        return snapshot?['playing'] == true;
+        if (snapshot?['playing'] == true) return true;
+        final iframe = await _findBestIframeCandidate(controller);
+        if (iframe != null) return true;
+        return _webMediaResourceHits > 0 || _webMediaEvidenceScore >= 20;
       }
       return false;
     } catch (_) {
@@ -1445,6 +1621,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           return;
         }
 
+        final iframeCandidate = await _findBestIframeCandidate(controller);
+        if (iframeCandidate != null && !_webIframePromotionInFlight && !_webPlaybackReady) {
+          final candidateUri = Uri.tryParse(iframeCandidate);
+          final candidateHost = candidateUri?.host.toLowerCase() ?? '';
+          final currentHost = _webSourceOrigin?.toLowerCase() ?? '';
+          final playerish = RegExp(r'(embed|shell|player|video|watch|stream|play|live)', caseSensitive: false).hasMatch(iframeCandidate);
+          if (playerish || candidateHost != currentHost) {
+            await _promoteIframeToPlayerDocument(controller, iframeCandidate, 80);
+            return;
+          }
+        }
+
+        if (_webMediaEvidenceScore >= 70 && _webMediaResourceHits >= 4) {
+          if (_webSessionIsActive(generation)) {
+            await _showWebPlaybackReady(controller);
+            _setWebSessionState(_WebSessionState.webReady);
+            timer.cancel();
+            _webDetectorTimer = null;
+          }
+          return;
+        }
+
         final frameworkSources = await _detectPlayerFrameworkSources(controller);
         final genericSources = await _detectPublicMediaSources(controller);
         final sources = <String>{...frameworkSources, ...genericSources}.toList();
@@ -1521,6 +1719,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final webStartupNow = DateTime.now();
     _webStartupDeadline = webStartupNow.add(const Duration(seconds: 20));
     _webStartupHardDeadline = webStartupNow.add(const Duration(seconds: 90));
+    _webPromotionFallbackTimer?.cancel();
+    _webIframePromotionInFlight = false;
+    _webPromotedPlayerMode = false;
+    _webIframePromotionAttempts = 0;
+    _webLastPromotedIframeUrl = null;
+    _webMediaEvidenceScore = 0;
+    _webMediaResourceHits = 0;
+    _webLastMediaEvidenceAt = null;
     _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
@@ -1545,15 +1751,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           onMessageReceived: (message) {
             try {
               final decoded = jsonDecode(message.message);
-              if (decoded is Map && decoded['type'] == 'drm_detected') {
-                if (!mounted) return;
-                setState(() {
-                  _webDrmDetected = true;
-                  _webDrmSystem = decoded['system']?.toString();
-                });
-                _webDetectorTimer?.cancel();
-                _setWebSessionState(_WebSessionState.drmWebOnly);
-              }
+              if (decoded is Map) _handleWebIntelligenceMessage(controller, decoded);
             } catch (_) {}
           },
         )
@@ -1572,8 +1770,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             }
             return NavigationDecision.navigate;
           },
-          onPageFinished: (_) async {
+          onPageFinished: (finishedUrl) async {
             _webInitialLoadCompleted = true;
+            if (_webPromotedPlayerMode) {
+              _webMediaEvidenceScore = 0;
+              _webMediaResourceHits = 0;
+              _webLastMediaEvidenceAt = null;
+              _extendWebStartupDeadline(const Duration(seconds: 15));
+            }
             await _installWebProtection(controller);
             await _captureWebContext(controller);
             if (!mounted) return;
@@ -2087,6 +2291,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void dispose() {
     _webDetectorTimer?.cancel();
     _webStartupTimeoutTimer?.cancel();
+    _webPromotionFallbackTimer?.cancel();
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();

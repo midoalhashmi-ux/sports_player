@@ -516,7 +516,7 @@ initState()
   ملفات التوقيع (`key.properties`, `.jks`/`.keystore`)، أرقام إصدارات
   الحزم **الموجودة أصلاً** في `pubspec.yaml`، وأسماء حقول/مجموعات Firestore
   المشتركة (`channels`, `settings/ads`, `settings/app`, `settings/legal`,
-  `contact_messages`, إلخ — لأن ثلاثة مشاريع منفصلة تتفق على نفس الأسماء
+  `contactMessages`, إلخ — لأن ثلاثة مشاريع منفصلة تتفق على نفس الأسماء
   بالضبط).
 - **ممنوع دون إذن صريح:** ترقية/إضافة/حذف أي حزمة، تغيير SDK/كومبايل/
   توقيع/applicationId، تعديل codemagic.yaml، اقتراح ترقية Flutter SDK نفسه.

@@ -15,6 +15,12 @@ class ChannelSourceResolver {
           .get();
       final data = snapshot.data();
 
+      // الحالة مركزية من لوحة التحكم: القناة المعطّلة لا يجوز أن تمر
+      // لأي مسار (Web/HLS/محمي/Cloud Function).
+      if (data != null && data['status'] == 'disabled') {
+        return StreamSession.failure('هذه القناة متوقفة مؤقتاً.');
+      }
+
       // القناة قد تحمل Referer/User-Agent اختياريين محفوظين من لوحة التحكم
       // (channels.sourceHeaders). فارغان تماماً = استخدم افتراضيات
       // WebView/الشبكة، ولا يُعتبر غيابهما سبباً لفشل الحل.
@@ -33,9 +39,6 @@ class ChannelSourceResolver {
       // فيديو مباشر. في هذه الحالة نعرض الصفحة داخل WebView ولا نحاول
       // تمريرها إلى ExoPlayer كمصدر فيديو.
       if (data != null && data['streamType'] == 'web') {
-        if (data['status'] == 'disabled') {
-          return StreamSession.failure('هذه القناة متوقفة مؤقتاً.');
-        }
         final webUrl = (data['sourceUrl'] ?? data['streamUrl'] ?? data['directUrl'] ?? '').toString().trim();
         if (webUrl.isEmpty) {
           return StreamSession.failure('لم يتم ضبط رابط صفحة البث لهذه القناة بعد.');
@@ -56,13 +59,6 @@ class ChannelSourceResolver {
       final isProtected = data == null || data['protected'] != false;
 
       if (!isProtected) {
-        // القناة غير المحمية معطّلة من لوحة التحكم — كان هذا الفحص غائباً
-        // فيستمر تشغيلها من servers/directUrl رغم التعطيل. الآن تُرفض فوراً
-        // قبل أي قراءة لمصدر البث.
-        if (data?['status'] == 'disabled') {
-          return StreamSession.failure('هذه القناة متوقفة مؤقتاً.');
-        }
-
         final rawServers = data?['servers'] as List?;
         if (rawServers != null && rawServers.isNotEmpty) {
           final servers = rawServers
