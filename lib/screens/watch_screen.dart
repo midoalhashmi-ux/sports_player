@@ -642,6 +642,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _webInteractionAttempts = 0;
   static const int _webMaxInteractionAttempts = 3;
   DateTime? _webLastInteractionAt;
+  Timer? _webStartupTimeoutTimer;
+  bool _webPlaybackReady = false;
+  bool _webPlayerFocusApplied = false;
+  String? _webOriginalUrl;
+  DateTime? _webStartupDeadline;
 
   void _setWebSessionState(_WebSessionState next) {
     if (_webSessionState == next) return;
@@ -677,7 +682,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
     final host = uri.host.toLowerCase();
     return !RegExp(
-      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)',
+      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder)',
       caseSensitive: false,
     ).hasMatch(host);
   }
@@ -691,7 +696,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           try {
             const u = new URL(url, location.href);
             const h = (u.hostname || '').toLowerCase();
-            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i.test(h);
+            const p = (u.pathname || '').toLowerCase();
+            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i.test(h) ||
+              /(popup|popunder|clickunder|interstitial|advertisement|ads?\b)/i.test(p);
           } catch (_) { return false; }
         };
         const report = (payload) => {
@@ -714,18 +721,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         };
         window.open = function(url) {
           if (!url || blocked(url)) return null;
-          try {
-            const u = new URL(url, location.href);
-            if (u.origin !== location.origin) return null;
-          } catch (_) { return null; }
+          // Never let a page-created secondary window steal the playback session.
           return null;
+        };
+        const markUserInteraction = (el) => {
+          try {
+            const r = el && el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+            window.__sportsPlayerLastClick = {
+              at: Date.now(),
+              x: r ? r.left + r.width / 2 : 0,
+              y: r ? r.top + r.height / 2 : 0,
+              text: ((el && (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title'))) || '').slice(0,120)
+            };
+          } catch (_) {}
         };
         document.addEventListener('click', (e) => {
           let el = e.target;
-          while (el && el.tagName !== 'A') el = el.parentElement;
-          if (!el) return;
-          const href = el.getAttribute('href') || '';
-          const target = (el.getAttribute('target') || '').toLowerCase();
+          if (el && el.nodeType === 3) el = el.parentElement;
+          markUserInteraction(el);
+          let link = el;
+          while (link && link.tagName !== 'A') link = link.parentElement;
+          if (!link) return;
+          const href = link.getAttribute('href') || '';
+          const target = (link.getAttribute('target') || '').toLowerCase();
           if (target === '_blank' || target === '_new' || blocked(href)) {
             e.preventDefault(); e.stopPropagation();
           }
@@ -1118,6 +1136,98 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _applyPlayerFocus(WebViewController controller) async {
+    if (_webPlayerFocusApplied) return;
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        const visible = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const s = getComputedStyle(el);
+          return r.width >= 160 && r.height >= 90 && s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';
+        };
+        const candidates = Array.from(document.querySelectorAll('video,iframe,.jwplayer,.jw-wrapper,.video-js,.plyr,.shaka-video-container'))
+          .filter(visible);
+        if (!candidates.length) return JSON.stringify({ok:false});
+        const media = candidates.sort((a,b) => {
+          const ar=a.getBoundingClientRect(), br=b.getBoundingClientRect();
+          return (br.width*br.height)-(ar.width*ar.height);
+        })[0];
+        let root = media;
+        const mediaRect = media.getBoundingClientRect();
+        for (let i=0;i<4 && root.parentElement;i++) {
+          const p=root.parentElement;
+          const r=p.getBoundingClientRect();
+          if (r.width >= mediaRect.width*0.9 && r.height >= mediaRect.height*0.9) root=p;
+          else break;
+        }
+        document.querySelectorAll('*').forEach(el => {
+          el.setAttribute('data-sports-player-focus-hidden','1');
+          el.style.setProperty('visibility','hidden','important');
+        });
+        const reveal = (el) => {
+          if (!el) return;
+          el.style.setProperty('visibility','visible','important');
+        };
+        reveal(document.documentElement);
+        reveal(document.body);
+        let n=root;
+        while(n){ reveal(n); n=n.parentElement; }
+        root.querySelectorAll('*').forEach(reveal);
+        root.style.setProperty('max-width','100vw','important');
+        root.style.setProperty('box-sizing','border-box','important');
+        try { root.scrollIntoView({block:'center', inline:'center', behavior:'instant'}); } catch (_) {}
+        return JSON.stringify({ok:true});
+      })();''');
+      if (result is String && result.contains('"ok":true')) {
+        _webPlayerFocusApplied = true;
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _showWebPlaybackReady(WebViewController controller) async {
+    if (!mounted || _webPlaybackReady) return;
+    _webPlaybackReady = true;
+    _webStartupTimeoutTimer?.cancel();
+    await _applyPlayerFocus(controller);
+    if (!mounted) return;
+    setState(() {
+      _state = _LoadState.ready;
+      _isWebSource = true;
+      _errorMessage = '';
+    });
+  }
+
+  void _startWebStartupTimeout(WebViewController controller, int generation) {
+    _webStartupTimeoutTimer?.cancel();
+    final deadline = _webStartupDeadline ?? DateTime.now().add(const Duration(seconds: 20));
+    _webStartupDeadline = deadline;
+    void arm() {
+      if (!mounted || generation != _webSessionGeneration || _webPlaybackReady) return;
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        final state = _webSessionState;
+        // A trial that is still actively proving playback gets one immediate
+        // proof check rather than being killed mid-initialization. The global
+        // deadline remains fixed at 20 seconds; this is not a new 20-second window.
+        if (state == _WebSessionState.candidateTrial) {
+          _webStartupTimeoutTimer = Timer(const Duration(milliseconds: 250), arm);
+          return;
+        }
+        _webDetectorTimer?.cancel();
+        setState(() {
+          _state = _LoadState.error;
+          _isWebSource = false;
+          _errorMessage = 'تعذر تشغيل المحتوى. لم يبدأ التشغيل خلال المهلة المحددة.';
+        });
+        _setWebSessionState(_WebSessionState.stopped);
+        return;
+      }
+      _webStartupTimeoutTimer = Timer(remaining, arm);
+    }
+    arm();
+  }
+
   Future<void> _autoDetectWebSource(WebViewController controller) async {
     _webDetectorTimer?.cancel();
     final generation = _webSessionGeneration;
@@ -1148,6 +1258,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       try {
         if (await _webPlaybackSentinel(controller)) {
           if (_webSessionIsActive(generation)) {
+            await _showWebPlaybackReady(controller);
             _setWebSessionState(_WebSessionState.webReady);
             timer.cancel();
             _webDetectorTimer = null;
@@ -1160,8 +1271,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final sources = <String>{...frameworkSources, ...genericSources}.toList();
         if (!_webSessionIsActive(generation)) return;
 
-        if (_webInteractionAttempts < _webMaxInteractionAttempts &&
-            (sources.isEmpty || frameworkSources.isEmpty)) {
+        if (_webInteractionAttempts < _webMaxInteractionAttempts && !await _webPlaybackSentinel(controller)) {
           final interacted = await _runSmartInteraction(controller);
           if (interacted) {
             timer.cancel();
@@ -1222,6 +1332,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webLastNativeTrialAt = null;
     _webInteractionAttempts = 0;
     _webLastInteractionAt = null;
+    _webPlaybackReady = false;
+    _webPlayerFocusApplied = false;
+    _webOriginalUrl = url;
+    _webStartupDeadline = DateTime.now().add(const Duration(seconds: 20));
+    _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
     _webCandidateEvidence.clear();
@@ -1268,7 +1383,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             await _installWebProtection(controller);
             await _captureWebContext(controller);
             if (!mounted) return;
-            setState(() => _state = _LoadState.ready);
+            // Keep the real webpage hidden behind our own loading screen until
+            // playback is proven. The WebView remains mounted so its JS/player
+            // lifecycle continues normally.
+            setState(() => _state = _LoadState.loading);
             if (!_webDrmDetected) {
               _setWebSessionState(_WebSessionState.webReady);
               unawaited(_autoDetectWebSource(controller));
@@ -1283,10 +1401,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             }
           },
         ));
+      _webController = controller;
+      _startWebStartupTimeout(controller, _webSessionGeneration);
       await controller.loadRequest(sourceUri, headers: _effectiveStreamHeaders());
       if (!mounted) return;
-      _webController = controller;
-      setState(() => _state = _LoadState.ready);
+      setState(() => _state = _LoadState.loading);
     } catch (_) {
       if (!mounted) return;
       setState(() {
@@ -1362,6 +1481,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         await _proveNativePlayback(newController);
       }
       await WakelockPlus.enable();
+      _webStartupTimeoutTimer?.cancel();
       if (!mounted) return;
       if (fallbackToWeb) _setWebSessionState(_WebSessionState.nativePlaying);
       setState(() => _state = _LoadState.ready);
@@ -1380,11 +1500,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
           _isWebSource = true;
-          _state = _LoadState.ready;
+          _state = _LoadState.loading;
           _errorMessage = '';
         });
         final web = _webController;
         if (web != null && _webNativeAttempts < _webMaxNativeAttempts && !_webDrmDetected) {
+          _startWebStartupTimeout(web, _webSessionGeneration);
           _setWebSessionState(_WebSessionState.webFallback);
           Future<void>.delayed(const Duration(milliseconds: 1200), () {
             if (mounted && _isWebSource && !_webDrmDetected &&
@@ -1767,6 +1888,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     _webDetectorTimer?.cancel();
+    _webStartupTimeoutTimer?.cancel();
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
@@ -1893,7 +2015,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              if (_state == _LoadState.ready && _isWebSource && _webController != null)
+              if (_isWebSource && _webController != null)
                 WebViewWidget(controller: _webController!),
               if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
               if (_state == _LoadState.loading) _buildLoading(),
@@ -2018,7 +2140,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         children: [
           CircularProgressIndicator(color: Colors.white),
           SizedBox(height: 12),
-          Text('جارٍ التحقق من صلاحية المشاهدة…',
+          Text('جاري تشغيل المحتوى…',
               style: TextStyle(color: Colors.white70)),
         ],
       ),
