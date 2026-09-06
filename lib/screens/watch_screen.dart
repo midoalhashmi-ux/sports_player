@@ -340,59 +340,192 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return currentUrl;
   }
 
-  /// محاولة فك تشفير الحمولة بطرق متعددة (Base64، XOR، Hex، ...)
+  /// Universal payload decoder.
+  ///
+  /// Order matters: URL/JSON -> percent/Base64 -> gzip/zlib -> XOR/Hex.
+  /// XOR is only attempted when there is evidence that the result is readable
+  /// JSON/URL/HLS text. We never use a hard-coded secret key.
   String? _decodePayload(String input) {
-    // 1. Base64 (عادي)
+    final source = input.replaceFirst('\uFEFF', '').trim();
+    if (source.isEmpty) return null;
+
+    // 0. Already useful text.
+    final direct = _normalizeDecodedText(source);
+    if (_isUsefulDecodedPayload(direct)) return direct;
+
+    // 1. Percent encoded payload (sometimes Base64 is URL-encoded).
     try {
-      final cleaned = input.replaceAll(RegExp(r'\s'), '');
-      final bytes = base64.decode(cleaned);
-      final decoded = utf8.decode(bytes);
-      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
-        return decoded;
-      }
+      final percentDecoded = Uri.decodeFull(source);
+      final normalized = _normalizeDecodedText(percentDecoded);
+      if (_isUsefulDecodedPayload(normalized)) return normalized;
+      final nested = _decodeEncodedBytes(normalized);
+      if (nested != null) return nested;
     } catch (_) {}
 
-    // 2. Base64 URL-safe
-    try {
-      final cleaned = input.replaceAll(RegExp(r'\s'), '').replaceAll('-', '+').replaceAll('_', '/');
-      final bytes = base64.decode(cleaned);
-      final decoded = utf8.decode(bytes);
-      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
-        return decoded;
-      }
-    } catch (_) {}
+    // 2. Base64 / Base64URL, including padding-less payloads.
+    final fromBase64 = _decodeBase64Payload(source);
+    if (fromBase64 != null) return fromBase64;
 
-    // 3. XOR بمفتاح ثابت (يمكن تغيير المفتاح حسب الحاجة)
-    try {
-      const key = 'mySecretKey123'; // غيّر هذا المفتاح إن لزم
-      final bytes = input.codeUnits;
-      final keyBytes = key.codeUnits;
-      final result = <int>[];
-      for (int i = 0; i < bytes.length; i++) {
-        result.add(bytes[i] ^ keyBytes[i % keyBytes.length]);
-      }
-      final decoded = utf8.decode(result);
-      if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
-        return decoded;
-      }
-    } catch (_) {}
+    // 3. Hex payload.
+    final fromHex = _decodeHexPayload(source);
+    if (fromHex != null) return fromHex;
 
-    // 4. فك تشفير Hex (إذا كان النص يتكون من أزواج هيكسية)
-    try {
-      final cleaned = input.replaceAll(RegExp(r'\s'), '');
-      if (RegExp(r'^[0-9a-fA-F]+$').hasMatch(cleaned) && cleaned.length % 2 == 0) {
-        final bytes = List.generate(cleaned.length ~/ 2, (i) => int.parse(cleaned.substring(i*2, i*2+2), radix: 16));
-        final decoded = utf8.decode(bytes);
-        if (_looksLikeJson(decoded) || decoded.startsWith('http') || decoded.contains('m3u8')) {
-          return decoded;
-        }
-      }
-    } catch (_) {}
-
-    // 5. محاولة فك ضغط (إذا كان مضغوطاً بـ GZip أو ZLib) – نادر لكن ممكن
-    // نترك هذه كملاحظة لأنها تتطلب مكتبة إضافية
+    // 4. Conservative single-byte XOR discovery.
+    //    Repeating-key XOR is supported when the API supplies a key through
+    //    x-xor-key / xor-key. Unknown multi-byte keys cannot be inferred safely.
+    final fromXor = _decodeXorPayload(source);
+    if (fromXor != null) return fromXor;
 
     return null;
+  }
+
+  String? _decodeEncodedBytes(String text) {
+    final base64Result = _decodeBase64Payload(text);
+    if (base64Result != null) return base64Result;
+    return _decodeHexPayload(text);
+  }
+
+  String? _decodeBase64Payload(String input) {
+    var cleaned = input.replaceAll(RegExp(r'\s'), '');
+    if (cleaned.length < 8) return null;
+
+    final variants = <String>{
+      cleaned,
+      cleaned.replaceAll('-', '+').replaceAll('_', '/'),
+    };
+
+    for (final variant in variants) {
+      try {
+        final padded = variant.padRight((variant.length + 3) ~/ 4 * 4, '=');
+        final bytes = base64.decode(padded);
+        final result = _decodeEncodedBytesToText(bytes);
+        if (result != null) return result;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  String? _decodeHexPayload(String input) {
+    final cleaned = input.replaceAll(RegExp(r'\s'), '');
+    if (cleaned.length < 8 || cleaned.length.isOdd ||
+        !RegExp(r'^[0-9a-fA-F]+$').hasMatch(cleaned)) return null;
+    try {
+      final bytes = List<int>.generate(
+        cleaned.length ~/ 2,
+        (i) => int.parse(cleaned.substring(i * 2, i * 2 + 2), radix: 16),
+      );
+      return _decodeEncodedBytesToText(bytes);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _decodeEncodedBytesToText(List<int> bytes) {
+    // Plain UTF-8.
+    final utf = _safeUtf8(bytes);
+    if (_isUsefulDecodedPayload(utf)) return utf;
+
+    // gzip / zlib. dart:io codecs are available on Android/iOS.
+    for (final decoder in <List<int> Function(List<int>>)[
+      (data) => gzip.decode(data),
+      (data) => ZLibCodec().decode(data),
+    ]) {
+      try {
+        final unpacked = decoder(bytes);
+        final text = _safeUtf8(unpacked);
+        if (_isUsefulDecodedPayload(text)) return text;
+        final nested = _decodeBase64Payload(text);
+        if (nested != null) return nested;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  String? _decodeXorPayload(String input) {
+    final configuredKey = _headers?['x-xor-key'] ?? _headers?['xor-key'];
+    if (configuredKey != null && configuredKey.isNotEmpty) {
+      final key = utf8.encode(configuredKey);
+      for (final bytes in <List<int>>[
+        utf8.encode(input),
+        ..._base64BytesCandidates(input),
+      ]) {
+        final decoded = _xorToUsefulText(bytes, key);
+        if (decoded != null) return decoded;
+      }
+    }
+
+    // Automatic single-byte XOR heuristic. This does NOT guess arbitrary
+    // encryption keys; it only checks whether a byte-wise XOR immediately
+    // produces strongly recognizable JSON/HTTP/HLS text.
+    final rawCandidates = <List<int>>[utf8.encode(input), ..._base64BytesCandidates(input)];
+    for (final bytes in rawCandidates) {
+      if (bytes.length < 12 || bytes.length > 1024 * 1024) continue;
+      for (var key = 1; key <= 255; key++) {
+        final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key);
+        final text = _safeUtf8(out);
+        if (_isStrongDecodedPayload(text)) return text;
+      }
+    }
+    return null;
+  }
+
+  List<List<int>> _base64BytesCandidates(String input) {
+    final cleaned = input.replaceAll(RegExp(r'\s'), '');
+    final out = <List<int>>[];
+    for (final variant in <String>{
+      cleaned,
+      cleaned.replaceAll('-', '+').replaceAll('_', '/'),
+    }) {
+      try {
+        final padded = variant.padRight((variant.length + 3) ~/ 4 * 4, '=');
+        out.add(base64.decode(padded));
+      } catch (_) {}
+    }
+    return out;
+  }
+
+  String? _xorToUsefulText(List<int> bytes, List<int> key) {
+    if (key.isEmpty) return null;
+    final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key[i % key.length]);
+    final text = _safeUtf8(out);
+    return _isUsefulDecodedPayload(text) ? text : null;
+  }
+
+  String _safeUtf8(List<int> bytes) {
+    try {
+      return utf8.decode(bytes, allowMalformed: false).trim();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  String _normalizeDecodedText(String text) {
+    var value = text.trim();
+    if (value.startsWith('"') && value.endsWith('"')) {
+      try {
+        final decoded = jsonDecode(value);
+        if (decoded is String) value = decoded.trim();
+      } catch (_) {}
+    }
+    return value;
+  }
+
+  bool _isUsefulDecodedPayload(String? text) {
+    if (text == null || text.isEmpty) return false;
+    final value = text.trim();
+    if (_looksLikeJson(value)) return true;
+    if (RegExp(r'^https?://', caseSensitive: false).hasMatch(value)) return true;
+    if (value.contains('.m3u8') || value.contains('#EXTM3U') ||
+        value.contains('.mp4') || value.contains('.mpd')) return true;
+    return false;
+  }
+
+  bool _isStrongDecodedPayload(String? text) {
+    if (text == null || text.isEmpty) return false;
+    final value = text.trim();
+    if (_looksLikeJson(value)) return true;
+    return RegExp(r'^(https?://|#EXTM3U)', caseSensitive: false).hasMatch(value) ||
+        RegExp(r'https?://[^\s"<>]+\.(m3u8|mp4|mpd)(?:[?#]|$)', caseSensitive: false).hasMatch(value);
   }
 
   /// استخراج رابط من كائن JSON (يبحث في الحقول الشائعة).
