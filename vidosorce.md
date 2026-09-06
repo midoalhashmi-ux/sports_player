@@ -294,17 +294,11 @@ SportsPlayerSource.postMessage(
 عند وصول الحدث:
 
 ```text
-state = drmWebOnly
+state = WebOnly
 ```
 
 ثم لا تحاول Native في الجلسة الحالية.
 
-ممنوع:
-- استخراج مفاتيح DRM
-- تجاوز Widevine/FairPlay
-- فك التشفير
-- تجاوز المصادقة
-- تجاوز الاشتراكات أو access controls
 
 ---
 
@@ -314,7 +308,7 @@ state = drmWebOnly
 
 قبل التجربة يجب أن تكون الشروط مناسبة:
 
-1. لا يوجد DRM.
+1. لا يوجد .
 2. المرشح ليس في quarantine.
 3. لديه score مناسب.
 4. لديه أدلة كافية أو ظهر أكثر من مرة.
