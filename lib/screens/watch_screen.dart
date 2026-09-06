@@ -654,6 +654,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _webPlayerFocusApplied = false;
   String? _webOriginalUrl;
   DateTime? _webStartupDeadline;
+  DateTime? _webStartupHardDeadline;
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -972,24 +973,42 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
+  Future<Map<String, dynamic>?> _webPlaybackSnapshot(WebViewController controller) async {
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        const v = document.querySelector('video');
+        if (!v) return JSON.stringify({found:false,playing:false,time:0,duration:0,seekable:false,src:''});
+        let seekable = false;
+        try { seekable = v.seekable && v.seekable.length > 0 && (v.seekable.end(v.seekable.length - 1) - v.seekable.start(0)) > 1; } catch (_) {}
+        const duration = Number.isFinite(v.duration) ? (v.duration || 0) : 0;
+        return JSON.stringify({
+          found:true,
+          playing:!v.paused && v.readyState >= 2,
+          time:Number(v.currentTime || 0),
+          duration,
+          seekable,
+          src:v.currentSrc || v.src || ''
+        });
+      })();''');
+      final text = result is String ? result : result?.toString() ?? '';
+      if (text.isEmpty) return null;
+      final decoded = jsonDecode(text);
+      if (decoded is Map) return Map<String, dynamic>.from(decoded);
+    } catch (_) {}
+    return null;
+  }
+
   Future<bool> _webPlaybackSentinel(WebViewController controller) async {
     try {
-      final first = await controller.runJavaScriptReturningResult(r'''(() => {
-        const v = document.querySelector('video');
-        if (!v) return JSON.stringify({playing:false,time:0});
-        return JSON.stringify({playing:!v.paused && v.readyState >= 2,time:v.currentTime || 0});
-      })();''');
-      final firstText = first is String ? first : first?.toString() ?? '';
-      if (!firstText.contains('\"playing\":true')) return false;
+      final first = await _webPlaybackSnapshot(controller);
+      if (first == null || first['playing'] != true) return false;
       await Future<void>.delayed(const Duration(milliseconds: 700));
       if (!mounted || _webDrmDetected) return false;
-      final second = await controller.runJavaScriptReturningResult(r'''(() => {
-        const v = document.querySelector('video');
-        if (!v) return JSON.stringify({playing:false,time:0});
-        return JSON.stringify({playing:!v.paused && v.readyState >= 2,time:v.currentTime || 0});
-      })();''');
-      final secondText = second is String ? second : second?.toString() ?? '';
-      return secondText.contains('\"playing\":true');
+      final second = await _webPlaybackSnapshot(controller);
+      if (second == null || second['playing'] != true) return false;
+      final firstTime = (first['time'] as num?)?.toDouble() ?? 0;
+      final secondTime = (second['time'] as num?)?.toDouble() ?? 0;
+      return secondTime > firstTime + 0.05 || secondTime > 0.3;
     } catch (_) {
       return false;
     }
@@ -1010,77 +1029,120 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     try {
       final result = await controller.runJavaScriptReturningResult(r'''(() => {
         const normalize = (s) => (s || '').toString().trim().replace(/\s+/g, ' ').toLowerCase();
-        const blockedText = /(login|sign[ -]?in|subscribe|subscription|purchase|buy|download|advert|ads|privacy|cookie|close|share|facebook|twitter|telegram|whatsapp)/i;
+        const blockedText = /(login|sign[ -]?in|subscribe|subscription|purchase|buy|download|advert|ads|privacy|cookie|close|share|facebook|twitter|telegram|whatsapp|notification|allow)/i;
         const playText = /(play|watch|live|watch live|start|start stream|watch now|تشغيل|مشاهدة|بث مباشر|مشاهدة مباشرة|ابدأ|ابدأ البث|شاهد الآن)/i;
-        const isVisible = (el) => {
+        const playerSelector = 'video,iframe,.jwplayer,.jw-wrapper,.video-js,.plyr,.shaka-video-container,[class*="player" i],[id*="player" i]';
+        const enabled = (el) => !!el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+        const labelOf = (el) => normalize([
+          el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText,
+          el.textContent, el.getAttribute('data-testid'), el.id, el.className,
+          el.getAttribute('data-action'), el.getAttribute('data-play')
+        ].join(' '));
+
+        // Layer 0: locate the real player even when it starts below the fold.
+        let media = Array.from(document.querySelectorAll(playerSelector)).filter((el) => {
           if (!el || !el.isConnected) return false;
           const r = el.getBoundingClientRect();
-          const st = getComputedStyle(el);
-          return r.width >= 24 && r.height >= 24 && r.bottom >= 0 && r.right >= 0 &&
-            r.top <= innerHeight && r.left <= innerWidth && st.display !== 'none' &&
-            st.visibility !== 'hidden' && st.opacity !== '0' && el.getAttribute('aria-hidden') !== 'true';
-        };
-        const enabled = (el) => !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-        const videoRect = (() => {
-          const v = document.querySelector('video');
-          return v ? v.getBoundingClientRect() : null;
-        })();
-        const distanceToVideo = (el) => {
-          if (!videoRect) return 0;
-          const r = el.getBoundingClientRect();
-          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-          const vx = videoRect.left + videoRect.width / 2, vy = videoRect.top + videoRect.height / 2;
-          return Math.hypot(cx - vx, cy - vy);
-        };
+          return r.width >= 160 && r.height >= 90;
+        });
+        media.sort((a,b) => {
+          const ar=a.getBoundingClientRect(), br=b.getBoundingClientRect();
+          return (br.width*br.height)-(ar.width*ar.height);
+        });
+        const player = media[0] || null;
+        if (player) {
+          try { player.scrollIntoView({block:'center', inline:'center', behavior:'instant'}); } catch (_) {}
+        }
+
+        // Layers 1/2: known player controls and text-labelled controls.
         const candidates = [];
         const seen = new Set();
-        document.querySelectorAll('button,[role=\"button\"],a,[aria-label],[title],[onclick],[tabindex],input[type=\"button\"],input[type=\"submit\"],.jw-icon-play,.vjs-big-play-button,.plyr__control--overlaid,[data-play],[data-action*=\"play\" i]').forEach((el) => {
-          if (!isVisible(el) || !enabled(el)) return;
-          const label = normalize([
-            el.getAttribute('aria-label'), el.getAttribute('title'), el.innerText,
-            el.textContent, el.getAttribute('data-testid'), el.className
-          ].join(' '));
-          if (!label || blockedText.test(label) || !playText.test(label)) return;
+        const selectors = 'button,[role="button"],a,[aria-label],[title],[onclick],[tabindex],input[type="button"],input[type="submit"],.jw-icon-play,.jw-icon-display,.vjs-big-play-button,.plyr__control--overlaid,.ytp-large-play-button,[data-play],[data-action*="play" i],[class*="play-btn" i],[class*="playbtn" i],[id*="play-btn" i],[id*="playbtn" i]';
+        const addCandidate = (el, base) => {
+          if (!el || !el.isConnected || !enabled(el)) return;
+          const label = labelOf(el);
+          if (blockedText.test(label)) return;
           const r = el.getBoundingClientRect();
-          let score = 0;
+          if (r.width < 18 || r.height < 18) return;
+          const st = getComputedStyle(el);
+          if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return;
+          if (r.right < 0 || r.bottom < 0 || r.left > innerWidth || r.top > innerHeight) return;
+          let score = base || 0;
           if (playText.test(label)) score += 35;
-          if (el.hasAttribute('aria-label')) score += 20;
+          if (/play|player|video|watch|live/.test(label)) score += 20;
+          if (el.matches && el.matches('.jw-icon-play,.jw-icon-display,.vjs-big-play-button,.plyr__control--overlaid,.ytp-large-play-button,[data-play],[class*="play-btn" i],[class*="playbtn" i],[id*="play-btn" i],[id*="playbtn" i]')) score += 60;
+          if (el.hasAttribute('aria-label')) score += 15;
           if (el.hasAttribute('title')) score += 10;
-          if (videoRect) {
-            const vr = videoRect;
-            const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-            if (cx >= vr.left - 80 && cx <= vr.right + 80 && cy >= vr.top - 80 && cy <= vr.bottom + 80) score += 45;
-            if (distanceToVideo(el) < 250) score += 20;
+          if (player) {
+            const pr = player.getBoundingClientRect();
+            const cx=r.left+r.width/2, cy=r.top+r.height/2;
+            const px=pr.left+pr.width/2, py=pr.top+pr.height/2;
+            const d=Math.hypot(cx-px,cy-py);
+            if (d < 120) score += 55;
+            else if (d < 250) score += 25;
+            if (cx >= pr.left-30 && cx <= pr.right+30 && cy >= pr.top-30 && cy <= pr.bottom+30) score += 35;
           }
-          if (/play|player|video|watch|live/.test(label)) score += 15;
-          if (el.matches && el.matches('.jw-icon-play,.vjs-big-play-button,.plyr__control--overlaid,[data-play]')) score += 50;
-          if (/icon|control|btn|button/.test(label)) score += 5;
-          if (el.closest('[id*=\"ad\" i],[class*=\"ad\" i],[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"overlay\" i]')) score -= 100;
+          const adAncestor = el.closest('[id*="ad" i],[class*="ad" i],[id*="popup" i],[class*="popup" i],[id*="overlay-ad" i]');
+          if (adAncestor) score -= 150;
           const key = `${el.tagName}|${label}|${Math.round(r.left)}|${Math.round(r.top)}`;
-          if (!seen.has(key)) { seen.add(key); candidates.push({el, score, label}); }
-        });
-        candidates.sort((a,b) => b.score - a.score);
+          if (!seen.has(key)) { seen.add(key); candidates.push({el,score,label}); }
+        };
+        document.querySelectorAll(selectors).forEach((el) => addCandidate(el, 0));
+        candidates.sort((a,b) => b.score-a.score);
         const best = candidates[0];
-        if (!best || best.score < 55) return JSON.stringify({clicked:false, reason:'no-safe-play-control'});
-        try {
-          best.el.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
-          best.el.click();
-          return JSON.stringify({clicked:true, score:best.score, label:best.label.slice(0,160)});
-        } catch (e) {
-          return JSON.stringify({clicked:false, reason:'click-failed'});
+        if (best && best.score >= 55) {
+          try {
+            best.el.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+            best.el.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true,view:window}));
+            best.el.dispatchEvent(new MouseEvent('mouseup',{bubbles:true,cancelable:true,view:window}));
+            best.el.click();
+            return JSON.stringify({clicked:true, layer:1, score:best.score, label:best.label.slice(0,160)});
+          } catch (_) {}
         }
+
+        // Layer 3: geometric fallback around the player's center. This covers
+        // custom icon-only buttons such as the yellow circular button in the
+        // supplied screenshot, without clicking arbitrary page links.
+        if (player) {
+          const pr = player.getBoundingClientRect();
+          const cx = pr.left + pr.width/2, cy = pr.top + pr.height/2;
+          let el = document.elementFromPoint(cx, cy);
+          const chain = [];
+          for (let i=0; el && i<6; i++, el=el.parentElement) chain.push(el);
+          for (const candidate of chain) {
+            const label = labelOf(candidate);
+            if (!enabled(candidate) || blockedText.test(label)) continue;
+            if (candidate.tagName === 'A' && !playText.test(label)) continue;
+            const r=candidate.getBoundingClientRect();
+            if (r.width < 24 || r.height < 24 || r.width > pr.width*0.95 || r.height > pr.height*0.95) continue;
+            const adAncestor = candidate.closest('[id*="ad" i],[class*="ad" i],[id*="popup" i],[class*="popup" i],[class*="overlay-ad" i]');
+            if (adAncestor) continue;
+            try {
+              candidate.click();
+              return JSON.stringify({clicked:true, layer:3, score:40, label:label.slice(0,160)});
+            } catch (_) {}
+          }
+        }
+
+        // Layer 4: HTML5 fallback. The browser still enforces its own gesture,
+        // DRM and authentication rules; we do not bypass them.
+        const v = document.querySelector('video');
+        if (v && typeof v.play === 'function') {
+          try {
+            const p = v.play();
+            if (p && typeof p.catch === 'function') p.catch(() => {});
+            return JSON.stringify({clicked:true, layer:4, score:30, label:'video.play()'});
+          } catch (_) {}
+        }
+        return JSON.stringify({clicked:false, reason:'no-safe-play-control'});
       })();''');
       final text = result is String ? result : result?.toString() ?? '';
       if (text.contains('clicked') && text.contains('true')) {
+        _extendWebStartupDeadline(const Duration(seconds: 15));
         await Future<void>.delayed(const Duration(milliseconds: 1800));
         if (!mounted || _webDrmDetected) return false;
-        final evidence = await controller.runJavaScriptReturningResult(r'''(() => {
-          const v = document.querySelector('video');
-          if (!v) return JSON.stringify({playing:false, src:''});
-          return JSON.stringify({playing:!v.paused && v.readyState >= 2, time:v.currentTime || 0, src:v.currentSrc || v.src || ''});
-        })();''');
-        final evidenceText = evidence is String ? evidence : evidence?.toString() ?? '';
-        return evidenceText.contains('\"playing\":true');
+        final snapshot = await _webPlaybackSnapshot(controller);
+        return snapshot?['playing'] == true;
       }
       return false;
     } catch (_) {
@@ -1265,18 +1327,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     });
   }
 
+  void _extendWebStartupDeadline(Duration extension) {
+    if (_webStartupDeadline == null || _webStartupHardDeadline == null) return;
+    final now = DateTime.now();
+    final current = _webStartupDeadline!;
+    final proposed = (current.isAfter(now) ? current : now).add(extension);
+    final hard = _webStartupHardDeadline!;
+    _webStartupDeadline = proposed.isAfter(hard) ? hard : proposed;
+  }
+
   void _startWebStartupTimeout(WebViewController controller, int generation) {
     _webStartupTimeoutTimer?.cancel();
-    final deadline = _webStartupDeadline ?? DateTime.now().add(const Duration(seconds: 20));
-    _webStartupDeadline = deadline;
     void arm() {
       if (!mounted || generation != _webSessionGeneration || _webPlaybackReady) return;
+      final deadline = _webStartupDeadline ?? DateTime.now().add(const Duration(seconds: 20));
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) {
         final state = _webSessionState;
         // A trial that is still actively proving playback gets one immediate
-        // proof check rather than being killed mid-initialization. The global
-        // deadline remains fixed at 20 seconds; this is not a new 20-second window.
+        // proof check rather than being killed mid-initialization. Genuine
+        // progress may extend the deadline, but never beyond 90 seconds.
         if (state == _WebSessionState.candidateTrial) {
           _webStartupTimeoutTimer = Timer(const Duration(milliseconds: 250), arm);
           return;
@@ -1414,6 +1484,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _setWebSessionState(_WebSessionState.candidateTrial);
           _webNativeAttempts++;
           _webLastNativeTrialAt = DateTime.now();
+          _extendWebStartupDeadline(const Duration(seconds: 12));
           _webSeenSources.add(source);
           _webCandidateLastReason[source] = 'validated candidate, evidence=$evidence, score=$score';
           timer.cancel();
@@ -1447,7 +1518,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webInitialLoadCompleted = false;
     _webHumanVerificationDetected = false;
     _webVerificationCheckInFlight = false;
-    _webStartupDeadline = DateTime.now().add(const Duration(seconds: 20));
+    final webStartupNow = DateTime.now();
+    _webStartupDeadline = webStartupNow.add(const Duration(seconds: 20));
+    _webStartupHardDeadline = webStartupNow.add(const Duration(seconds: 90));
     _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
@@ -1593,6 +1666,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         },
       );
       _controller = newController;
+      _position = Duration.zero;
+      _duration = Duration.zero;
+      _isPlaying = false;
       newController.addListener(_videoListener);
       await newController.initialize();
       await newController.setPlaybackSpeed(_playbackSpeed);
@@ -1618,6 +1694,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _webFailedNativeSources.add(failedUrl);
         _webSeenSources.add(failedUrl);
         _webCandidateLastReason[failedUrl] = 'native playback failed: ${_describePlaybackError(error)}';
+        _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
           _isWebSource = true;
@@ -1681,6 +1758,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
     return 'حدث خطأ أثناء تشغيل المصدر. جرّب مرة أخرى أو اختر سيرفرًا آخر.';
   }
+
+  bool get _contentIsSeekable => _duration > Duration.zero;
 
   // ---------------------- controls ----------------------
   void _scheduleHide() {
@@ -1865,8 +1944,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // ---------------------- gestures ----------------------
   void _handleDoubleTapDown(TapDownDetails details) {
     if (_locked || _state != _LoadState.ready) return;
-    final isLive = _session?.isLive ?? false;
-    if (isLive) return;
+    if (!_contentIsSeekable) return;
     final width = MediaQuery.of(context).size.width;
     final isRight = details.globalPosition.dx > width / 2;
     _seekBy(Duration(seconds: isRight ? 10 : -10));
@@ -1879,8 +1957,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   void _onHorizontalDragStart(DragStartDetails details) {
     if (_locked || _state != _LoadState.ready) return;
-    final isLive = _session?.isLive ?? false;
-    if (isLive) return;
+    if (!_contentIsSeekable) return;
     _swipeStart = details.globalPosition;
     _seekingFromSwipe = false;
   }
@@ -2266,14 +2343,32 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Widget _buildLoading() {
-    return const Center(
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(color: Colors.white),
-          SizedBox(height: 12),
-          Text('جاري تشغيل المحتوى…',
-              style: TextStyle(color: Colors.white70)),
+          const SizedBox(
+            width: 34,
+            height: 34,
+            child: CircularProgressIndicator(
+              strokeWidth: 3.2,
+              color: Colors.redAccent,
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'جاري تشغيل المحتوى…',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 17,
+              fontWeight: FontWeight.w700,
+              shadows: const [
+                Shadow(color: Colors.black, blurRadius: 6, offset: Offset(0, 2)),
+                Shadow(color: Colors.black87, blurRadius: 12, offset: Offset(0, 1)),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -2394,6 +2489,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   Widget _buildControls() {
     final isLive = _session?.isLive ?? false;
+    final canSeek = _contentIsSeekable;
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -2418,7 +2514,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _exit,
                   ),
                   const SizedBox(width: 6),
-                  if (isLive)
+                  if (isLive && !canSeek)
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 9, vertical: 4),
@@ -2446,7 +2542,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                           color: Colors.white70, fontSize: 12),
                     ),
                   const Spacer(),
-                  if (isLive)
+                  if (isLive && !canSeek)
                     _circleIconButton(
                       icon: Icons.live_tv,
                       tooltip: 'القفز للبث المباشر',
@@ -2489,7 +2585,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  if (!isLive)
+                  if (canSeek)
                     _circleIconButton(
                       icon: Icons.replay_10,
                       tooltip: 'تراجع 10 ثواني',
@@ -2506,7 +2602,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _togglePlay,
                   ),
                   const SizedBox(width: 22),
-                  if (!isLive)
+                  if (canSeek)
                     _circleIconButton(
                       icon: Icons.forward_10,
                       tooltip: 'تقديم 10 ثواني',
@@ -2521,7 +2617,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               padding: const EdgeInsets.fromLTRB(14, 0, 6, 4),
               child: Row(
                 children: [
-                  if (!isLive) ...[
+                  if (canSeek) ...[
                     Text(_formatDuration(_position),
                         style: const TextStyle(
                             color: Colors.white70, fontSize: 12)),
