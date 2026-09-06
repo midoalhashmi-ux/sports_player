@@ -18,8 +18,27 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
+import '../services/api_source_resolver.dart';
 
 enum _LoadState { loading, error, ready }
+
+class _ResolvedPublicUrl {
+  final String url;
+  final Map<String, String> headers;
+  const _ResolvedPublicUrl(this.url, this.headers);
+}
+
+class _DecodedPayload {
+  final String text;
+  final String method;
+  const _DecodedPayload(this.text, this.method);
+
+  @override
+  bool operator ==(Object other) => other is _DecodedPayload && other.text == text;
+
+  @override
+  int get hashCode => text.hashCode;
+}
 
 /// One authoritative state machine for a WebView -> Native detection session.
 /// It replaces the fragile combination of overlapping booleans/timers.
@@ -65,6 +84,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   StreamServerOption? _activeServer;
   StreamQuality? _activeQuality;
   Map<String, String>? _headers;
+  Map<String, String>? _resolvedStreamHeaders;
 
   bool _controlsVisible = true;
   Timer? _hideTimer;
@@ -179,6 +199,36 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   /// نقطة الدخول لمعالجة رابط القناة حسب الشجرة المطلوبة.
   Future<StreamSession?> _resolveChannelUrl(String initialUrl) async {
     try {
+      // First use the bounded API resolver so nested JSON/payload endpoints
+      // are explored without relying on one specific response shape.
+      final apiCandidates = await ApiSourceResolver.resolve(
+        initialUrl,
+        headers: _headers,
+        maxDepth: 3,
+      );
+      for (final candidate in apiCandidates.take(5)) {
+        if (!_isDirectPlayable(candidate.url)) continue;
+        _resolvedStreamHeaders = candidate.headers;
+        final lower = candidate.url.toLowerCase();
+        final kind = lower.contains('.m3u8') ? StreamKind.hls
+            : lower.contains('.mpd') ? StreamKind.dash
+            : StreamKind.progressive;
+        if (kind == StreamKind.dash) {
+          // The current video_player dependency does not provide DASH playback.
+          continue;
+        }
+        return StreamSession.success(
+          kind: kind,
+          isLive: true,
+          servers: [
+            StreamServerOption(
+              label: 'المصدر المُستخرج تلقائياً',
+              qualities: [StreamQuality(label: 'تلقائي', url: candidate.url)],
+            ),
+          ],
+        );
+      }
+
       final resolvedUrl = await _resolveStreamUrl(initialUrl);
       if (resolvedUrl == null) {
         return StreamSession.failure('تعذر حل رابط البث.');
@@ -211,297 +261,196 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  /// المعالجة المتسلسلة: تتبع إعادة التوجيه، فك التشفير، واستخراج الروابط.
-  Future<String?> _resolveStreamUrl(String url, {int maxDepth = 10}) async {
-    String currentUrl = url;
-    int depth = 0;
+  /// Universal public-source resolver.
+  /// It follows redirects explicitly, decodes common payload wrappers, and
+  /// extracts playable URLs without attempting to bypass DRM/authentication.
+  Future<String?> _resolveStreamUrl(String url, {int maxDepth = 8}) async {
+    final visited = <String>{};
+    var currentUrl = url.trim();
+    var depth = 0;
 
-    while (depth < maxDepth) {
-      depth++;
-      final client = http.Client();
-      try {
-        final response = await client
-            .get(Uri.parse(currentUrl), headers: {
-              'User-Agent': _headers?['user-agent'] ??
-                  'Mozilla/5.0 (Android) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36',
-              'Accept': '*/*',
-            })
-            .timeout(const Duration(seconds: 15));
+    while (currentUrl.isNotEmpty && depth++ < maxDepth) {
+      final normalized = _normalizeCandidate(currentUrl);
+      if (!visited.add(normalized)) return null;
 
-        final next = await _processResponse(response, currentUrl);
-        if (next == null) {
-          return null;
-        }
-        if (next == currentUrl) {
-          // لم يتغير، ربما وصلنا إلى رابط نهائي
-          return currentUrl;
-        }
-        currentUrl = next;
-        if (_isDirectPlayable(currentUrl)) {
-          return currentUrl;
-        }
-      } catch (e) {
-        return null;
-      } finally {
-        client.close();
+      final result = await _fetchAndAnalyzePublicUrl(currentUrl);
+      if (result == null) return null;
+      if (result.url == currentUrl || _isDirectPlayable(result.url)) {
+        _resolvedStreamHeaders = result.headers.isEmpty ? _resolvedStreamHeaders : result.headers;
+        return result.url;
       }
+      currentUrl = result.url;
+      if (result.headers.isNotEmpty) _resolvedStreamHeaders = result.headers;
     }
-    return currentUrl;
-  }
-
-  /// تحليل الاستجابة وتحديد الرابط التالي أو null.
-  Future<String?> _processResponse(http.Response response, String currentUrl) async {
-    final status = response.statusCode;
-    final contentType = response.headers['content-type']?.toLowerCase() ?? '';
-
-    // 1. إعادة توجيه (3xx)
-    if (status >= 300 && status < 400) {
-      final location = response.headers['location'];
-      if (location != null && location.isNotEmpty) {
-        final uri = Uri.tryParse(location);
-        if (uri != null) {
-          if (!uri.isAbsolute) {
-            final base = Uri.parse(currentUrl);
-            return base.resolveUri(uri).toString();
-          }
-          return location;
-        }
-      }
-      return null;
-    }
-
-    // 2. M3U8 مباشر
-    if (contentType.contains('application/vnd.apple.mpegurl') ||
-        contentType.contains('audio/x-mpegurl') ||
-        currentUrl.toLowerCase().contains('.m3u8')) {
-      return currentUrl;
-    }
-
-    final body = response.body;
-
-    // 3. JSON صحيح
-    if (contentType.contains('application/json') || _looksLikeJson(body)) {
-      try {
-        final decoded = jsonDecode(body);
-        if (decoded is Map<String, dynamic>) {
-          final extracted = _extractUrlFromJson(decoded);
-          if (extracted != null) {
-            return _resolveRelativeUrl(extracted, currentUrl);
-          }
-          // محاولة فك التشفير من الحقول المشفرة
-          for (final key in ['data', 'payload', 'encoded', 'cipher', 'result']) {
-            if (decoded.containsKey(key) && decoded[key] is String) {
-              final decodedPayload = _decodePayload(decoded[key] as String);
-              if (decodedPayload != null) {
-                final maybeJson = _tryParseJson(decodedPayload);
-                if (maybeJson is Map<String, dynamic>) {
-                  final nestedUrl = _extractUrlFromJson(maybeJson);
-                  if (nestedUrl != null) return _resolveRelativeUrl(nestedUrl, currentUrl);
-                } else {
-                  if (_isDirectPlayable(decodedPayload) || decodedPayload.startsWith('http')) {
-                    return _resolveRelativeUrl(decodedPayload, currentUrl);
-                  }
-                }
-              }
-            }
-          }
-          // البحث عن قائمة تشغيل
-          if (decoded.containsKey('playlist') && decoded['playlist'] is List) {
-            final list = decoded['playlist'] as List;
-            if (list.isNotEmpty && list[0] is String) {
-              return _resolveRelativeUrl(list[0].toString(), currentUrl);
-            }
-          }
-        }
-      } catch (_) {}
-    }
-
-    // 4. محاولة فك التشفير حتى لو لم يكن Content-Type JSON
-    final decodedBody = _decodePayload(body);
-    if (decodedBody != null && decodedBody != body) {
-      final maybeJson = _tryParseJson(decodedBody);
-      if (maybeJson is Map<String, dynamic>) {
-        final extracted = _extractUrlFromJson(maybeJson);
-        if (extracted != null) return _resolveRelativeUrl(extracted, currentUrl);
-      } else {
-        if (_isDirectPlayable(decodedBody) || decodedBody.startsWith('http')) {
-          return _resolveRelativeUrl(decodedBody, currentUrl);
-        }
-      }
-    }
-
-    // 5. HTML
-    if (contentType.contains('text/html') || body.trim().startsWith('<!DOCTYPE') || body.trim().startsWith('<html')) {
-      final extracted = _extractUrlFromHtml(body);
-      if (extracted != null) return _resolveRelativeUrl(extracted, currentUrl);
-    }
-
-    // 6. إذا لم نجد شيئاً، نعيد الرابط الحالي (قد يكون صفحة ويب)
-    return currentUrl;
-  }
-
-  /// Universal payload decoder.
-  ///
-  /// Order matters: URL/JSON -> percent/Base64 -> gzip/zlib -> XOR/Hex.
-  /// XOR is only attempted when there is evidence that the result is readable
-  /// JSON/URL/HLS text. We never use a hard-coded secret key.
-  String? _decodePayload(String input) {
-    final source = input.replaceFirst('\uFEFF', '').trim();
-    if (source.isEmpty) return null;
-
-    // 0. Already useful text.
-    final direct = _normalizeDecodedText(source);
-    if (_isUsefulDecodedPayload(direct)) return direct;
-
-    // 1. Percent encoded payload (sometimes Base64 is URL-encoded).
-    try {
-      final percentDecoded = Uri.decodeFull(source);
-      final normalized = _normalizeDecodedText(percentDecoded);
-      if (_isUsefulDecodedPayload(normalized)) return normalized;
-      final nested = _decodeEncodedBytes(normalized);
-      if (nested != null) return nested;
-    } catch (_) {}
-
-    // 2. Base64 / Base64URL, including padding-less payloads.
-    final fromBase64 = _decodeBase64Payload(source);
-    if (fromBase64 != null) return fromBase64;
-
-    // 3. Hex payload.
-    final fromHex = _decodeHexPayload(source);
-    if (fromHex != null) return fromHex;
-
-    // 4. Conservative single-byte XOR discovery.
-    //    Repeating-key XOR is supported when the API supplies a key through
-    //    x-xor-key / xor-key. Unknown multi-byte keys cannot be inferred safely.
-    final fromXor = _decodeXorPayload(source);
-    if (fromXor != null) return fromXor;
-
     return null;
   }
 
-  String? _decodeEncodedBytes(String text) {
-    final base64Result = _decodeBase64Payload(text);
-    if (base64Result != null) return base64Result;
-    return _decodeHexPayload(text);
-  }
+  Future<_ResolvedPublicUrl?> _fetchAndAnalyzePublicUrl(String currentUrl) async {
+    final uri = Uri.tryParse(currentUrl);
+    if (uri == null || !uri.hasScheme) return null;
 
-  String? _decodeBase64Payload(String input) {
-    var cleaned = input.replaceAll(RegExp(r'\s'), '');
-    if (cleaned.length < 8) return null;
-
-    final variants = <String>{
-      cleaned,
-      cleaned.replaceAll('-', '+').replaceAll('_', '/'),
+    final headers = <String, String>{
+      'accept': 'application/json, text/plain, */*',
+      'accept-encoding': 'gzip',
+      'user-agent': _headers?['user-agent'] ??
+          'okhttp/4.12.0',
+      ...?_headers,
     };
 
-    for (final variant in variants) {
-      try {
-        final padded = variant.padRight((variant.length + 3) ~/ 4 * 4, '=');
-        final bytes = base64.decode(padded);
-        final result = _decodeEncodedBytesToText(bytes);
-        if (result != null) return result;
-      } catch (_) {}
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', uri)
+        ..followRedirects = false
+        ..maxRedirects = 0;
+      request.headers.addAll(headers);
+      final streamed = await client.send(request).timeout(const Duration(seconds: 15));
+      final response = await http.Response.fromStream(streamed);
+      final contentType = response.headers['content-type']?.toLowerCase() ?? '';
+
+      if (response.statusCode >= 300 && response.statusCode < 400) {
+        final location = response.headers['location'];
+        if (location == null || location.isEmpty) return null;
+        final next = uri.resolve(location).toString();
+        return _ResolvedPublicUrl(next, headers);
+      }
+
+      if (response.statusCode < 200 || response.statusCode >= 400) return null;
+
+      final responseHeaders = <String, String>{...headers};
+      final body = response.body;
+
+      if (contentType.contains('mpegurl') || contentType.contains('dash+xml') ||
+          _isDirectPlayable(currentUrl) || _containsMediaMarker(body)) {
+        return _ResolvedPublicUrl(currentUrl, responseHeaders);
+      }
+
+      final candidates = <_DecodedPayload>{};
+      _collectPayloadCandidates(body, candidates, currentUrl: currentUrl);
+
+      for (final candidate in candidates) {
+        final direct = _extractBestUrl(candidate.text, currentUrl);
+        if (direct != null) {
+          final resolved = _resolveRelativeUrl(direct, currentUrl);
+          if (_isDirectPlayable(resolved)) {
+            return _ResolvedPublicUrl(resolved, responseHeaders);
+          }
+          if (resolved.startsWith('http')) {
+            return _ResolvedPublicUrl(resolved, responseHeaders);
+          }
+        }
+      }
+
+      return _ResolvedPublicUrl(currentUrl, responseHeaders);
+    } catch (_) {
+      return null;
+    } finally {
+      client.close();
     }
-    return null;
   }
 
-  String? _decodeHexPayload(String input) {
-    final cleaned = input.replaceAll(RegExp(r'\s'), '');
-    if (cleaned.length < 8 || cleaned.length.isOdd ||
-        !RegExp(r'^[0-9a-fA-F]+$').hasMatch(cleaned)) return null;
+  void _collectPayloadCandidates(
+    String input,
+    Set<_DecodedPayload> out, {
+    required String currentUrl,
+    int depth = 0,
+  }) {
+    if (depth > 4 || input.trim().isEmpty) return;
+    final normalized = input.trim();
+    final key = normalized.length > 4096 ? normalized.substring(0, 4096) : normalized;
+
+    void add(String? text, String method) {
+      if (text == null) return;
+      final value = _normalizeDecodedText(text);
+      if (value == null || value.isEmpty || value == normalized) return;
+      if (_isUsefulDecodedPayload(value)) {
+        out.add(_DecodedPayload(value, method));
+        if (depth < 4) _collectPayloadCandidates(value, out, currentUrl: currentUrl, depth: depth + 1);
+      }
+    }
+
+    // Percent encoding / JSON string wrappers.
+    try { add(Uri.decodeFull(normalized), 'percent'); } catch (_) {}
     try {
-      final bytes = List<int>.generate(
-        cleaned.length ~/ 2,
-        (i) => int.parse(cleaned.substring(i * 2, i * 2 + 2), radix: 16),
-      );
-      return _decodeEncodedBytesToText(bytes);
+      if (normalized.startsWith('"') && normalized.endsWith('"')) {
+        final decoded = jsonDecode(normalized);
+        if (decoded is String) add(decoded, 'json-string');
+      }
+    } catch (_) {}
+
+    // Base64 and Base64URL. We decode to bytes first so compressed payloads
+    // can be recognized before UTF-8 conversion.
+    for (final bytes in _base64BytesCandidates(normalized)) {
+      add(_decodeEncodedBytesToText(bytes), 'base64');
+      try { add(utf8.decode(gzip.decode(bytes)), 'base64+gzip'); } catch (_) {}
+      try { add(utf8.decode(ZLibCodec().decode(bytes)), 'base64+zlib'); } catch (_) {}
+    }
+
+    // Hex wrapper.
+    final hexBytes = _hexBytes(normalized);
+    if (hexBytes != null) add(_decodeEncodedBytesToText(hexBytes), 'hex');
+
+    // XOR is intentionally conservative: use an explicit key supplied by
+    // the caller/header, not blind cracking of unknown encryption.
+    final configuredKey = _headers?['x-xor-key'] ?? _headers?['xor-key'];
+    if (configuredKey != null && configuredKey.isNotEmpty) {
+      add(_xorBytesToText(utf8.encode(normalized), utf8.encode(configuredKey)), 'xor-key');
+      for (final bytes in _base64BytesCandidates(normalized)) {
+        add(_xorBytesToText(bytes, utf8.encode(configuredKey)), 'base64+xor-key');
+      }
+    }
+
+    // Keep the original body as a candidate when it already contains a URL,
+    // JSON, HTML, or an HLS marker.
+    if (_isUsefulDecodedPayload(key)) out.add(_DecodedPayload(normalized, 'raw'));
+  }
+
+  List<List<int>> _base64BytesCandidates(String input) {
+    final compact = input.replaceAll(RegExp(r'\s+'), '');
+    if (compact.length < 12 || compact.length % 4 == 1) return const [];
+    if (!RegExp(r'^[A-Za-z0-9+/_=-]+$').hasMatch(compact)) return const [];
+    final normalized = compact.replaceAll('-', '+').replaceAll('_', '/');
+    final padded = normalized.padRight((normalized.length + 3) ~/ 4 * 4, '=');
+    try {
+      final bytes = base64Decode(padded);
+      if (bytes.length < 4) return const [];
+      return [bytes];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  List<int>? _hexBytes(String input) {
+    final compact = input.replaceAll(RegExp(r'\s+'), '');
+    if (compact.length < 8 || compact.length.isOdd || !RegExp(r'^[0-9a-fA-F]+$').hasMatch(compact)) return null;
+    try {
+      return [for (var i = 0; i < compact.length; i += 2) int.parse(compact.substring(i, i + 2), radix: 16)];
     } catch (_) {
       return null;
     }
   }
 
   String? _decodeEncodedBytesToText(List<int> bytes) {
-    // Plain UTF-8.
-    final utf = _safeUtf8(bytes);
-    if (_isUsefulDecodedPayload(utf)) return utf;
-
-    // gzip / zlib. dart:io codecs are available on Android/iOS.
-    for (final decoder in <List<int> Function(List<int>>)[
-      (data) => gzip.decode(data),
-      (data) => ZLibCodec().decode(data),
-    ]) {
-      try {
-        final unpacked = decoder(bytes);
-        final text = _safeUtf8(unpacked);
-        if (_isUsefulDecodedPayload(text)) return text;
-        final nested = _decodeBase64Payload(text);
-        if (nested != null) return nested;
-      } catch (_) {}
-    }
-    return null;
-  }
-
-  String? _decodeXorPayload(String input) {
-    final configuredKey = _headers?['x-xor-key'] ?? _headers?['xor-key'];
-    if (configuredKey != null && configuredKey.isNotEmpty) {
-      final key = utf8.encode(configuredKey);
-      for (final bytes in <List<int>>[
-        utf8.encode(input),
-        ..._base64BytesCandidates(input),
-      ]) {
-        final decoded = _xorToUsefulText(bytes, key);
-        if (decoded != null) return decoded;
-      }
-    }
-
-    // Automatic single-byte XOR heuristic. This does NOT guess arbitrary
-    // encryption keys; it only checks whether a byte-wise XOR immediately
-    // produces strongly recognizable JSON/HTTP/HLS text.
-    final rawCandidates = <List<int>>[utf8.encode(input), ..._base64BytesCandidates(input)];
-    for (final bytes in rawCandidates) {
-      if (bytes.length < 12 || bytes.length > 1024 * 1024) continue;
-      for (var key = 1; key <= 255; key++) {
-        final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key);
-        final text = _safeUtf8(out);
-        if (_isStrongDecodedPayload(text)) return text;
-      }
-    }
-    return null;
-  }
-
-  List<List<int>> _base64BytesCandidates(String input) {
-    final cleaned = input.replaceAll(RegExp(r'\s'), '');
-    final out = <List<int>>[];
-    for (final variant in <String>{
-      cleaned,
-      cleaned.replaceAll('-', '+').replaceAll('_', '/'),
-    }) {
-      try {
-        final padded = variant.padRight((variant.length + 3) ~/ 4 * 4, '=');
-        out.add(base64.decode(padded));
-      } catch (_) {}
-    }
-    return out;
-  }
-
-  String? _xorToUsefulText(List<int> bytes, List<int> key) {
-    if (key.isEmpty) return null;
-    final out = List<int>.generate(bytes.length, (i) => bytes[i] ^ key[i % key.length]);
-    final text = _safeUtf8(out);
-    return _isUsefulDecodedPayload(text) ? text : null;
-  }
-
-  String _safeUtf8(List<int> bytes) {
     try {
-      return utf8.decode(bytes, allowMalformed: false).trim();
+      return _normalizeDecodedText(utf8.decode(bytes, allowMalformed: false));
     } catch (_) {
-      return '';
+      return null;
     }
   }
 
-  String _normalizeDecodedText(String text) {
+  String? _xorBytesToText(List<int> bytes, List<int> key) {
+    if (key.isEmpty || bytes.isEmpty) return null;
+    try {
+      final decoded = List<int>.generate(bytes.length, (i) => bytes[i] ^ key[i % key.length]);
+      return _normalizeDecodedText(utf8.decode(decoded, allowMalformed: false));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _normalizeDecodedText(String text) {
     var value = text.trim();
-    if (value.startsWith('"') && value.endsWith('"')) {
+    if (value.isEmpty) return null;
+    if (value.startsWith('"') && value.endsWith('"') && value.length > 1) {
       try {
         final decoded = jsonDecode(value);
         if (decoded is String) value = decoded.trim();
@@ -510,22 +459,69 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return value;
   }
 
-  bool _isUsefulDecodedPayload(String? text) {
-    if (text == null || text.isEmpty) return false;
-    final value = text.trim();
-    if (_looksLikeJson(value)) return true;
-    if (RegExp(r'^https?://', caseSensitive: false).hasMatch(value)) return true;
-    if (value.contains('.m3u8') || value.contains('#EXTM3U') ||
-        value.contains('.mp4') || value.contains('.mpd')) return true;
-    return false;
+  bool _isUsefulDecodedPayload(String text) {
+    final lower = text.toLowerCase();
+    return lower.startsWith('http://') || lower.startsWith('https://') ||
+        _looksLikeJson(text) || lower.contains('.m3u8') || lower.contains('.mpd') ||
+        lower.contains('#extm3u') || lower.contains('"url"') ||
+        lower.contains('"stream"') || lower.contains('"source"') ||
+        lower.contains('<video') || lower.contains('<iframe');
   }
 
-  bool _isStrongDecodedPayload(String? text) {
-    if (text == null || text.isEmpty) return false;
-    final value = text.trim();
-    if (_looksLikeJson(value)) return true;
-    return RegExp(r'^(https?://|#EXTM3U)', caseSensitive: false).hasMatch(value) ||
-        RegExp(r'https?://[^\s"<>]+\.(m3u8|mp4|mpd)(?:[?#]|$)', caseSensitive: false).hasMatch(value);
+  bool _containsMediaMarker(String text) {
+    final lower = text.toLowerCase();
+    return lower.contains('#extm3u') || lower.contains('.m3u8') ||
+        lower.contains('.mpd') || lower.contains('<video');
+  }
+
+  String? _extractBestUrl(String text, String baseUrl) {
+    dynamic parsed;
+    try { parsed = jsonDecode(text); } catch (_) {}
+    final fromJson = _extractUrlDeep(parsed, baseUrl);
+    if (fromJson != null) return fromJson;
+
+    final regex = RegExp(r"""https?://[^\s"'<>\)\]\}]+""", caseSensitive: false);
+    final matches = regex.allMatches(text);
+    String? best;
+    var bestScore = -999999;
+    for (final match in matches) {
+      var candidate = match.group(0)?.trim() ?? '';
+      candidate = candidate.replaceAll(RegExp(r"""["'<>),;]+$"""), '');
+      if (candidate.isEmpty) continue;
+      final score = _scoreDetectedSource(candidate);
+      if (score > bestScore) { best = candidate; bestScore = score; }
+    }
+    return best;
+  }
+
+  String? _extractUrlDeep(dynamic value, String baseUrl) {
+    if (value is String) {
+      final trimmed = value.trim();
+      if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('/')) {
+        return _resolveRelativeUrl(trimmed, baseUrl);
+      }
+      return null;
+    }
+    if (value is Map) {
+      final preferred = ['url','uri','link','src','source','stream','streamUrl','playUrl','play','hls','m3u8','manifest','playlist','file','video','media','redirect','location','endpoint','data','result','payload'];
+      for (final key in preferred) {
+        if (value.containsKey(key)) {
+          final found = _extractUrlDeep(value[key], baseUrl);
+          if (found != null) return found;
+        }
+      }
+      for (final entry in value.entries) {
+        final found = _extractUrlDeep(entry.value, baseUrl);
+        if (found != null) return found;
+      }
+    }
+    if (value is List) {
+      for (final item in value) {
+        final found = _extractUrlDeep(item, baseUrl);
+        if (found != null) return found;
+      }
+    }
+    return null;
   }
 
   /// استخراج رابط من كائن JSON (يبحث في الحقول الشائعة).
@@ -772,6 +768,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         document.querySelectorAll('source').forEach(s => add(s.src));
         document.querySelectorAll('iframe').forEach(f => add(f.src));
         try { performance.getEntriesByType('resource').forEach(e => add(e.name)); } catch (_) {}
+        try {
+          const html = document.documentElement ? document.documentElement.innerHTML : '';
+          const urls = html.match(/https?:\/\/[^\s\"'<>]+/gi) || [];
+          urls.forEach(add);
+        } catch (_) {}
         try { (window.__sportsPlayerMediaCandidates || []).forEach(add); } catch (_) {}
         return JSON.stringify(Array.from(out));
       })();""";
@@ -813,6 +814,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final headers = <String, String>{
         'user-agent': _headers?['user-agent'] ?? 'Mozilla/5.0 (Android) AppleWebKit/537.36 Chrome/131 Mobile Safari/537.36',
         'accept': '*/*',
+        ...?_webContextHeaders,
+        ...?_resolvedStreamHeaders,
       };
       if (_looksLikeHls(url)) {
         final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
@@ -1045,6 +1048,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           final strongHls = _looksLikeHls(source) && score >= 100;
           if (evidence < 2 && !strongHls) continue;
 
+          // Best-effort validation. A negative validation is not fatal when
+          // the browser has already supplied strong evidence (for example a
+          // stream requiring Referer/Origin/cookies).
+          final validated = await _validatePublicMediaSource(source);
+          if (!validated && evidence < 3 && !strongHls) continue;
+
           _setWebSessionState(_WebSessionState.candidateTrial);
           _webNativeAttempts++;
           _webLastNativeTrialAt = DateTime.now();
@@ -1136,7 +1145,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             }
           },
         ));
-      await controller.loadRequest(sourceUri);
+      await controller.loadRequest(sourceUri, headers: _effectiveStreamHeaders());
       if (!mounted) return;
       _webController = controller;
       setState(() => _state = _LoadState.ready);
@@ -1163,6 +1172,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
+  Map<String, String> _effectiveStreamHeaders() {
+    return {
+      ...?_headers,
+      ...?_webContextHeaders,
+      ...?_resolvedStreamHeaders,
+    };
+  }
+
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality, {bool fallbackToWeb = false}) async {
     if (fallbackToWeb) {
@@ -1182,8 +1199,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final newController = VideoPlayerController.networkUrl(
         Uri.parse(quality.url),
         httpHeaders: {
-          ...?_headers,
-          ...?_webContextHeaders,
+          ..._effectiveStreamHeaders(),
         },
       );
       _controller = newController;
@@ -1618,6 +1634,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Future<void> _startSession() async {
     setState(() => _state = _LoadState.loading);
 
+    _resolvedStreamHeaders = null;
     _headers = (widget.externalUserAgent != null &&
             widget.externalUserAgent!.isNotEmpty)
         ? {'user-agent': widget.externalUserAgent!}
