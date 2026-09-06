@@ -558,7 +558,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
     }
     // البحث عن روابط تشغيلية في النص
-    final fallbackRegex = RegExp(r'https?://[^\s<>"\'\)]+(?:\.m3u8|\.mpd|\.mp4|\.webm|\.m4v|/live/|/stream/)', caseSensitive: false);
+    final fallbackRegex = RegExp(r"""https?://[^\s<>"'\)]+(?:\.m3u8|\.mpd|\.mp4|\.webm|\.m4v|/live/|/stream/)""", caseSensitive: false);
     final fallbackMatch = fallbackRegex.firstMatch(html);
     if (fallbackMatch != null) {
       return fallbackMatch.group(0);

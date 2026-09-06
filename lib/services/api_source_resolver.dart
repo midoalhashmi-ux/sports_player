@@ -183,9 +183,18 @@ class ApiSourceResolver {
         if (!seen.add(current) || current.isEmpty) continue;
         final candidates = <String>{};
         candidates.add(Uri.decodeFull(current));
-        candidates.add(_decodeBase64Text(current));
-        candidates.add(_decodeHexText(current));
-        candidates.add(_decodeCompressedText(current));
+        final base64Text = _decodeBase64Text(current);
+        if (base64Text is String && base64Text.isNotEmpty) {
+          candidates.add(base64Text);
+        }
+        final hexText = _decodeHexText(current);
+        if (hexText is String && hexText.isNotEmpty) {
+          candidates.add(hexText);
+        }
+        final compressedText = _decodeCompressedText(current);
+        if (compressedText is String && compressedText.isNotEmpty) {
+          candidates.add(compressedText);
+        }
         for (final value in candidates) {
           final normalized = _normalize(value);
           if (normalized == null || normalized.isEmpty || normalized == current) continue;
