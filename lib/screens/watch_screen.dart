@@ -237,10 +237,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final kind = lower.contains('.m3u8') ? StreamKind.hls
             : lower.contains('.mpd') ? StreamKind.dash
             : StreamKind.progressive;
-        if (kind == StreamKind.dash) {
-          // The current video_player dependency does not provide DASH playback.
-          continue;
-        }
+        // video_player_android (ExoPlayer) has supported DASH natively since
+        // well before the version pinned in pubspec.yaml, so DASH candidates
+        // are played the same as HLS/MP4 — see _playServerQuality's
+        // formatHint, which is what actually tells ExoPlayer to use its DASH
+        // extractor instead of guessing from the URL alone.
         return StreamSession.success(
           kind: kind,
           isLive: true,
@@ -1178,7 +1179,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           if (score < 80) continue;
           final uri = Uri.tryParse(source);
           if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
-          if (source.toLowerCase().contains('.mpd')) continue;
           if (!_canTrialNative(source)) continue;
 
           final evidence = _webCandidateEvidence[source] ?? 0;
@@ -1334,8 +1334,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
 
+      // Explicit formatHint so ExoPlayer picks its DASH/HLS extractor
+      // directly instead of guessing from the URL — needed for DASH sources
+      // in particular, since a signed/extension-less .mpd URL would
+      // otherwise not be auto-detected correctly.
+      final lowerQualityUrl = quality.url.toLowerCase();
+      final formatHint = lowerQualityUrl.contains('.mpd')
+          ? VideoFormat.dash
+          : lowerQualityUrl.contains('.m3u8')
+              ? VideoFormat.hls
+              : null;
+
       final newController = VideoPlayerController.networkUrl(
         Uri.parse(quality.url),
+        formatHint: formatHint,
         httpHeaders: {
           ..._effectiveStreamHeaders(),
         },
