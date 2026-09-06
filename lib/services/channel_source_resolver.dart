@@ -15,6 +15,20 @@ class ChannelSourceResolver {
           .get();
       final data = snapshot.data();
 
+      // القناة قد تحمل Referer/User-Agent اختياريين محفوظين من لوحة التحكم
+      // (channels.sourceHeaders). فارغان تماماً = استخدم افتراضيات
+      // WebView/الشبكة، ولا يُعتبر غيابهما سبباً لفشل الحل.
+      final rawHeaders = data?['sourceHeaders'];
+      final sourceHeaders = <String, String>{};
+      if (rawHeaders is Map) {
+        final referer = rawHeaders['referer']?.toString().trim();
+        final userAgent = (rawHeaders['user-agent'] ?? rawHeaders['userAgent'])
+            ?.toString()
+            .trim();
+        if (referer != null && referer.isNotEmpty) sourceHeaders['referer'] = referer;
+        if (userAgent != null && userAgent.isNotEmpty) sourceHeaders['user-agent'] = userAgent;
+      }
+
       // يمكن للوحة التحكم تحديد أن المصدر صفحة ويب رسمية بدلاً من رابط
       // فيديو مباشر. في هذه الحالة نعرض الصفحة داخل WebView ولا نحاول
       // تمريرها إلى ExoPlayer كمصدر فيديو.
@@ -35,6 +49,7 @@ class ChannelSourceResolver {
               qualities: [StreamQuality(label: 'صفحة البث', url: webUrl)],
             ),
           ],
+          headers: sourceHeaders,
         );
       }
 
@@ -60,6 +75,7 @@ class ChannelSourceResolver {
               kind: StreamKind.hls,
               isLive: data?['status'] == 'live',
               servers: servers,
+              headers: sourceHeaders,
             );
           }
         }
@@ -77,6 +93,7 @@ class ChannelSourceResolver {
               qualities: [StreamQuality(label: 'تلقائي', url: directUrl)],
             ),
           ],
+          headers: sourceHeaders,
         );
       }
     } catch (_) {

@@ -199,21 +199,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   /// نقطة الدخول لمعالجة رابط القناة حسب الشجرة المطلوبة.
   Future<StreamSession?> _resolveChannelUrl(String initialUrl) async {
     try {
-      // SPA/hash routes (for example Rotana /#/live/...) are client-side routes.
-      // A normal HTTP GET never sends the URL fragment, so resolving them as a
-      // server URL loses the actual channel route and can incorrectly produce
-      // "تعذر حل رابط البث". Keep the complete URL for WebView discovery.
+      // SPA/hash routes (e.g. https://site.example/#/live/some-channel) are
+      // client-side-only routes: a normal HTTP GET never sends the URL
+      // fragment to the server, so any attempt to "resolve" them as a plain
+      // server URL silently loses the actual route and produces a false
+      // "تعذر حل رابط البث". This check is intentionally generic (any
+      // non-empty URI fragment), not tied to a specific site/domain — the
+      // fragment simply cannot be resolved over HTTP for ANY site, so the
+      // only architecturally correct move is to hand the complete, unmodified
+      // URL to WebView and let the page's own JavaScript route/render it.
       final parsedInitial = Uri.tryParse(initialUrl);
-      final lowerInitial = initialUrl.toLowerCase();
-      final isSpaRoute = parsedInitial != null &&
-          parsedInitial.fragment.isNotEmpty &&
-          (parsedInitial.fragment.contains('/live/') ||
-              parsedInitial.fragment.contains('/watch/') ||
-              parsedInitial.fragment.contains('/channel/')) ;
-      final isKnownWebPage = lowerInitial.contains('rotana.net/') ||
-          lowerInitial.contains('/#/live/') ||
-          lowerInitial.contains('#/live/');
-      if (isSpaRoute || isKnownWebPage) {
+      final isSpaRoute = parsedInitial != null && parsedInitial.fragment.isNotEmpty;
+      if (isSpaRoute) {
         return StreamSession.success(
           kind: StreamKind.web,
           isLive: true,
@@ -1804,13 +1801,44 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         ],
       );
     } else if (widget.channelId != null) {
-      // استخدام المعالجة الجديدة
-      String apiUrl = widget.channelId!;
-      if (!apiUrl.startsWith('http')) {
-        // نفترض أن هناك host أساسي، قم بتغيير هذا الرابط حسب خادمك
-        apiUrl = 'https://def.ycnapi.com' + (apiUrl.startsWith('/') ? '' : '/') + apiUrl;
+      final channelId = widget.channelId!;
+
+      // The dashboard/CMS is the source of truth for a channel's
+      // sourceType/sourceUrl (see ChannelSourceResolver — it was previously
+      // defined but never actually called from here, which is the real
+      // reason a dashboard-configured "Source Type: WEB" page such as
+      // Rotana never reached WebView: this screen was instead always
+      // guessing a legacy API host from the raw id below and running HTTP
+      // resolution on it). Try the CMS resolver first so a "web" source is
+      // sent to WebView exactly as configured, hash route included, with no
+      // HTTP resolution attempted on it at all.
+      StreamSession? cmsSession;
+      var cmsResolverAvailable = true;
+      try {
+        cmsSession = await ChannelSourceResolver.resolve(channelId);
+      } catch (_) {
+        cmsResolverAvailable = false;
       }
-      session = await _resolveChannelUrl(apiUrl);
+
+      if (cmsResolverAvailable && cmsSession != null) {
+        session = cmsSession;
+        if (cmsSession.headers.isNotEmpty) {
+          // Dashboard-configured Referer/User-Agent, when present, ride
+          // alongside whatever the resolver/WebView discover on their own
+          // (see _effectiveStreamHeaders) — they never replace defaults
+          // when left empty in the dashboard.
+          _headers = {...?_headers, ...cmsSession.headers};
+        }
+      } else {
+        // Legacy fallback — preserved as-is for ids that are not real
+        // Firestore channel documents (e.g. the CMS/Firestore plugin itself
+        // is unavailable), so nothing that currently works this way breaks.
+        String apiUrl = channelId;
+        if (!apiUrl.startsWith('http')) {
+          apiUrl = 'https://def.ycnapi.com' + (apiUrl.startsWith('/') ? '' : '/') + apiUrl;
+        }
+        session = await _resolveChannelUrl(apiUrl);
+      }
     } else {
       session = StreamSession.failure('لا يوجد مصدر بث لتشغيله.');
     }

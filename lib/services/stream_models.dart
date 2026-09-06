@@ -41,6 +41,11 @@ class StreamSession {
   final bool isLive;
   final List<StreamServerOption> servers;
   final String? errorMessage;
+  // Optional Referer/User-Agent (or other) headers configured for this
+  // source from the dashboard (channels.sourceHeaders). Empty by default —
+  // callers must treat an absent/empty map as "use defaults", never as a
+  // reason to fail.
+  final Map<String, String> headers;
 
   const StreamSession._({
     required this.ok,
@@ -48,18 +53,21 @@ class StreamSession {
     required this.isLive,
     required this.servers,
     this.errorMessage,
+    this.headers = const {},
   });
 
   factory StreamSession.success({
     required StreamKind kind,
     required bool isLive,
     required List<StreamServerOption> servers,
+    Map<String, String> headers = const {},
   }) {
     return StreamSession._(
       ok: true,
       kind: kind,
       isLive: isLive,
       servers: servers,
+      headers: headers,
     );
   }
 
