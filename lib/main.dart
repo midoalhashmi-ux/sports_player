@@ -1,17 +1,15 @@
-import 'dart:async';
-
-import 'package:app_links/app_links.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
-
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'core/services/favorites_service.dart';
+import 'core/services/app_settings_service.dart';
+import 'core/services/app_update_service.dart';
+import 'features/home/home_shell.dart';
+import 'features/settings/app_update_dialog.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'firebase_options.dart';
-import 'screens/force_update_screen.dart';
-import 'screens/home_screen.dart';
-import 'screens/watch_screen.dart';
-import 'services/ad_service.dart';
-import 'services/version_check_service.dart';
-
-final navigatorKey = GlobalKey<NavigatorState>();
+import 'theme/app_theme.dart';
+import 'theme/dynamic_theme_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,60 +25,27 @@ class _BootApp extends StatefulWidget {
 class _BootAppState extends State<_BootApp> {
   String? _error;
   bool _ready = false;
-  Uri? _initialUri;
-  ForceUpdateInfo? _forceUpdateInfo;
+
+  // شاشة البداية (Splash) موجودة في هذا التطبيق فقط (BinSheikh) — تطبيق
+  // المشغل لا يعرض أي شاشة بداية إطلاقاً. نضمن ظهورها لمدة كافية للعلامة
+  // التجارية حتى لو انتهت تهيئة Firebase بشكل أسرع من ذلك.
+  static const _minSplashDuration = Duration(milliseconds: 1400);
+  bool _minSplashElapsed = false;
 
   @override
   void initState() {
     super.initState();
     _initialize();
+    Future.delayed(_minSplashDuration, () {
+      if (mounted) setState(() => _minSplashElapsed = true);
+    });
   }
 
   Future<void> _initialize() async {
     try {
-      // نبدأ تهيئة Firebase وفي نفس الوقت نتحقق هل التطبيق فُتح عبر رابط
-      // قادم من تطبيق المحتوى — قبل بناء أي واجهة. بهذا الشكل نقرر من أول
-      // لحظة: هل نعرض شاشة المشاهدة مباشرة كشاشة وحيدة (بدون شاشة بداية
-      // أو رئيسية خلفها إطلاقاً)، أو نمر بمسار شاشة البداية العادي.
-      final firebaseFuture =
-          Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
-      final linkFuture = AppLinks().getInitialLink();
-
-      await firebaseFuture;
-
-      // فحص التحديث الإجباري أولاً — قبل أي شيء آخر (إعلانات، روابط
-      // عميقة). لو النتيجة غير null، نوقف كل مسار التهيئة العادي ونعرض
-      // شاشة التحديث فقط دون أي مسار للخروج منها.
-      final forceUpdate = await VersionCheckService.checkForceUpdate();
-      if (forceUpdate != null) {
-        if (mounted) {
-          setState(() {
-            _ready = true;
-            _forceUpdateInfo = forceUpdate;
-          });
-        }
-        return;
-      }
-
-      // مهم جداً: نبدأ تهيئة الإعلانات (وبالتالي تحميل الإعلان البيني
-      // مسبقاً) من هنا مباشرة — أبكر نقطة ممكنة بعد جاهزية Firebase —
-      // بدل انتظار وصول المستخدم لـ HomeScreen. لو الدخول كان عبر رابط
-      // عميق من تطبيق المحتوى، الكود يذهب مباشرة لـ WatchScreen ويتجاوز
-      // HomeScreen بالكامل؛ في تلك الحالة كان الإعلان البيني يبدأ تحميله
-      // فقط عند فتح شاشة المشاهدة نفسها (مهلة تحميل قصيرة جداً 4 ثوانٍ
-      // من بداية باردة)، فيفشل غالباً في اللحاق بالوقت رغم أنه يتحمّل
-      // بنجاح لاحقاً (ولهذا يظهر "جاهز" في التشخيص بعد فوات الأوان).
-      // لا ننتظر (`unawaited`) حتى لا نؤخر ظهور أول واجهة للمستخدم.
-      unawaited(AdService.instance.initialize());
-
-      final initialUri = await linkFuture;
-
-      if (mounted) {
-        setState(() {
-          _ready = true;
-          _initialUri = initialUri;
-        });
-      }
+      await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+      await FavoritesService.init();
+      if (mounted) setState(() => _ready = true);
     } catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
@@ -89,28 +54,38 @@ class _BootAppState extends State<_BootApp> {
   @override
   Widget build(BuildContext context) {
     if (_error != null) return _ErrorApp(error: _error!);
-    if (!_ready) return const _LoadingApp();
-    final forceUpdateInfo = _forceUpdateInfo;
-    if (forceUpdateInfo != null) {
-      return MaterialApp(
-        debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(useMaterial3: true),
-        locale: const Locale('ar'),
-        home: ForceUpdateScreen(info: forceUpdateInfo),
-      );
-    }
-    return PlayerApp(initialUri: _initialUri);
+    if (!_ready || !_minSplashElapsed) return const _SplashApp();
+    return const SportsApp();
   }
 }
 
-class _LoadingApp extends StatelessWidget {
-  const _LoadingApp();
+class _SplashApp extends StatelessWidget {
+  const _SplashApp();
   @override
   Widget build(BuildContext context) => const MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
-          backgroundColor: Colors.black,
-          body: Center(child: CircularProgressIndicator(color: Colors.white)),
+          backgroundColor: Color(0xFF0B1120),
+          body: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.live_tv, size: 72, color: Color(0xFF38BDF8)),
+                SizedBox(height: 16),
+                Text(
+                  'BinSheikh',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                SizedBox(height: 24),
+                CircularProgressIndicator(color: Color(0xFF38BDF8)),
+              ],
+            ),
+          ),
         ),
       );
 }
@@ -122,102 +97,124 @@ class _ErrorApp extends StatelessWidget {
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
         home: Scaffold(
-          backgroundColor: Colors.black,
+          backgroundColor: const Color(0xFF0B1120),
           body: Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
-              child: Text('تعذر بدء تطبيق المشغل.\n\n$error',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white)),
+              child: Text('تعذر بدء خدمة المحتوى.\n\n$error',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white)),
             ),
           ),
         ),
       );
 }
 
-class PlayerApp extends StatefulWidget {
-  final Uri? initialUri;
-  const PlayerApp({super.key, this.initialUri});
+class SportsApp extends StatelessWidget {
+  const SportsApp({super.key});
+
   @override
-  State<PlayerApp> createState() => _PlayerAppState();
+  Widget build(BuildContext context) => StreamBuilder<DynamicThemeSettings>(
+        stream: DynamicThemeService.watchTheme(),
+        builder: (context, snapshot) => MaterialApp(
+          title: 'BinSheikh',
+          debugShowCheckedModeBanner: false,
+          theme: snapshot.data?.toThemeData() ?? AppTheme.fallback,
+          locale: const Locale('ar'),
+          // بدون هذين السطرين، MaterialApp لا يجد أي مندوب ترجمة (Delegate)
+          // مطابق للعربية فيرجع فعلياً للإنجليزية كلغة تحديد اتجاه فعلي، وهذا
+          // هو سبب ظهور الشاشة كاملة باتجاه LTR (من اليسار لليمين) رغم أن
+          // النصوص عربية — ومنه ظهور شعار/اسم الدوري يسار الشاشة بدل يمينها.
+          localizationsDelegates: const [
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('ar')],
+          home: const _UpdateGate(),
+        ),
+      );
 }
 
-class _PlayerAppState extends State<PlayerApp> {
-  final _appLinks = AppLinks();
-  StreamSubscription<Uri>? _linkSub;
+class _UpdateGate extends StatefulWidget {
+  const _UpdateGate();
+
+  @override
+  State<_UpdateGate> createState() => _UpdateGateState();
+}
+
+class _UpdateGateState extends State<_UpdateGate> {
+  AppUpdateInfo? _info;
+  bool _busy = true;
 
   @override
   void initState() {
     super.initState();
-    // نستمع فقط للروابط التي تصل أثناء عمل التطبيق (رابط الإقلاع الأول
-    // تمت معالجته مسبقاً في _BootAppState قبل بناء الواجهة).
-    _linkSub = _appLinks.uriLinkStream.listen(_handleRuntimeUri, onError: (_) {});
+    _check();
   }
 
-  // يبني شاشة المشاهدة من رابط، أو null إن لم يكن الرابط يحمل بيانات بث.
-  Widget? _watchScreenForUri(Uri uri) {
-    final channelId = uri.queryParameters['channelId'];
-    final url = uri.queryParameters['url'];
+  Future<void> _check() async {
+    final info = await AppUpdateService.fetchUpdateInfo();
+    if (!mounted) return;
+    setState(() {
+      _info = info;
+      _busy = false;
+    });
 
-    if ((channelId == null || channelId.isEmpty) &&
-        (url == null || url.isEmpty)) {
-      return null;
+    if (info.forceUpdate && info.minVersion != null && info.minVersion!.isNotEmpty) {
+      final current = const String.fromEnvironment('APP_VERSION', defaultValue: '0.0.0');
+      final currentParts = current.split('.').map(int.tryParse).toList();
+      final minParts = info.minVersion!.split('.').map(int.tryParse).toList();
+
+      final needsUpdate = currentParts.length == minParts.length &&
+          minParts[0] != null &&
+          currentParts[0] != null &&
+          minParts[1] != null &&
+          currentParts[1] != null &&
+          minParts[2] != null &&
+          currentParts[2] != null &&
+          (currentParts[0]! > minParts[0]! ||
+              (currentParts[0] == minParts[0] &&
+                  currentParts[1]! > minParts[1]!) ||
+              (currentParts[0] == minParts[0] &&
+                  currentParts[1] == minParts[1] &&
+                  currentParts[2]! > minParts[2]!)) == false;
+
+      if (needsUpdate) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (_) => AppUpdateDialog(
+              info: info,
+              onDismiss: info.forceUpdate ? null : () => Navigator.of(context).pop(),
+              onUpdate: () async {
+                Navigator.of(context).pop();
+                final settings = await AppSettingsService.fetchSettings();
+                if (!mounted) return;
+                if (settings.appStoreUrl.trim().isNotEmpty) {
+                  await launchUrl(Uri.parse(settings.appStoreUrl.trim()), mode: LaunchMode.externalApplication);
+                }
+              },
+            ),
+          );
+        });
+      }
     }
-
-    return WatchScreen(
-      key: ValueKey(channelId ?? url),
-      channelId:
-          (channelId != null && channelId.isNotEmpty) ? channelId : null,
-      externalUrl:
-          (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
-    );
-  }
-
-  void _handleRuntimeUri(Uri uri) {
-    final screen = _watchScreenForUri(uri);
-    if (screen == null) return;
-
-    // نفرّغ المكدس بالكامل ونجعل شاشة المشاهدة هي الشاشة الوحيدة — تماماً
-    // مثل حالة فتح التطبيق مباشرة عبر رابط. بهذا الشكل يبقى زر الخروج
-    // متسقاً دائماً: يغلق تطبيق المشغل بالكامل ويرجع المستخدم لتطبيق
-    // المحتوى، بدل ما "يعلّق" على شاشة داخلية للمشغل لم يكن يفترض بها
-    // الظهور أصلاً.
-    // نستخدم انتقالاً فورياً بلا أنيميشن (بدل MaterialPageRoute الافتراضي)
-    // حتى لا تبقى شاشة المشاهدة القديمة ظاهرة/مسموعة خلال مدة الأنيميشن
-    // فوق الشاشة الجديدة عند تبديل القناة والمشغل يعمل بالفعل في الخلفية.
-    navigatorKey.currentState?.pushAndRemoveUntil(
-      PageRouteBuilder(
-        pageBuilder: (_, __, ___) => screen,
-        transitionDuration: Duration.zero,
-        reverseTransitionDuration: Duration.zero,
-      ),
-      (route) => false,
-    );
-  }
-
-  @override
-  void dispose() {
-    _linkSub?.cancel();
-    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final initialUri = widget.initialUri;
-    final initialWatchScreen =
-        initialUri != null ? _watchScreenForUri(initialUri) : null;
-
-    return MaterialApp(
-      navigatorKey: navigatorKey,
-      title: 'BinSheikh Player',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
-      locale: const Locale('ar'),
-      // لا توجد شاشة بداية (Splash) في تطبيق المشغل إطلاقاً — شاشة
-      // البداية موجودة فقط في التطبيق العادي (BinSheikh). إذا فُتح
-      // المشغل عبر رابط من تطبيق المحتوى، شاشة المشاهدة هي الشاشة
-      // الوحيدة مباشرة، وإلا يذهب مباشرة لشاشة التصفح الداخلية للمشغل.
-      home: initialWatchScreen ?? const HomeScreen(),
-    );
+    if (_busy) {
+      return MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: Scaffold(
+          backgroundColor: const Color(0xFF0B1120),
+          body: const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+        ),
+      );
+    }
+    return const HomeShell();
   }
 }

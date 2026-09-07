@@ -23,25 +23,6 @@
           "other_platform_oauth_client": []
         }
       }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:207449859236:android:bf1f58d71ec65af4ceb231",
-        "android_client_info": {
-          "package_name": "com.midoalhashmi.zoltrastream"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyDDo8Hs253YOOfmYg863UUTnlfE-KNyG5s"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
     }
   ],
   "configuration_version": "1"

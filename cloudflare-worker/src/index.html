@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#101828" />
+    <title>لوحة تحكم تطبيق البث</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section id="loading-view" class="card centered-view" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <p>جارٍ تجهيز لوحة التحكم…</p>
+      </section>
+
+      <section id="login-view" class="card auth-card hidden">
+        <div class="brand-mark">⚽</div>
+        <h1>لوحة تحكم البث الرياضي</h1>
+        <p class="muted">سجّل دخولك بحساب المالك لإدارة التطبيق.</p>
+        <form id="login-form">
+          <label for="email">البريد الإلكتروني</label>
+          <input id="email" type="email" autocomplete="email" required />
+          <label for="password">كلمة المرور</label>
+          <input id="password" type="password" autocomplete="current-password" required />
+          <p id="login-error" class="form-error" role="alert"></p>
+          <button id="login-button" type="submit">تسجيل الدخول</button>
+        </form>
+      </section>
+
+      <section id="dashboard-view" class="dashboard hidden">
+        <header class="topbar card">
+          <div>
+            <p class="eyebrow">لوحة التحكم</p>
+            <h1>مرحباً، <span id="owner-email"></span></h1>
+          </div>
+          <button id="logout-button" class="secondary-button" type="button">تسجيل الخروج</button>
+        </header>
+
+        <nav class="admin-nav" aria-label="إدارة اللوحة">
+          <button class="nav-button active" type="button" data-panel="home-panel">الرئيسية</button>
+          <button class="nav-button" type="button" data-panel="matches-panel">المباريات</button>
+          <button class="nav-button" type="button" data-panel="messages-panel">الرسائل <span id="messages-badge" class="count-badge hidden"></span></button>
+          <button class="nav-button" type="button" data-panel="ads-panel">الإعلانات</button>
+          <button class="nav-button" type="button" data-panel="settings-panel">الإعدادات</button>
+        </nav>
+
+        <section id="home-panel" class="admin-panel">
+
+        <section class="section-heading">
+          <div>
+            <p class="eyebrow">إدارة المحتوى</p>
+            <h2 id="categories-title">الأقسام الرئيسية</h2>
+            <p id="categories-context" class="muted">اختر قسماً لعرض ما بداخله، أو أضف عنصراً من زر «+ إضافة».</p>
+          </div>
+          <div class="section-actions">
+            <button id="back-to-root" class="secondary-button hidden" type="button">العودة للأقسام الرئيسية</button>
+            <div class="add-menu-wrap">
+              <button id="add-menu-toggle" class="add-menu-toggle" type="button" aria-haspopup="true" aria-expanded="false">+ إضافة</button>
+              <div id="add-menu" class="add-menu hidden" role="menu">
+                <button type="button" data-add-type="category" role="menuitem">📁 قسم</button>
+                <button type="button" data-add-type="channel" role="menuitem">📺 قناة</button>
+                <button type="button" data-add-type="marquee" role="menuitem">🔄 نص متحرك</button>
+                <button type="button" data-add-type="text-block" disabled role="menuitem">📝 نص كتابي (قريباً)</button>
+                <button type="button" data-add-type="cell" disabled role="menuitem">🧩 خلية للقسم (قريباً)</button>
+              </div>
+            </div>
+            <span id="categories-count" class="count-badge">جارٍ التحميل…</span>
+          </div>
+        </section>
+
+        <section id="category-form-card" class="card category-form-card hidden">
+          <div>
+            <h2 id="category-form-title">إضافة قسم رئيسي</h2>
+            <p class="muted">مثال: كرة القدم أو القنوات الرياضية.</p>
+          </div>
+          <form id="category-form" class="category-form">
+            <input id="category-edit-id" type="hidden" />
+            <div>
+              <label for="category-title">اسم القسم</label>
+              <input id="category-title" name="title" type="text" maxlength="50" placeholder="مثال: كرة القدم" required />
+            </div>
+            <div>
+              <label for="category-image">رابط صورة الخلفية <span class="optional-label">اختياري</span></label>
+              <input id="category-image" name="image" type="url" placeholder="https://example.com/image.jpg" />
+            </div>
+            <input id="category-parent" name="parentId" type="hidden" value="" />
+            <p id="category-form-message" class="form-message" role="status"></p>
+            <div class="form-card-actions">
+              <button id="category-save-button" type="submit">إضافة القسم</button>
+              <button id="category-close-button" class="secondary-button" type="button">إغلاق</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="channel-form-card" class="card category-form-card channel-form-card hidden">
+          <div><h2 id="channel-form-title">إضافة قناة</h2><p class="muted">بيانات العرض فقط؛ رابط البث من بطاقة القناة نفسها بعد الإنشاء.</p></div>
+          <form id="channel-form" class="channel-form">
+            <input id="channel-edit-id" type="hidden" />
+            <input id="channel-category" type="hidden" />
+            <div><label for="channel-title">اسم القناة</label><input id="channel-title" required maxlength="50" placeholder="مثال: SSC 1" /></div>
+            <div><label for="channel-subtitle">وصف مختصر</label><input id="channel-subtitle" maxlength="90" placeholder="مثال: مباريات مباشرة" /></div>
+            <div><label for="channel-status">الحالة</label><select id="channel-status"><option value="live">مباشر الآن</option><option value="upcoming">قريباً</option><option value="ended">انتهى</option></select></div>
+            <div><label for="channel-logo">رابط الشعار <span class="optional-label">اختياري</span></label><input id="channel-logo" type="url" placeholder="https://example.com/logo.png" /></div>
+            <div><label for="channel-player-key">مفتاح القناة في المشغل <span class="optional-label">اختياري حالياً</span></label><input id="channel-player-key" maxlength="80" placeholder="مثال: ssc-1-hd" /></div>
+            <p id="channel-form-message" class="form-message" role="status"></p>
+            <div class="form-card-actions">
+              <button id="channel-save-button" type="submit">إضافة القناة</button>
+              <button id="channel-close-button" class="secondary-button" type="button">إغلاق</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="marquee-form-card" class="card category-form-card hidden">
+          <div>
+            <h2 id="marquee-form-title">نص متحرك للقسم</h2>
+            <p class="muted">يظهر كشريط نص متحرك أعلى محتوى هذا القسم داخل التطبيق. احفظه فارغاً لإخفائه.</p>
+          </div>
+          <form id="marquee-form" class="marquee-form">
+            <div>
+              <label for="marquee-text">النص</label>
+              <textarea id="marquee-text" rows="2" maxlength="200" placeholder="مثال: أهلاً بكم في قسم كرة القدم…"></textarea>
+            </div>
+            <p id="marquee-form-message" class="form-message" role="status"></p>
+            <div class="form-card-actions">
+              <button id="marquee-save-button" type="submit">حفظ النص المتحرك</button>
+              <button id="marquee-close-button" class="secondary-button" type="button">إغلاق</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="marquee-preview" class="card marquee-preview hidden"></section>
+
+        <section id="categories-loading" class="card loading-card">
+          <span class="spinner" aria-hidden="true"></span>
+          <p>جارٍ قراءة الأقسام من التطبيق…</p>
+        </section>
+
+        <section id="categories-error" class="card message-card error-card hidden" role="alert"></section>
+        <button id="retry-categories" class="secondary-button hidden retry-button" type="button">إعادة محاولة تحميل الأقسام</button>
+        <section id="categories-empty" class="card message-card hidden">
+          <h2>لا توجد أقسام بعد</h2>
+          <p>هذا طبيعي إذا لم تتم إضافة بيانات للتطبيق حتى الآن. اضغط «+ إضافة» لإنشاء أول قسم.</p>
+        </section>
+        <section id="categories-list" class="categories-grid hidden" aria-label="قائمة الأقسام"></section>
+
+        <section id="channels-section" class="hidden">
+          <section class="section-heading channels-subheading">
+            <div><p class="eyebrow">قنوات هذا القسم</p><h3 id="channels-title">القنوات</h3></div>
+            <span id="channels-count" class="count-badge">0 قناة</span>
+          </section>
+          <section id="channels-loading" class="card loading-card hidden"><span class="spinner"></span><p>جارٍ قراءة القنوات…</p></section>
+          <section id="channels-empty" class="card message-card hidden"><h2>لا توجد قنوات بعد</h2><p>أضف أول قناة من زر «+ إضافة» أعلاه.</p></section>
+          <section id="channels-list" class="channels-list hidden"></section>
+        </section>
+        </section>
+
+        <section id="matches-panel" class="admin-panel hidden">
+          <section class="section-heading">
+            <div>
+              <p class="eyebrow">مصدر خارجي · API-Football</p>
+              <h2>مباريات اليوم</h2>
+              <p class="muted">تُجلب تلقائياً كل ساعة عبر Cloud Function وتُخزَّن في قاعدة البيانات؛ لا حاجة لأي تدخل يدوي عادةً.</p>
+            </div>
+          </section>
+          <section class="card matches-status-card">
+            <div>
+              <h2>حالة المزامنة</h2>
+              <p id="matches-status-text" class="muted">جارٍ التحميل…</p>
+              <p id="matches-debug-text" class="muted matches-debug-text hidden"></p>
+            </div>
+            <div class="matches-sync-actions">
+              <button id="sync-matches-button" type="button">مزامنة الآن</button>
+              <button id="sync-window-button" type="button" class="secondary-button">إعادة مزامنة كل الأيام (-3 إلى +3)</button>
+            </div>
+          </section>
+          <p class="muted matches-sync-hint">"مزامنة الآن" يحدّث اليوم فقط. "إعادة مزامنة كل الأيام" يحدّث الأيام السبعة كاملة فورًا (يفيد بعد أول نشر أو لو لاحظت أمس/غدًا فارغين) — يستهلك حصة API-Football أكبر، استخدمه عند الحاجة فقط.</p>
+          <section id="matches-message" class="card message-card hidden" role="status"></section>
+        </section>
+
+        <section id="messages-panel" class="admin-panel hidden">
+          <section class="section-heading">
+            <div>
+              <p class="eyebrow">تواصل معنا · إبلاغ عن رابط معطوب</p>
+              <h2>الرسائل الواردة</h2>
+              <p class="muted">ترسَل مباشرة من التطبيق بدون حاجة لبريد إلكتروني.</p>
+            </div>
+            <span id="messages-count" class="count-badge">جارٍ التحميل…</span>
+          </section>
+          <section id="messages-loading" class="card loading-card"><span class="spinner"></span><p>جارٍ قراءة الرسائل…</p></section>
+          <section id="messages-empty" class="card message-card hidden"><h2>لا توجد رسائل بعد</h2><p>ستظهر هنا فور إرسال أي رسالة من التطبيق.</p></section>
+          <section id="messages-list" class="channels-list hidden"></section>
+        </section>
+
+        <section id="ads-panel" class="admin-panel hidden">
+          <section class="section-heading">
+            <div>
+              <p class="eyebrow">إعدادات التطبيق</p>
+              <h2>الإعلانات</h2>
+              <p class="muted">أكواد شبكات الإعلانات، ومفتاح لتشغيل الإعلانات أو إيقافها بالكامل في التطبيق.</p>
+            </div>
+          </section>
+          <section class="card category-form-card">
+            <div>
+              <h2>شبكات الإعلانات</h2>
+              <p class="muted">اترك أي خانة فارغة إن لم تكن تستخدم تلك الشبكة. عند إيقاف المفتاح العلوي لا تظهر أي إعلانات مهما كانت الأكواد المدخلة.</p>
+            </div>
+            <form id="ads-form" class="category-form">
+              <div class="ads-master-toggle">
+                <label class="protect-toggle"><input id="ads-enabled" type="checkbox" checked> تفعيل الإعلانات في التطبيق</label>
+              </div>
+
+              <div class="ads-group-heading"><h3>AdMob</h3></div>
+              <div><label for="admob-app-id">معرّف التطبيق (App ID)</label><input id="admob-app-id" maxlength="120" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx~xxxxxxxxxx" /></div>
+              <div><label for="admob-banner-id">كود إعلان البانر</label><input id="admob-banner-id" maxlength="120" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" /></div>
+              <div><label for="admob-interstitial-id">كود الإعلان البيني</label><input id="admob-interstitial-id" maxlength="120" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" /></div>
+              <div><label for="admob-rewarded-id">كود الإعلان المُكافئ</label><input id="admob-rewarded-id" maxlength="120" placeholder="ca-app-pub-xxxxxxxxxxxxxxxx/xxxxxxxxxx" /></div>
+
+              <div class="ads-group-heading"><h3>AppLovin (لوفين)</h3></div>
+              <div><label for="applovin-sdk-key">مفتاح SDK</label><input id="applovin-sdk-key" maxlength="200" placeholder="SDK Key" /></div>
+              <div><label for="applovin-banner-id">كود إعلان البانر</label><input id="applovin-banner-id" maxlength="120" placeholder="Ad Unit ID" /></div>
+              <div><label for="applovin-interstitial-id">كود الإعلان البيني</label><input id="applovin-interstitial-id" maxlength="120" placeholder="Ad Unit ID" /></div>
+              <div><label for="applovin-rewarded-id">كود الإعلان المُكافئ</label><input id="applovin-rewarded-id" maxlength="120" placeholder="Ad Unit ID" /></div>
+
+              <div class="ads-group-heading"><h3>Unity Ads</h3></div>
+              <div><label for="unity-game-id">معرّف اللعبة/التطبيق (Game ID)</label><input id="unity-game-id" maxlength="120" placeholder="Game ID" /></div>
+              <div><label for="unity-banner-id">كود إعلان البانر</label><input id="unity-banner-id" maxlength="120" placeholder="Placement ID" /></div>
+              <div><label for="unity-interstitial-id">كود الإعلان البيني</label><input id="unity-interstitial-id" maxlength="120" placeholder="Placement ID" /></div>
+              <div><label for="unity-rewarded-id">كود الإعلان المُكافئ</label><input id="unity-rewarded-id" maxlength="120" placeholder="Placement ID" /></div>
+
+              <p id="ads-message" class="form-message"></p>
+              <div class="form-card-actions"><button id="ads-save-button" type="submit">حفظ إعدادات الإعلانات</button></div>
+            </form>
+          </section>
+        </section>
+
+        <section id="settings-panel" class="admin-panel hidden">
+          <section class="section-heading"><div><p class="eyebrow">إعدادات التطبيق</p><h2>ألوان التطبيق</h2><p class="muted">تتغير في تطبيق الجوال فور حفظها.</p></div></section>
+          <section class="card category-form-card"><div><h2>الثيم</h2><p class="muted">اكتب اللون بصيغة مثل #00C853.</p></div><form id="theme-form" class="category-form"><div><label for="primary-color">اللون الرئيسي</label><input id="primary-color" value="#00C853" pattern="#[0-9a-fA-F]{6}" required /></div><div><label for="background-color">لون الخلفية</label><input id="background-color" value="#0D0D0D" pattern="#[0-9a-fA-F]{6}" required /></div><p id="theme-message" class="form-message"></p><button type="submit">حفظ الألوان</button></form></section>
+          <section class="card category-form-card"><div><h2>تطبيق المشغل</h2><p class="muted">هذه الإعدادات تخبر تطبيق المحتوى كيف يفتح المشغل وكيف ينقل المستخدم للمتجر.</p></div><form id="player-form" class="category-form"><div><label for="player-scheme">اسم الرابط الداخلي</label><input id="player-scheme" value="sportsplayer" maxlength="30" placeholder="sportsplayer" required /></div><div><label for="player-package">اسم حزمة أندرويد للمشغل (Package Name)</label><input id="player-package" maxlength="100" placeholder="com.midoalhashmi.zoltrastream" required /></div><div><label for="player-store-url">رابط Google Play المباشر</label><input id="player-store-url" type="url" placeholder="https://play.google.com/store/apps/details?id=..." required /><p class="muted" style="margin-top:4px">يُستخدم فقط عندما يتعذّر فتح تطبيق المشغل تلقائياً (لعرض رابط تنزيله) — لا علاقة له بالتحديث الإجباري.</p></div><div><label for="player-min-version">أقل إصدار مسموح لتشغيل المشغل (Version Name)</label><input id="player-min-version" maxlength="20" placeholder="مثال: 1.2.0" /><p class="muted" style="margin-top:4px">أي نسخة مثبّتة أقل من هذا الرقم تُجبر على التحديث قبل المتابعة. اتركه فارغاً لتعطيل التحديث الإجباري.</p></div><div><label for="player-update-url">رابط التحديث الإجباري</label><input id="player-update-url" type="url" placeholder="https://play.google.com/store/apps/details?id=..." /><p class="muted" style="margin-top:4px">حقل مستقل تماماً عن رابط Google Play أعلاه — لازم تعبّيه صراحةً وإلا لن يعمل التحديث الإجباري حتى لو ضبطت أقل إصدار مسموح.</p></div>
+            <div class="ads-group-heading"><h3>زر الاشتراك المميز</h3></div>
+            <div class="ads-master-toggle">
+              <label class="protect-toggle"><input id="premium-enabled" type="checkbox"> إظهار زر الاشتراك المميز في تطبيق المشغل</label>
+            </div>
+            <p class="muted" style="margin-top:-8px">عند إيقاف المفتاح لا يظهر الزر إطلاقاً في التطبيق، حتى لو كانت بقية الحقول معبّأة.</p>
+            <div><label for="premium-url">رابط الاشتراك</label><input id="premium-url" type="url" placeholder="https://your-site.com/subscribe" /></div>
+            <div><label for="premium-button-text">نص الزر</label><input id="premium-button-text" maxlength="40" placeholder="الاشتراك المميز" /></div>
+            <p id="player-message" class="form-message"></p><button type="submit">حفظ إعدادات المشغل</button></form></section>
+          <section class="card legal-form-card">
+            <div><h2>الشروط والأحكام وسياسة الخصوصية</h2><p class="muted">النصوص التي تظهر داخل التطبيق من القائمة الجانبية.</p></div>
+            <form id="legal-form" class="legal-form">
+              <div><label for="legal-terms">الشروط والأحكام</label><textarea id="legal-terms" rows="6" placeholder="اكتب نص الشروط والأحكام هنا…"></textarea></div>
+              <div><label for="legal-privacy">سياسة الخصوصية</label><textarea id="legal-privacy" rows="6" placeholder="اكتب نص سياسة الخصوصية هنا…"></textarea></div>
+              <p id="legal-message" class="form-message"></p>
+              <button type="submit">حفظ النصوص</button>
+            </form>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

@@ -16,8 +16,8 @@ def flutterVersionCode = localProperties.getProperty("flutter.versionCode") ?: "
 def flutterVersionName = localProperties.getProperty("flutter.versionName") ?: "1.0"
 
 android {
-    namespace "com.midoalhashmi.zoltrastream"
-    compileSdk 36
+    namespace "com.midoalhashmi.sportsstream2026"
+    compileSdk flutter.compileSdkVersion
     ndkVersion flutter.ndkVersion
 
     compileOptions {
@@ -34,38 +34,22 @@ android {
     }
 
     defaultConfig {
-        applicationId "com.midoalhashmi.zoltrastream"
+        applicationId "com.midoalhashmi.sportsstream2026"
         minSdk 21
-        targetSdk 36
+        targetSdk flutter.targetSdkVersion
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
-        // نحصر مكتبات التشغيل الأصلية (libmpv) على المعماريتين الحقيقيتين
-        // لأجهزة أندرويد الفعلية فقط — هذا وحده يقلّل الحجم بشكل كبير جداً
-        // لأن x86/x86_64 غير مستخدمة إلا في المحاكيات.
-        ndk {
-            abiFilters "armeabi-v7a", "arm64-v8a"
-        }
-    }
-
-    signingConfigs {
-        release {
-            // CI=true مضبوط تلقائياً من Codemagic — يقرأ الكيستور اللي ترفعه
-            // في Code signing identities عبر android_signing بـ codemagic.yaml
-            if (System.getenv()["CI"]) {
-                storeFile file(System.getenv()["CM_KEYSTORE_PATH"])
-                storePassword System.getenv()["CM_KEYSTORE_PASSWORD"]
-                keyAlias System.getenv()["CM_KEY_ALIAS"]
-                keyPassword System.getenv()["CM_KEY_PASSWORD"]
-            }
-        }
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            // مؤقتاً نوقّع بمفتاح debug حتى تجهيز مفتاح توقيع حقيقي قبل النشر النهائي على Google Play
+            signingConfig signingConfigs.debug
+            // تصغير الكود والموارد غير المستخدمة وقت البناء النهائي — يقلل
+            // حجم ملف الـ APK بشكل ملحوظ بدون أي تأثير على عمل التطبيق.
             minifyEnabled true
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 }
