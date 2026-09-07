@@ -6,6 +6,7 @@ import 'dart:math'; // للـ XOR
 
 import 'package:http/http.dart' as http;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -40,6 +41,39 @@ class _DecodedPayload {
   int get hashCode => text.hashCode;
 }
 
+/// A short-lived registry for media candidates observed during the current
+/// WebView session. URLs are discovered from the page/session only; they are
+/// never persisted or hard-coded.
+class _WebNetworkCandidate {
+  final String url;
+  final String source;
+  final String type;
+  final DateTime timestamp;
+  final String pageUrl;
+  final String frameUrl;
+  final String referer;
+  final String mime;
+  int evidenceScore;
+  bool validated;
+  bool failed;
+  bool quarantined;
+
+  _WebNetworkCandidate({
+    required this.url,
+    required this.source,
+    required this.type,
+    required this.timestamp,
+    required this.pageUrl,
+    required this.frameUrl,
+    required this.referer,
+    required this.mime,
+    this.evidenceScore = 0,
+    this.validated = false,
+    this.failed = false,
+    this.quarantined = false,
+  });
+}
+
 /// One authoritative state machine for a WebView -> Native detection session.
 /// It replaces the fragile combination of overlapping booleans/timers.
 enum _WebSessionState {
@@ -48,6 +82,8 @@ enum _WebSessionState {
   webReady,
   interacting,
   discovering,
+  validating,
+  nativeTrial,
   candidateTrial,
   nativePlaying,
   nativeFailed,
@@ -241,7 +277,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         if (!_isDirectPlayable(candidate.url)) continue;
         _resolvedStreamHeaders = candidate.headers;
         final lower = candidate.url.toLowerCase();
-        final kind = lower.contains('.m3u8') ? StreamKind.hls
+        final kind = (lower.contains('.m3u8') || lower.contains('.m3u')) ? StreamKind.hls
             : lower.contains('.mpd') ? StreamKind.dash
             : StreamKind.progressive;
         // video_player_android (ExoPlayer) has supported DASH natively since
@@ -267,7 +303,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
 
       final lower = resolvedUrl.toLowerCase();
-      final isHls = lower.contains('.m3u8') || lower.contains('m3u8');
+      final isHls = lower.contains('.m3u8') || lower.contains('.m3u');
       final isDash = lower.contains('.mpd');
       final isProgressive = lower.contains('.mp4') || lower.contains('.webm') || lower.contains('.mov');
       final isWeb = !(isHls || isDash || isProgressive);
@@ -494,7 +530,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _isUsefulDecodedPayload(String text) {
     final lower = text.toLowerCase();
     return lower.startsWith('http://') || lower.startsWith('https://') ||
-        _looksLikeJson(text) || lower.contains('.m3u8') || lower.contains('.mpd') ||
+        _looksLikeJson(text) || lower.contains('.m3u8') || lower.contains('.m3u') || lower.contains('.mpd') ||
         lower.contains('#extm3u') || lower.contains('"url"') ||
         lower.contains('"stream"') || lower.contains('"source"') ||
         lower.contains('<video') || lower.contains('<iframe');
@@ -502,7 +538,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   bool _containsMediaMarker(String text) {
     final lower = text.toLowerCase();
-    return lower.contains('#extm3u') || lower.contains('.m3u8') ||
+    return lower.contains('#extm3u') || lower.contains('.m3u8') || lower.contains('.m3u') ||
         lower.contains('.mpd') || lower.contains('<video');
   }
 
@@ -584,7 +620,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     for (final match in matches) {
       final url = match.group(1);
       if (url != null && url.isNotEmpty && (url.startsWith('http') || url.startsWith('/'))) {
-        if (url.contains('.m3u8') || url.contains('.mp4') || url.contains('.webm') || url.contains('.mpd')) {
+        if (url.contains('.m3u8') || url.contains('.m3u') || url.contains('.mp4') || url.contains('.webm') || url.contains('.mpd')) {
           return url;
         }
       }
@@ -610,7 +646,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   /// التحقق من أن الرابط قابل للتشغيل مباشرة.
   bool _isDirectPlayable(String url) {
     final lower = url.toLowerCase();
-    return lower.contains('.m3u8') || lower.contains('.mpd') ||
+    return lower.contains('.m3u8') || lower.contains('.m3u') || lower.contains('.mpd') ||
         lower.contains('.mp4') || lower.contains('.webm') ||
         lower.contains('.m4v') || lower.contains('.mov');
   }
@@ -649,8 +685,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _webInteractionAttempts = 0;
   static const int _webMaxInteractionAttempts = 3;
   DateTime? _webLastInteractionAt;
+  DateTime? _webLastPrimeAt;
   Timer? _webStartupTimeoutTimer;
   bool _webPlaybackReady = false;
+  bool _webPlaybackProven = false;
+  DateTime? _webLastDetectionKickAt;
   bool _webPlayerFocusApplied = false;
   String? _webOriginalUrl;
   DateTime? _webStartupDeadline;
@@ -668,6 +707,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _webMediaEvidenceScore = 0;
   int _webMediaResourceHits = 0;
   DateTime? _webLastMediaEvidenceAt;
+  final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
+      <String, _WebNetworkCandidate>{};
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -680,6 +721,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // attempt to defeat the check itself.
   bool _webHumanVerificationDetected = false;
   bool _webVerificationCheckInFlight = false;
+
+  void _smartLog(String scope, String message) {
+    if (kDebugMode) debugPrint('[$scope] $message');
+  }
+
+  /// webview_flutter may return JSON.stringify(...) either as a decoded
+  /// object or as a JSON-encoded string containing another JSON string.
+  /// Unwrap both forms so playback sentinels work consistently on Android.
+  dynamic _decodeJavaScriptResult(dynamic result) {
+    dynamic value = result;
+    for (var i = 0; i < 3 && value is String; i++) {
+      final text = value.trim();
+      if (text.isEmpty) return null;
+      try {
+        final decoded = jsonDecode(text);
+        if (decoded is String && decoded == value) return value;
+        value = decoded;
+      } catch (_) {
+        return value;
+      }
+    }
+    return value;
+  }
 
   void _setWebSessionState(_WebSessionState next) {
     if (_webSessionState == next) return;
@@ -700,13 +764,76 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (_webDrmDetected) return false;
     if (_webNativeAttempts >= _webMaxNativeAttempts) return false;
     if (_webFailedNativeSources.contains(source)) return false;
-    if (_webSessionState == _WebSessionState.candidateTrial ||
+    final registered = _webCandidateRegistry[source];
+    if (registered?.quarantined == true || registered?.failed == true) return false;
+    if (_webSessionState == _WebSessionState.validating ||
+        _webSessionState == _WebSessionState.nativeTrial ||
+        _webSessionState == _WebSessionState.candidateTrial ||
         _webSessionState == _WebSessionState.nativePlaying) return false;
     final last = _webLastNativeTrialAt;
     if (last != null && DateTime.now().difference(last) < const Duration(seconds: 2)) {
       return false;
     }
     return true;
+  }
+
+  void _registerWebCandidate(
+    String rawUrl, {
+    required String source,
+    String? mime,
+    int evidenceScore = 0,
+  }) {
+    final normalized = _normalizeCandidate(rawUrl);
+    final uri = Uri.tryParse(normalized);
+    if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) return;
+    final existing = _webCandidateRegistry[normalized];
+    if (existing != null) {
+      existing.evidenceScore =
+          (existing.evidenceScore + evidenceScore).clamp(0, 1000).toInt();
+      return;
+    }
+    final pageUrl = _webOriginalUrl ?? '';
+    final type = _looksLikeHls(normalized)
+        ? 'hls'
+        : _looksLikeProgressiveVideo(normalized)
+            ? 'progressive'
+            : 'unknown';
+    _webCandidateRegistry[normalized] = _WebNetworkCandidate(
+      url: normalized,
+      source: source,
+      type: type,
+      timestamp: DateTime.now(),
+      pageUrl: pageUrl,
+      frameUrl: pageUrl,
+      referer: _webContextHeaders?['referer'] ?? '',
+      mime: mime ?? '',
+      evidenceScore: evidenceScore,
+    );
+    _smartLog('HLS', 'candidate discovered ($source): $normalized');
+  }
+
+  void _kickWebDetection(WebViewController controller) {
+    if (!mounted ||
+        _webDrmDetected ||
+        _webSessionState == _WebSessionState.candidateTrial ||
+        _webSessionState == _WebSessionState.nativeTrial ||
+        _webSessionState == _WebSessionState.nativePlaying ||
+        _webDetectionInFlight) {
+      return;
+    }
+    final last = _webLastDetectionKickAt;
+    if (last != null &&
+        DateTime.now().difference(last) < const Duration(seconds: 2)) {
+      return;
+    }
+    _webLastDetectionKickAt = DateTime.now();
+    // A manual tap can happen after the detector's finite initial budget has
+    // ended. Restart the same bounded detector instead of making playback
+    // depend on the original timer still being alive.
+    if (_webDetectorTimer == null) {
+      _setWebSessionState(_WebSessionState.discovering);
+      unawaited(_autoDetectWebSource(controller));
+    }
   }
 
   bool _isAllowedWebNavigation(String target) {
@@ -721,6 +848,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
+    if (!identical(controller, _webController)) return;
     final type = decoded['type']?.toString() ?? '';
     if (type == 'drm_detected') {
       if (!mounted) return;
@@ -729,15 +857,21 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _webDrmSystem = decoded['system']?.toString();
       });
       _webDetectorTimer?.cancel();
+      _webDetectorTimer = null;
+      _smartLog('PLAYER', 'DRM detected; keeping WebView authoritative');
       _setWebSessionState(_WebSessionState.drmWebOnly);
       return;
     }
     if (type == 'media_resource') {
       _webMediaResourceHits++;
-      final resourceUrl = decoded['url']?.toString().toLowerCase() ?? '';
+      final rawResourceUrl = decoded['url']?.toString() ?? '';
+      final resourceUrl = rawResourceUrl.toLowerCase();
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
       _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
       _webLastMediaEvidenceAt = DateTime.now();
+      if (_looksLikeHls(rawResourceUrl)) {
+        _registerWebCandidate(rawResourceUrl, source: 'performance', evidenceScore: 20);
+      }
       _extendWebStartupDeadline(const Duration(seconds: 5));
       return;
     }
@@ -746,19 +880,45 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
       _webLastMediaEvidenceAt = DateTime.now();
       _extendWebStartupDeadline(const Duration(seconds: 10));
+      _smartLog('VIDEOJS', 'player detected');
+      return;
+    }
+    if (type == 'hls_candidate') {
+      final rawUrl = decoded['url']?.toString().trim() ?? '';
+      if (rawUrl.isNotEmpty) {
+        _registerWebCandidate(
+          rawUrl,
+          source: decoded['source']?.toString() ?? 'network',
+          mime: decoded['mime']?.toString(),
+          evidenceScore: 25,
+        );
+        _webMediaEvidenceScore =
+            (_webMediaEvidenceScore + 12).clamp(0, 100).toInt();
+        _webLastMediaEvidenceAt = DateTime.now();
+        _extendWebStartupDeadline(const Duration(seconds: 5));
+        _smartLog('HLS', 'network candidate event received');
+      }
       return;
     }
     if (type == 'web_playback') {
-      if (_webDrmDetected || _webPlaybackReady) return;
+      if (_webDrmDetected) return;
       final playing = decoded['playing'] == true;
       final ready = decoded['ready'] == true;
       final currentTime = (decoded['time'] as num?)?.toDouble() ?? 0;
-      if (playing || ready || currentTime > 0.15) {
+      if (playing || (ready && currentTime > 0.15)) {
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
         _webLastMediaEvidenceAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 8));
-        unawaited(_showWebPlaybackReady(controller));
+        if (playing || currentTime > 0.15) {
+          _smartLog(
+            'PLAYBACK',
+            'web evidence: playing=$playing currentTime=${currentTime.toStringAsFixed(2)}',
+          );
+          // Do not switch UI on this event alone. The sentinel still needs
+          // two snapshots, and the native gate still needs a validated source.
+          unawaited(_confirmWebPlaybackAndKickDetection(controller));
+        }
       }
       return;
     }
@@ -772,6 +932,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final shouldPromote = score >= 88 || (_webInteractionAttempts > 0 && score >= 70);
     if (!shouldPromote) return;
     unawaited(_promoteIframeToPlayerDocument(controller, rawUrl, score));
+  }
+
+  Future<void> _confirmWebPlaybackAndKickDetection(
+      WebViewController controller) async {
+    if (!mounted ||
+        !identical(controller, _webController) ||
+        _webDrmDetected ||
+        _webSessionState == _WebSessionState.nativePlaying) {
+      return;
+    }
+    final proven = await _webPlaybackSentinel(controller);
+    if (!mounted || !identical(controller, _webController) || !proven) return;
+    _webPlaybackProven = true;
+    await _showWebPlaybackReady(controller);
+    if (!mounted || !identical(controller, _webController)) return;
+    _smartLog('PLAYBACK', 'web playback proof passed');
+    _kickWebDetection(controller);
   }
 
   Future<void> _promoteIframeToPlayerDocument(
@@ -832,7 +1009,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             }
           } catch (_) {}
         };
-        const addCandidate = (value) => {
+        const addCandidate = (value, source='network', mime='') => {
           try {
             if (!value || typeof value !== 'string') return;
             const v = value.trim();
@@ -840,6 +1017,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             window.__sportsPlayerMediaCandidates = window.__sportsPlayerMediaCandidates || [];
             if (window.__sportsPlayerMediaCandidates.indexOf(v) === -1) {
               window.__sportsPlayerMediaCandidates.push(v);
+            }
+            if (/\.(m3u8|m3u)(?:$|[?#])/i.test(v) ||
+                /(?:master|playlist|manifest|hls)(?:[?&=\/]|$)/i.test(v)) {
+              report({
+                type:'hls_candidate',
+                url:v,
+                source,
+                mime,
+                pageUrl:location.href,
+                frameUrl:location.href,
+                referer:document.referrer || location.href
+              });
             }
           } catch (_) {}
         };
@@ -939,7 +1128,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           } catch (_) { return false; }
         };
         const reportMediaResources = () => {
-          try { performance.getEntriesByType('resource').forEach((e) => { const name = e && e.name ? String(e.name) : ''; if (mediaResourceLike(name)) report({type:'media_resource', url:name}); }); } catch (_) {}
+          try {
+            performance.getEntriesByType('resource').forEach((e) => {
+              const name = e && e.name ? String(e.name) : '';
+              if (!mediaResourceLike(name)) return;
+              report({type:'media_resource', url:name});
+              if (/\.(m3u8|m3u)(?:$|[?#])/i.test(name)) {
+                report({type:'hls_candidate', url:name, source:'performance',
+                  mime:e.initiatorType || '', pageUrl:location.href,
+                  frameUrl:location.href, referer:document.referrer || location.href});
+              }
+            });
+          } catch (_) {}
         };
         reportMediaResources();
         try { setInterval(reportMediaResources, 1800); } catch (_) {}
@@ -1010,9 +1210,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             window.__sportsPlayerFetchHooked = true;
             const originalFetch = window.fetch;
             window.fetch = function(input, init) {
-              try { addCandidate(typeof input === 'string' ? input : (input && input.url)); } catch (_) {}
+              try { addCandidate(typeof input === 'string' ? input : (input && input.url), 'fetch'); } catch (_) {}
               return originalFetch.apply(this, arguments).then((response) => {
-                try { addCandidate(response && response.url); } catch (_) {}
+                try { addCandidate(response && response.url, 'fetch-response'); } catch (_) {}
                 return response;
               });
             };
@@ -1024,7 +1224,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             const OriginalXHR = window.XMLHttpRequest;
             const originalOpen = OriginalXHR.prototype.open;
             OriginalXHR.prototype.open = function(method, url) {
-              try { addCandidate(url); } catch (_) {}
+              try { addCandidate(url, 'xhr'); } catch (_) {}
               return originalOpen.apply(this, arguments);
             };
           }
@@ -1076,7 +1276,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _scoreDetectedSource(String url) {
     final lower = url.toLowerCase();
     var score = 0;
-    if (lower.contains('.m3u8')) score += 100;
+    if (lower.contains('.m3u8') || lower.contains('.m3u')) score += 100;
     else if (lower.contains('.mpd')) score += 85;
     else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) score += 55;
     if (lower.contains('live')) score += 35;
@@ -1089,7 +1289,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return score;
   }
 
-  bool _looksLikeHls(String url) => RegExp(r'\.m3u8(?:$|[?#])', caseSensitive: false).hasMatch(url);
+  bool _looksLikeHls(String url) => RegExp(r'\.m3u8?(?:$|[?#])', caseSensitive: false).hasMatch(url);
   bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
 
   Future<bool> _validatePublicMediaSource(String url) async {
@@ -1201,9 +1401,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         } catch (_) {}
         return JSON.stringify({found:!!v, playing:!!(v && !v.paused && v.readyState >= 2), time:Number(v && v.currentTime || 0), duration, seekable, src:v ? (v.currentSrc || v.src || '') : '', mediaHits, lastMedia});
       })();''');
-      final text = result is String ? result : result?.toString() ?? '';
-      if (text.isEmpty) return null;
-      final decoded = jsonDecode(text);
+      final decoded = _decodeJavaScriptResult(result);
       if (decoded is Map) return Map<String, dynamic>.from(decoded);
     } catch (_) {}
     return null;
@@ -1257,9 +1455,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         out.sort((a,b) => (b.score-a.score) || (b.area-a.area));
         return JSON.stringify(out[0] || null);
       })();''');
-      final text = result is String ? result : result?.toString() ?? '';
-      if (text.isEmpty || text == 'null') return null;
-      final decoded = jsonDecode(text);
+      final decoded = _decodeJavaScriptResult(result);
+      if (decoded == null || decoded == 'null') return null;
       if (decoded is Map) return decoded['src']?.toString();
     } catch (_) {}
     return null;
@@ -1389,6 +1586,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       })();''');
       final text = result is String ? result : result?.toString() ?? '';
       if (text.contains('clicked') && text.contains('true')) {
+        _smartLog('PLAY', 'safe play control dispatched');
         _extendWebStartupDeadline(const Duration(seconds: 15));
         await Future<void>.delayed(const Duration(milliseconds: 1800));
         if (!mounted || _webDrmDetected) return false;
@@ -1512,8 +1710,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           return JSON.stringify({ detected: false });
         }
       })();''');
-      final text = result is String ? result : result?.toString() ?? '';
-      return text.contains('"detected":true');
+      final decoded = _decodeJavaScriptResult(result);
+      return decoded is Map && decoded['detected'] == true;
     } catch (_) {
       return false;
     }
@@ -1601,7 +1799,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // A trial that is still actively proving playback gets one immediate
         // proof check rather than being killed mid-initialization. Genuine
         // progress may extend the deadline, but never beyond 90 seconds.
-        if (state == _WebSessionState.candidateTrial) {
+        if (state == _WebSessionState.validating ||
+            state == _WebSessionState.nativeTrial ||
+            state == _WebSessionState.candidateTrial) {
           _webStartupTimeoutTimer = Timer(const Duration(milliseconds: 250), arm);
           return;
         }
@@ -1670,39 +1870,49 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
       if (attempts++ >= 15) {
         timer.cancel();
+        _webDetectorTimer = null;
         if (_webSessionIsActive(generation) && _webSessionState == _WebSessionState.discovering) {
           _setWebSessionState(_WebSessionState.webReady);
         }
         return;
       }
-      if (_webDetectionInFlight || _webSessionState == _WebSessionState.candidateTrial) return;
+      if (_webDetectionInFlight ||
+          _webSessionState == _WebSessionState.validating ||
+          _webSessionState == _WebSessionState.nativeTrial ||
+          _webSessionState == _WebSessionState.candidateTrial) return;
       if (_webDrmDetected) {
         _setWebSessionState(_WebSessionState.drmWebOnly);
         timer.cancel();
+        _webDetectorTimer = null;
         return;
       }
       if (_webNativeAttempts >= _webMaxNativeAttempts) {
         _setWebSessionState(_WebSessionState.webReady);
         timer.cancel();
+        _webDetectorTimer = null;
         return;
       }
 
       _webDetectionInFlight = true;
       try {
-        if (_webVidmolyPlayerMode && _webInteractionAttempts < _webMaxInteractionAttempts) {
-          await _primeVidmolyPlayback(controller);
+        final lastPrime = _webLastPrimeAt;
+        final canPrime = lastPrime == null ||
+            DateTime.now().difference(lastPrime) >= const Duration(seconds: 4);
+        if (canPrime &&
+            _webInteractionAttempts < _webMaxInteractionAttempts) {
+          _webLastPrimeAt = DateTime.now();
+          if (_webVidmolyPlayerMode) {
+            await _primeVidmolyPlayback(controller);
+          } else if (_webVideoJsPlayerMode) {
+            await _primeVideoJsPlayback(controller);
+          }
         }
-        if (_webVideoJsPlayerMode && _webInteractionAttempts < _webMaxInteractionAttempts) {
-          await _primeVideoJsPlayback(controller);
-        }
-        if (await _webPlaybackSentinel(controller)) {
+        final webPlaybackProven = await _webPlaybackSentinel(controller);
+        if (webPlaybackProven) {
+          _webPlaybackProven = true;
           if (_webSessionIsActive(generation)) {
             await _showWebPlaybackReady(controller);
-            _setWebSessionState(_WebSessionState.webReady);
-            timer.cancel();
-            _webDetectorTimer = null;
           }
-          return;
         }
 
         final iframeCandidate = await _findBestIframeCandidate(controller);
@@ -1717,7 +1927,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
-        if (_webMediaEvidenceScore >= 70 && _webMediaResourceHits >= 4) {
+        if (!webPlaybackProven &&
+            !_webPlaybackProven &&
+            _webMediaEvidenceScore >= 70 &&
+            _webMediaResourceHits >= 4) {
           if (_webSessionIsActive(generation)) {
             await _showWebPlaybackReady(controller);
             _setWebSessionState(_WebSessionState.webReady);
@@ -1729,7 +1942,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
         final frameworkSources = await _detectPlayerFrameworkSources(controller);
         final genericSources = await _detectPublicMediaSources(controller);
-        final sources = <String>{...frameworkSources, ...genericSources}.toList();
+        final sources = <String>{
+          ...frameworkSources,
+          ...genericSources,
+          ..._webCandidateRegistry.keys,
+        }.toList();
         if (!_webSessionIsActive(generation)) return;
 
         if (_webInteractionAttempts < _webMaxInteractionAttempts && !await _webPlaybackSentinel(controller)) {
@@ -1743,27 +1960,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
-        // Vidmoly/HLS.js has a verified browser playback path. Do not tear
-        // down that session for a guessed native URL; its token/referrer/session
-        // context is part of the working browser playback.
-        if (_webVidmolyPlayerMode) {
-          if (_webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2) {
-            await _revealVidmolyPlayer(controller);
-          }
-          return;
-        }
-
-        if (_webVideoJsPlayerMode) {
-          if (_webMediaEvidenceScore >= 25 || _webMediaResourceHits >= 1 || await _webPlaybackSentinel(controller)) {
-            await _revealVideoJsPlayer(controller);
-          }
-          return;
-        }
-
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
           final score = _scoreDetectedSource(source) + (frameworkSources.contains(sourceRaw) ? 85 : 0);
-          _webCandidateEvidence[source] = (_webCandidateEvidence[source] ?? 0) + 1;
+          final registryEvidence =
+              _webCandidateRegistry[source]?.evidenceScore ?? 0;
+          _webCandidateEvidence[source] =
+              (_webCandidateEvidence[source] ?? 0) + 1 + (registryEvidence ~/ 25);
           if (score < 80) continue;
           final uri = Uri.tryParse(source);
           if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
@@ -1773,14 +1976,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           final strongHls = _looksLikeHls(source) && score >= 100;
           final strongFramework = frameworkSources.contains(sourceRaw) && score >= 80;
           if (evidence < 2 && !strongHls && !strongFramework) continue;
+          // A URL observed in the browser is not enough. Native replay is
+          // allowed only after the browser has proved real playback.
+          if (!webPlaybackProven && !_webPlaybackProven) continue;
 
+          _setWebSessionState(_WebSessionState.validating);
           // Best-effort validation. A negative validation is not fatal when
           // the browser has already supplied strong evidence (for example a
           // stream requiring Referer/Origin/cookies).
           final validated = await _validatePublicMediaSource(source);
-          if (!validated && evidence < 3 && !strongHls && !strongFramework) continue;
+          final registered = _webCandidateRegistry[source];
+          if (registered != null) registered.validated = validated;
+          _smartLog('HLS', 'candidate ${validated ? 'validated' : 'rejected'}: $source');
+          if (!validated && evidence < 3 && !strongHls && !strongFramework) {
+            _setWebSessionState(_WebSessionState.discovering);
+            continue;
+          }
 
-          _setWebSessionState(_WebSessionState.candidateTrial);
+          _setWebSessionState(_WebSessionState.nativeTrial);
           _webNativeAttempts++;
           _webLastNativeTrialAt = DateTime.now();
           _extendWebStartupDeadline(const Duration(seconds: 12));
@@ -1796,6 +2009,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           );
           return;
         }
+
+        // Browser playback is already proven, but no safe native candidate
+        // passed the gate. Keep the real page visible as the primary fallback.
+        if (_webVidmolyPlayerMode) {
+          if (_webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2) {
+            await _revealVidmolyPlayer(controller);
+          }
+          return;
+        }
+        if (_webVideoJsPlayerMode) {
+          if (_webMediaEvidenceScore >= 25 ||
+              _webMediaResourceHits >= 1 ||
+              webPlaybackProven ||
+              _webPlaybackProven) {
+            await _revealVideoJsPlayer(controller);
+          }
+          return;
+        }
       } finally {
         _webDetectionInFlight = false;
       }
@@ -1806,9 +2037,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final uri = Uri.tryParse(url);
     final host = uri?.host.toLowerCase() ?? '';
     final path = uri?.path.toLowerCase() ?? '';
-    return host == 'ukrcdn.club' || host.endsWith('.ukrcdn.club') ||
+    return host == '3ick.club' || host.endsWith('.3ick.club') ||
+        host == '3ickk.xyz' || host.endsWith('.3ickk.xyz') ||
         host == '3isk.club' || host.endsWith('.3isk.club') ||
         host == '3iskk.xyz' || host.endsWith('.3iskk.xyz') ||
+        host == 'ukrcdn.club' || host.endsWith('.ukrcdn.club') ||
+        host == 'ukrcdn.xyz' || host.endsWith('.ukrcdn.xyz') ||
         path.contains('/embed/') || path.contains('/player/');
   }
 
@@ -1950,7 +2184,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webLastNativeTrialAt = null;
     _webInteractionAttempts = 0;
     _webLastInteractionAt = null;
+    _webLastPrimeAt = null;
     _webPlaybackReady = false;
+    _webPlaybackProven = false;
+    _webLastDetectionKickAt = null;
     _webPlayerFocusApplied = false;
     _webOriginalUrl = url;
     _webInitialLoadCompleted = false;
@@ -1976,6 +2213,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webFailedNativeSources.clear();
     _webCandidateEvidence.clear();
     _webCandidateLastReason.clear();
+    _webCandidateRegistry.clear();
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
@@ -2056,7 +2294,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 _errorMessage = '';
               });
               await _applyPlayerFocus(controller);
-              await _primeVidmolyPlayback(controller);
+              if (_webVidmolyPlayerMode) {
+                _smartLog('VIDMOLY', 'player detected; priming JW/HTML5 controls');
+                await _primeVidmolyPlayback(controller);
+              } else if (_webVideoJsPlayerMode) {
+                _smartLog('VIDEOJS', 'player detected; priming Video.js/HTML5 controls');
+                await _primeVideoJsPlayback(controller);
+              }
               unawaited(_autoDetectWebSource(controller));
               return;
             }
@@ -2113,14 +2357,40 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     };
   }
 
+  Future<void> _muteWebForNativeTrial(bool mute) async {
+    final web = _webController;
+    if (web == null) return;
+    try {
+      await web.runJavaScript(r"""(() => {
+        document.querySelectorAll('video,audio').forEach((v) => {
+          try {
+            if (mute) {
+              if (!v.hasAttribute('data-sports-player-original-muted')) {
+                v.setAttribute('data-sports-player-original-muted', v.muted ? '1' : '0');
+              }
+              v.muted = true;
+            } else if (v.hasAttribute('data-sports-player-original-muted')) {
+              v.muted = v.getAttribute('data-sports-player-original-muted') === '1';
+              v.removeAttribute('data-sports-player-original-muted');
+            }
+          } catch (_) {}
+        });
+      })();""".replaceFirst('mute', mute ? 'true' : 'false'));
+    } catch (_) {}
+  }
+
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality, {bool fallbackToWeb = false}) async {
     if (fallbackToWeb) {
-      _setWebSessionState(_WebSessionState.candidateTrial);
+      _setWebSessionState(_WebSessionState.nativeTrial);
+      _smartLog('NATIVE', 'trial started');
     }
     setState(() {
       _state = _LoadState.loading;
-      _isWebSource = false;
+      // During a WebView-originated Native trial the browser is the
+      // authoritative fallback and must stay mounted/visible until Native
+      // playback has been proven.
+      _isWebSource = fallbackToWeb ? true : false;
       _activeServer = server;
       _activeQuality = quality;
     });
@@ -2136,7 +2406,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final lowerQualityUrl = quality.url.toLowerCase();
       final formatHint = lowerQualityUrl.contains('.mpd')
           ? VideoFormat.dash
-          : lowerQualityUrl.contains('.m3u8')
+          : (lowerQualityUrl.contains('.m3u8') || lowerQualityUrl.contains('.m3u'))
               ? VideoFormat.hls
               : null;
 
@@ -2152,6 +2422,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _duration = Duration.zero;
       _isPlaying = false;
       newController.addListener(_videoListener);
+      if (fallbackToWeb) await _muteWebForNativeTrial(true);
       await newController.initialize();
       await newController.setPlaybackSpeed(_playbackSpeed);
       await newController.setVolume(_muted ? 0 : _volume / 100);
@@ -2162,8 +2433,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       await WakelockPlus.enable();
       _webStartupTimeoutTimer?.cancel();
       if (!mounted) return;
-      if (fallbackToWeb) _setWebSessionState(_WebSessionState.nativePlaying);
-      setState(() => _state = _LoadState.ready);
+      if (fallbackToWeb) {
+        _setWebSessionState(_WebSessionState.nativePlaying);
+        _smartLog('NATIVE', 'playback proof success; switching WebView -> Native');
+      }
+      setState(() {
+        _state = _LoadState.ready;
+        if (fallbackToWeb) _isWebSource = false;
+      });
     } catch (error) {
       if (!mounted) return;
       if (fallbackToWeb) {
@@ -2172,10 +2449,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         try {
           await failedController?.dispose();
         } catch (_) {}
+        await _muteWebForNativeTrial(false);
         final failedUrl = _normalizeCandidate(quality.url);
         _webFailedNativeSources.add(failedUrl);
         _webSeenSources.add(failedUrl);
+        final registered = _webCandidateRegistry[failedUrl];
+        if (registered != null) {
+          registered.failed = true;
+          registered.quarantined = true;
+        }
         _webCandidateLastReason[failedUrl] = 'native playback failed: ${_describePlaybackError(error)}';
+        _smartLog('QUARANTINE', 'native candidate failed: $failedUrl');
         _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
@@ -2606,7 +2890,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (widget.externalUrl != null && widget.externalUrl!.isNotEmpty) {
       final external = widget.externalUrl!.trim();
       final lower = external.toLowerCase();
-      final looksLikeVideo = lower.contains('.m3u8') ||
+      final looksLikeVideo = lower.contains('.m3u8') || lower.contains('.m3u') ||
           lower.contains('.mp4') ||
           lower.contains('.m4v') ||
           lower.contains('.mov') ||
