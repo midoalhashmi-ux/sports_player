@@ -658,6 +658,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _webPromotionFallbackTimer;
   bool _webIframePromotionInFlight = false;
   bool _webPromotedPlayerMode = false;
+  // Vidmoly is a real embedded HLS.js player surface. Keep it visible so a
+  // user tap can reach the player when Android blocks autoplay.
+  bool _webVidmolyPlayerMode = false;
+  bool _webVideoJsPlayerMode = false;
+  Timer? _webVidmolyRevealTimer;
   int _webIframePromotionAttempts = 0;
   String? _webLastPromotedIframeUrl;
   int _webMediaEvidenceScore = 0;
@@ -729,9 +734,32 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
     if (type == 'media_resource') {
       _webMediaResourceHits++;
-      _webMediaEvidenceScore = (_webMediaEvidenceScore + 12).clamp(0, 100).toInt();
+      final resourceUrl = decoded['url']?.toString().toLowerCase() ?? '';
+      final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
+      _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
       _webLastMediaEvidenceAt = DateTime.now();
       _extendWebStartupDeadline(const Duration(seconds: 5));
+      return;
+    }
+    if (type == 'videojs_player') {
+      _webVideoJsPlayerMode = true;
+      _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
+      _webLastMediaEvidenceAt = DateTime.now();
+      _extendWebStartupDeadline(const Duration(seconds: 10));
+      return;
+    }
+    if (type == 'web_playback') {
+      if (_webDrmDetected || _webPlaybackReady) return;
+      final playing = decoded['playing'] == true;
+      final ready = decoded['ready'] == true;
+      final currentTime = (decoded['time'] as num?)?.toDouble() ?? 0;
+      if (playing || ready || currentTime > 0.15) {
+        _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
+        _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
+        _webLastMediaEvidenceAt = DateTime.now();
+        _extendWebStartupDeadline(const Duration(seconds: 8));
+        unawaited(_showWebPlaybackReady(controller));
+      }
       return;
     }
     if (type != 'iframe_candidate') return;
@@ -915,6 +943,56 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         };
         reportMediaResources();
         try { setInterval(reportMediaResources, 1800); } catch (_) {}
+
+        // Video.js intelligence: some hosts (for example ukrcdn.club) expose
+        // only a tokenized master.m3u8 through Video.js. Keep the browser session
+        // authoritative instead of trying to replay the temporary URL natively.
+        try {
+          const detectVideoJs = () => {
+            try {
+              const text = `${document.documentElement?.innerHTML || ''} ${Array.from(document.scripts || []).map(s => s.src || s.textContent || '').join(' ')}`;
+              const hasVideoJs = !!window.videojs || /video-js|videojs|video\.min\.js|videojs-contrib-quality-levels|videojs-hls-quality-selector/i.test(text);
+              const hasVideo = !!document.querySelector('video');
+              if (hasVideoJs && hasVideo) report({type:'videojs_player'});
+            } catch (_) {}
+          };
+          detectVideoJs();
+          setInterval(detectVideoJs, 1200);
+        } catch (_) {}
+
+        // Playback heartbeat: a large class of embedded players use MSE,
+        // MediaSource blobs, canvas overlays, or framework wrappers where
+        // URL-based discovery is insufficient. Observe the real HTML5 media
+        // element and report it as soon as the browser has actually started
+        // playback. This also catches playback that began from a genuine user
+        // tap before our next polling cycle.
+        const playbackSeen = new WeakSet();
+        const inspectPlayback = () => {
+          try {
+            document.querySelectorAll('video,audio').forEach((v) => {
+              if (!v) return;
+              const reportState = () => {
+                try {
+                  const ready = v.readyState >= 2;
+                  const playing = !v.paused && !v.ended && ready;
+                  const time = Number(v.currentTime || 0);
+                  if (playing || ready || time > 0.15) {
+                    report({type:'web_playback', playing, ready, time, src:(v.currentSrc || v.src || '')});
+                  }
+                } catch (_) {}
+              };
+              if (!playbackSeen.has(v)) {
+                playbackSeen.add(v);
+                ['play','playing','timeupdate','canplay','loadeddata','durationchange'].forEach((name) => {
+                  try { v.addEventListener(name, reportState, {passive:true}); } catch (_) {}
+                });
+              }
+              reportState();
+            });
+          } catch (_) {}
+        };
+        inspectPlayback();
+        try { setInterval(inspectPlayback, 450); } catch (_) {}
 
         try {
           const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
@@ -1611,6 +1689,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
       _webDetectionInFlight = true;
       try {
+        if (_webVidmolyPlayerMode && _webInteractionAttempts < _webMaxInteractionAttempts) {
+          await _primeVidmolyPlayback(controller);
+        }
+        if (_webVideoJsPlayerMode && _webInteractionAttempts < _webMaxInteractionAttempts) {
+          await _primeVideoJsPlayback(controller);
+        }
         if (await _webPlaybackSentinel(controller)) {
           if (_webSessionIsActive(generation)) {
             await _showWebPlaybackReady(controller);
@@ -1659,6 +1743,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
+        // Vidmoly/HLS.js has a verified browser playback path. Do not tear
+        // down that session for a guessed native URL; its token/referrer/session
+        // context is part of the working browser playback.
+        if (_webVidmolyPlayerMode) {
+          if (_webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2) {
+            await _revealVidmolyPlayer(controller);
+          }
+          return;
+        }
+
+        if (_webVideoJsPlayerMode) {
+          if (_webMediaEvidenceScore >= 25 || _webMediaResourceHits >= 1 || await _webPlaybackSentinel(controller)) {
+            await _revealVideoJsPlayer(controller);
+          }
+          return;
+        }
+
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
           final score = _scoreDetectedSource(source) + (frameworkSources.contains(sourceRaw) ? 85 : 0);
@@ -1701,6 +1802,145 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     });
   }
 
+  bool _isVideoJsPlayerUrl(String url) {
+    final uri = Uri.tryParse(url);
+    final host = uri?.host.toLowerCase() ?? '';
+    final path = uri?.path.toLowerCase() ?? '';
+    return host == 'ukrcdn.club' || host.endsWith('.ukrcdn.club') ||
+        host == '3isk.club' || host.endsWith('.3isk.club') ||
+        host == '3iskk.xyz' || host.endsWith('.3iskk.xyz') ||
+        path.contains('/embed/') || path.contains('/player/');
+  }
+
+  bool _isVidmolyPlayerUrl(String url) {
+    final uri = Uri.tryParse(url);
+    final host = uri?.host.toLowerCase() ?? '';
+    final path = uri?.path.toLowerCase() ?? '';
+    return host == 'vidmoly.org' ||
+        host.endsWith('.vidmoly.org') ||
+        host == 'vidmoly.me' ||
+        host.endsWith('.vidmoly.me') ||
+        host == 'vidmoly.biz' ||
+        host.endsWith('.vidmoly.biz') ||
+        host == 'vidmoly.to' ||
+        host.endsWith('.vidmoly.to') ||
+        host == 'sw.vidmoly.me' ||
+        path.contains('/embed-');
+  }
+
+  Future<void> _revealVidmolyPlayer(WebViewController controller) async {
+    if (!mounted || !_webVidmolyPlayerMode || _webPlaybackReady) return;
+    _webVidmolyRevealTimer?.cancel();
+    _webVidmolyRevealTimer = null;
+    _setWebSessionState(_WebSessionState.webReady);
+    await _applyPlayerFocus(controller);
+    if (!mounted || _webPlaybackReady) return;
+    setState(() {
+      _state = _LoadState.ready;
+      _isWebSource = true;
+      _errorMessage = '';
+    });
+  }
+
+  Future<void> _revealVideoJsPlayer(WebViewController controller) async {
+    if (!mounted || !_webVideoJsPlayerMode || _webPlaybackReady) return;
+    _setWebSessionState(_WebSessionState.webReady);
+    await _applyPlayerFocus(controller);
+    await _primeVideoJsPlayback(controller);
+    if (!mounted || _webPlaybackReady) return;
+    setState(() {
+      _state = _LoadState.ready;
+      _isWebSource = true;
+      _errorMessage = '';
+    });
+  }
+
+  Future<void> _primeVideoJsPlayback(WebViewController controller) async {
+    try {
+      await controller.runJavaScript(r"""(() => {
+        try {
+          const visible = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            return r.width > 20 && r.height > 20 && cs.display !== 'none' && cs.visibility !== 'hidden' && cs.opacity !== '0';
+          };
+          const scoreButton = (el) => {
+            const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+            const idcls = `${el.id || ''} ${el.className || ''}`;
+            if (/login|subscribe|purchase|buy|download|advert|close/i.test(`${text} ${idcls}`)) return -100;
+            let score = 0;
+            if (/^(play|start|watch|live|تشغيل|ابدأ|شاهد|مشاهدة|بدء)$/i.test(text)) score += 80;
+            if (/(vjs-big-play-button|play-control|play|start|watch|live)/i.test(idcls)) score += 35;
+            return score;
+          };
+          let best = null, bestScore = 0;
+          document.querySelectorAll('button,[role=\"button\"],a,[class*=\"play\" i],[id*=\"play\" i]').forEach(el => {
+            if (!visible(el)) return;
+            const s = scoreButton(el);
+            if (s > bestScore) { best = el; bestScore = s; }
+          });
+          if (best) {
+            try { best.scrollIntoView({block:'center',inline:'center'}); } catch (_) {}
+            try { best.click(); } catch (_) {}
+          }
+          if (window.videojs) {
+            document.querySelectorAll('video').forEach(v => {
+              try {
+                const player = v.id ? window.videojs.getPlayer(v.id) : null;
+                if (player && typeof player.play === 'function') player.play();
+              } catch (_) {}
+            });
+          }
+          document.querySelectorAll('video,audio').forEach(v => {
+            try { if (v.paused && v.readyState >= 2) v.play().catch(() => {}); } catch (_) {}
+          });
+        } catch (_) {}
+      })();""");
+    } catch (_) {}
+  }
+
+  Future<void> _primeVidmolyPlayback(WebViewController controller) async {
+    try {
+      await controller.runJavaScript(r"""(() => {
+        try {
+          const visible = (el) => {
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            return r.width > 20 && r.height > 20 && cs.display !== 'none' && cs.visibility !== 'hidden';
+          };
+          const nodes = Array.from(document.querySelectorAll('button,[role=\"button\"],a,[class*=\"play\" i],[id*=\"play\" i]'));
+          for (const el of nodes) {
+            if (!visible(el)) continue;
+            const text = (el.innerText || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+            const idcls = `${el.id || ''} ${el.className || ''}`;
+            if (/^(play|start|watch|live|تشغيل|ابدأ|شاهد|مشاهدة|بدء)$/i.test(text) || /(^|\W)(play|start|watch|jw-icon-play|jwplayer)(\W|$)/i.test(idcls)) {
+              try { el.scrollIntoView({block:'center', inline:'center'}); } catch (_) {}
+              try { el.click(); } catch (_) {}
+              break;
+            }
+          }
+          if (window.jwplayer) {
+            const roots = document.querySelectorAll('[id],[class]');
+            for (const el of roots) {
+              const id = el.id || '';
+              const cls = typeof el.className === 'string' ? el.className : '';
+              if (!/jwplayer|jw-wrapper|jw-video/i.test(`${id} ${cls}`)) continue;
+              try {
+                const p = window.jwplayer(id || el);
+                if (p && typeof p.play === 'function') { p.play(); break; }
+              } catch (_) {}
+            }
+          }
+          document.querySelectorAll('video').forEach(v => {
+            try { if (v.paused && v.readyState >= 2) v.play().catch(() => {}); } catch (_) {}
+          });
+        } catch (_) {}
+      })();""");
+    } catch (_) {}
+  }
+
   Future<void> _openWebSource(String url) async {
     _webDetectorTimer?.cancel();
     _webSessionGeneration++;
@@ -1722,6 +1962,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webPromotionFallbackTimer?.cancel();
     _webIframePromotionInFlight = false;
     _webPromotedPlayerMode = false;
+    _webVidmolyPlayerMode = false;
+    _webVideoJsPlayerMode = false;
+    _webVidmolyRevealTimer?.cancel();
+    _webVidmolyRevealTimer = null;
     _webIframePromotionAttempts = 0;
     _webLastPromotedIframeUrl = null;
     _webMediaEvidenceScore = 0;
@@ -1742,6 +1986,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     try {
       final sourceUri = Uri.parse(url);
       _webSourceOrigin = sourceUri.host;
+      _webVidmolyPlayerMode = _isVidmolyPlayerUrl(url);
+      _webVideoJsPlayerMode = _isVideoJsPlayerUrl(url);
       late final WebViewController controller;
       controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
@@ -1765,13 +2011,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               final requestHost = Uri.tryParse(request.url)?.host.toLowerCase() ?? '';
               final originHost = _webSourceOrigin?.toLowerCase() ?? '';
               if (requestHost.isNotEmpty && originHost.isNotEmpty && requestHost != originHost) {
-                return NavigationDecision.prevent;
+                // A promoted cross-origin player is now the main document.
+                // Its legitimate player/CDN redirects may cross hosts; blocking
+                // them here can leave a working player stuck on its first page.
+                // Ad/popup hosts are still rejected by _isAllowedWebNavigation.
+                if (!_webPromotedPlayerMode) {
+                  return NavigationDecision.prevent;
+                }
               }
             }
             return NavigationDecision.navigate;
           },
           onPageFinished: (finishedUrl) async {
             _webInitialLoadCompleted = true;
+            // The initial source may be RistoAnime, then V11 promotes its
+            // Vidmoly iframe to the main document. Re-evaluate the player mode
+            // on every completed main-frame navigation so the promoted embed
+            // receives the same WebView-first treatment.
+            if (_isVidmolyPlayerUrl(finishedUrl)) {
+              _webVidmolyPlayerMode = true;
+            }
+            if (_isVideoJsPlayerUrl(finishedUrl)) {
+              _webVideoJsPlayerMode = true;
+            }
             if (_webPromotedPlayerMode) {
               _webMediaEvidenceScore = 0;
               _webMediaResourceHits = 0;
@@ -1781,9 +2043,25 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             await _installWebProtection(controller);
             await _captureWebContext(controller);
             if (!mounted) return;
-            // Keep the real webpage hidden behind our own loading screen until
-            // playback is proven. The WebView remains mounted so its JS/player
-            // lifecycle continues normally.
+
+            // Vidmoly's embed is the actual player surface. Network evidence
+            // confirms HLS.js fetching real .ts segments from this document.
+            // Reveal it instead of hiding it behind the startup overlay: on
+            // Android autoplay may be blocked and the player needs a real tap.
+            if (_webVidmolyPlayerMode || _webVideoJsPlayerMode) {
+              _setWebSessionState(_WebSessionState.webReady);
+              setState(() {
+                _state = _LoadState.ready;
+                _isWebSource = true;
+                _errorMessage = '';
+              });
+              await _applyPlayerFocus(controller);
+              await _primeVidmolyPlayback(controller);
+              unawaited(_autoDetectWebSource(controller));
+              return;
+            }
+
+            // Keep generic web pages hidden until playback is proven.
             setState(() => _state = _LoadState.loading);
             if (!_webDrmDetected) {
               _setWebSessionState(_WebSessionState.webReady);
@@ -2292,6 +2570,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webDetectorTimer?.cancel();
     _webStartupTimeoutTimer?.cancel();
     _webPromotionFallbackTimer?.cancel();
+    _webVidmolyRevealTimer?.cancel();
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
