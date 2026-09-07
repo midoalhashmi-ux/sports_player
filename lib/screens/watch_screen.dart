@@ -20,6 +20,7 @@ import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
+import '../services/player_visibility_service.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -743,9 +744,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // attempt to defeat the check itself.
   bool _webHumanVerificationDetected = false;
   bool _webVerificationCheckInFlight = false;
+  // Kept backward-compatible with existing Firestore documents: absence of
+  // settings/player.showSourcePage means visible.
+  bool _showSourcePage = true;
+  bool _webPageRevealedByUser = false;
 
   void _smartLog(String scope, String message) {
     if (kDebugMode) debugPrint('[$scope] $message');
+  }
+
+  String _safeLogUrl(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null) return '<invalid-url>';
+    final port = uri.hasPort ? ':${uri.port}' : '';
+    return '${uri.scheme}://${uri.host}$port${uri.path}';
   }
 
   /// webview_flutter may return JSON.stringify(...) either as a decoded
@@ -831,7 +843,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       mime: mime ?? '',
       evidenceScore: evidenceScore,
     );
-    _smartLog('HLS', 'candidate discovered ($source): $normalized');
+    _smartLog('HLS', 'candidate discovered ($source): ${_safeLogUrl(normalized)}');
   }
 
   void _kickWebDetection(WebViewController controller) {
@@ -858,15 +870,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
+  bool _isDangerousWebUrl(String target) {
+    final uri = Uri.tryParse(target);
+    if (uri == null) return true;
+    final raw = target.toLowerCase();
+    if (raw == 'about:blank') return false;
+    if (uri.scheme != 'http' && uri.scheme != 'https') return true;
+    final host = uri.host.toLowerCase();
+    final pathAndQuery = '${uri.path}?${uri.query}'.toLowerCase();
+    return RegExp(
+      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder|app-install|download-app|push-notification)',
+      caseSensitive: false,
+    ).hasMatch('$host $pathAndQuery') ||
+        RegExp(
+          r'(sms:|tel:|intent:|mailto:|market:|whatsapp:|telegram:|otp|one[- ]?time|verification|verify|passcode|pin|subscription|subscribe|phone|mobile|credit[- ]?card)',
+          caseSensitive: false,
+        ).hasMatch(raw);
+  }
+
   bool _isAllowedWebNavigation(String target) {
     final uri = Uri.tryParse(target);
     if (uri == null || !uri.hasScheme) return false;
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
-    final host = uri.host.toLowerCase();
-    return !RegExp(
-      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder)',
-      caseSensitive: false,
-    ).hasMatch(host);
+    return !_isDangerousWebUrl(target);
   }
 
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
@@ -1020,10 +1046,45 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             const u = new URL(url, location.href);
             const h = (u.hostname || '').toLowerCase();
             const p = (u.pathname || '').toLowerCase();
-            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch)/i.test(h) ||
-              /(popup|popunder|clickunder|interstitial|advertisement|ads?\b)/i.test(p);
+             const raw = String(url || '').toLowerCase();
+             if (!/^https?:$/i.test(u.protocol)) return true;
+             return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|app-install|push-notification)/i.test(`${h} ${p}`) ||
+               /(popup|popunder|clickunder|interstitial|advertisement|ads?\b|otp|one[- ]?time|verification|verify|passcode|pin|subscription|subscribe|phone|mobile|credit[- ]?card|download-app)/i.test(`${p} ${u.search} ${raw}`);
           } catch (_) { return false; }
         };
+         const playerLike = (el) => {
+           try {
+             return !!(el && el.closest && el.closest('video, audio, iframe, .video-js, .jwplayer, .jw-wrapper, .plyr, [class*="player" i], [id*="player" i]'));
+           } catch (_) { return false; }
+         };
+         const sensitivePrompt = (el) => {
+           try {
+             const text = `${el && el.innerText || ''} ${el && el.textContent || ''} ${el && el.getAttribute && el.getAttribute('placeholder') || ''} ${el && el.getAttribute && el.getAttribute('name') || ''} ${el && el.getAttribute && el.getAttribute('autocomplete') || ''}`.toLowerCase();
+             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق)/i.test(text);
+           } catch (_) { return false; }
+         };
+         const adLike = (el) => {
+           try {
+             if (!el) return false;
+             const text = `${el.id || ''} ${el.className || ''} ${el.getAttribute && el.getAttribute('role') || ''}`.toLowerCase();
+             const style = getComputedStyle(el);
+             const r = el.getBoundingClientRect ? el.getBoundingClientRect() : {width:0,height:0};
+             return /(ad\b|ads\b|advert|popup|popunder|interstitial|overlay-ad|clickunder|modal|offer|subscribe|otp|verification)/i.test(text) ||
+               (style.position === 'fixed' && r.width >= innerWidth * 0.55 && r.height >= innerHeight * 0.25);
+           } catch (_) { return false; }
+         };
+         const hideUnsafePrompts = () => {
+           try {
+             document.querySelectorAll('form,input,button,a,[role="dialog"],[class*="popup" i],[id*="popup" i],[class*="advert" i],[id*="advert" i]').forEach((el) => {
+               if (playerLike(el)) return;
+               if (sensitivePrompt(el) || adLike(el)) {
+                 el.setAttribute('data-sports-player-blocked-ad','1');
+                 el.style.setProperty('display','none','important');
+                 el.style.setProperty('pointer-events','none','important');
+               }
+             });
+           } catch (_) {}
+         };
         const report = (payload) => {
           try {
             if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
@@ -1091,23 +1152,34 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             };
           } catch (_) {}
         };
-        document.addEventListener('click', (e) => {
+         document.addEventListener('click', (e) => {
           let el = e.target;
           if (el && el.nodeType === 3) el = el.parentElement;
           markUserInteraction(el);
           let link = el;
           while (link && link.tagName !== 'A') link = link.parentElement;
-          if (!link) return;
-          const href = link.getAttribute('href') || '';
-          const target = (link.getAttribute('target') || '').toLowerCase();
-          if (target === '_blank' || target === '_new' || blocked(href)) {
+           const href = link ? link.getAttribute('href') || '' : '';
+           const target = link ? (link.getAttribute('target') || '').toLowerCase() : '';
+           if ((link && (target === '_blank' || target === '_new' || blocked(href))) ||
+               (el && !playerLike(el) && (sensitivePrompt(el) || adLike(el)))) {
             e.preventDefault(); e.stopPropagation();
+             if (e.stopImmediatePropagation) e.stopImmediatePropagation();
           }
         }, true);
+         document.addEventListener('touchstart', (e) => {
+           let el = e.target;
+           if (el && el.nodeType === 3) el = el.parentElement;
+           if (el && !playerLike(el) && (sensitivePrompt(el) || adLike(el))) {
+             e.preventDefault(); e.stopPropagation();
+             if (e.stopImmediatePropagation) e.stopImmediatePropagation();
+           }
+         }, {capture:true, passive:false});
         const style = document.createElement('style');
         style.id = 'sports-player-ad-cleanup';
-        style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i]{display:none!important;visibility:hidden!important;}`;
+         style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i],[id*=\"otp\" i],[class*=\"otp\" i],[id*=\"verification\" i],[class*=\"verification\" i],[id*=\"subscribe\" i],[class*=\"subscribe\" i]{display:none!important;visibility:hidden!important;pointer-events:none!important;}`;
         (document.head || document.documentElement).appendChild(style);
+         hideUnsafePrompts();
+         try { new MutationObserver(() => hideUnsafePrompts()).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['class','id','href','action','placeholder','name']}); } catch (_) {}
 
         // Universal player intelligence: iframe URLs can appear/change only after Play.
         const iframeKey = (f) => { try { return `${f.src || ''}|${f.id || ''}|${f.className || ''}`; } catch (_) { return ''; } };
@@ -1166,20 +1238,65 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         reportMediaResources();
         try { setInterval(reportMediaResources, 1800); } catch (_) {}
 
-        // Video.js intelligence: some hosts (for example ukrcdn.club) expose
-        // only a tokenized master.m3u8 through Video.js. Keep the browser session
-        // authoritative instead of trying to replay the temporary URL natively.
+        // Video.js intelligence: some hosts expose the master only after the
+        // player instance is created or after Play. Inspect the public player
+        // API and registry repeatedly instead of trusting one DOM selector.
         try {
+           const addVideoJsSource = (value, source='videojs') => {
+             try {
+               if (!value) return;
+               if (typeof value === 'object') {
+                 if (typeof value.src === 'function') addVideoJsSource(value.src(), source);
+                 if (typeof value.currentSrc === 'function') addVideoJsSource(value.currentSrc(), source);
+                 if (typeof value.currentSource === 'function') addVideoJsSource(value.currentSource(), source);
+                 if (typeof value.currentSources === 'function') addVideoJsSource(value.currentSources(), source);
+                 if (Array.isArray(value)) { value.slice(0,40).forEach(v => addVideoJsSource(v, source)); return; }
+                 Object.keys(value).slice(0,80).forEach(k => {
+                   if (/^(src|source|sources|url|file|playlist|hls|m3u8|manifest)$/i.test(k)) addVideoJsSource(value[k], source);
+                 });
+                 return;
+               }
+               const v = String(value).trim();
+               if (!/^https?:\/\//i.test(v)) return;
+               addCandidate(v, source);
+               if (/\.(m3u8|m3u)(?:$|[?#])/i.test(v) || /(?:master|playlist|manifest|hls)(?:[?&=\/]|$)/i.test(v)) {
+                 report({type:'hls_candidate', url:v, source, mime:'application/vnd.apple.mpegurl'});
+               }
+             } catch (_) {}
+           };
+           const inspectVideoJsPlayers = () => {
+             try {
+               const players = [];
+               if (window.videojs) {
+                 if (typeof window.videojs.getPlayers === 'function') players.push(...Object.values(window.videojs.getPlayers() || {}));
+                 if (typeof window.videojs.getAllPlayers === 'function') players.push(...(window.videojs.getAllPlayers() || []));
+                 document.querySelectorAll('.video-js,[data-setup],video[id]').forEach((el) => {
+                   try {
+                     const p = window.videojs.getPlayer ? window.videojs.getPlayer(el.id || el) : window.videojs(el.id || el);
+                     if (p) players.push(p);
+                   } catch (_) {}
+                 });
+               }
+               players.forEach((p) => {
+                 addVideoJsSource(p, 'videojs-api');
+                 try { if (typeof p.tech === 'function') addVideoJsSource(p.tech(true), 'videojs-tech'); } catch (_) {}
+               });
+             } catch (_) {}
+           };
           const detectVideoJs = () => {
             try {
               const text = `${document.documentElement?.innerHTML || ''} ${Array.from(document.scripts || []).map(s => s.src || s.textContent || '').join(' ')}`;
-              const hasVideoJs = !!window.videojs || /video-js|videojs|video\.min\.js|videojs-contrib-quality-levels|videojs-hls-quality-selector/i.test(text);
-              const hasVideo = !!document.querySelector('video');
-              if (hasVideoJs && hasVideo) report({type:'videojs_player'});
+               const hasVideoJs = !!window.videojs || !!document.querySelector('.video-js,[data-setup]') ||
+                 /video-js|videojs|video\.min\.js|videojs-contrib-quality-levels|videojs-hls-quality-selector/i.test(text);
+               const hasVideo = !!document.querySelector('video,.video-js,[data-setup]');
+               if (hasVideoJs && hasVideo) {
+                 inspectVideoJsPlayers();
+                 report({type:'videojs_player', initialized:!!window.videojs, hasVideo:true});
+               }
             } catch (_) {}
           };
           detectVideoJs();
-          setInterval(detectVideoJs, 1200);
+           setInterval(detectVideoJs, 900);
         } catch (_) {}
 
         // Playback heartbeat: a large class of embedded players use MSE,
@@ -1198,6 +1315,22 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   const ready = v.readyState >= 2;
                   const playing = !v.paused && !v.ended && ready;
                   const time = Number(v.currentTime || 0);
+                   addCandidate(v.currentSrc || v.src || '', 'video-event');
+                   if (window.videojs) {
+                     try {
+                       const p = v.id && window.videojs.getPlayer ? window.videojs.getPlayer(v.id) : null;
+                       if (p) {
+                         if (typeof p.currentSrc === 'function') addCandidate(p.currentSrc(), 'videojs-currentSrc');
+                         if (typeof p.src === 'function') {
+                           const source = p.src();
+                           if (typeof source === 'string') addCandidate(source, 'videojs-src');
+                           else if (Array.isArray(source)) source.forEach(item => {
+                             if (item && typeof item.src === 'string') addCandidate(item.src, 'videojs-src');
+                           });
+                         }
+                       }
+                     } catch (_) {}
+                   }
                   if (playing || ready || time > 0.15) {
                     report({type:'web_playback', playing, ready, time, src:(v.currentSrc || v.src || '')});
                   }
@@ -1205,7 +1338,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               };
               if (!playbackSeen.has(v)) {
                 playbackSeen.add(v);
-                ['play','playing','timeupdate','canplay','loadeddata','durationchange'].forEach((name) => {
+                   ['play','playing','timeupdate','canplay','loadedmetadata','loadeddata','durationchange'].forEach((name) => {
                   try { v.addEventListener(name, reportState, {passive:true}); } catch (_) {}
                 });
               }
@@ -1679,8 +1812,31 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         } catch (_) {}
         try {
           if (window.videojs) {
+             try {
+               const registry = typeof window.videojs.getPlayers === 'function'
+                 ? window.videojs.getPlayers()
+                 : (typeof window.videojs.getAllPlayers === 'function' ? window.videojs.getAllPlayers() : null);
+               const players = Array.isArray(registry) ? registry : Object.values(registry || {});
+               players.forEach((p) => {
+                 try {
+                   if (typeof p.currentSrc === 'function') add(p.currentSrc());
+                   if (typeof p.src === 'function') addDeep(p.src());
+                   if (typeof p.currentSource === 'function') addDeep(p.currentSource());
+                   if (typeof p.currentSources === 'function') addDeep(p.currentSources());
+                   if (typeof p.tech === 'function') addDeep(p.tech(true));
+                 } catch (_) {}
+               });
+             } catch (_) {}
             document.querySelectorAll('.video-js, video[id]').forEach(el => {
-              try { addDeep(window.videojs.getPlayer ? window.videojs.getPlayer(el.id || el) : window.videojs(el.id || el)); } catch (_) {}
+               try {
+                 const p = window.videojs.getPlayer ? window.videojs.getPlayer(el.id || el) : window.videojs(el.id || el);
+                 if (p) {
+                   addDeep(p);
+                   if (typeof p.currentSrc === 'function') add(p.currentSrc());
+                   if (typeof p.src === 'function') addDeep(p.src());
+                   if (typeof p.currentSource === 'function') addDeep(p.currentSource());
+                 }
+               } catch (_) {}
             });
           }
         } catch (_) {}
@@ -1740,6 +1896,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _applyPlayerFocus(WebViewController controller) async {
+    if (_showSourcePage || _webPageRevealedByUser) return;
     if (_webPlayerFocusApplied) return;
     try {
       final result = await controller.runJavaScriptReturningResult(r'''(() => {
@@ -1786,6 +1943,25 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _webPlayerFocusApplied = true;
       }
     } catch (_) {}
+  }
+
+  bool get _shouldShowWebPage => _showSourcePage || _webPageRevealedByUser;
+
+  Future<void> _revealWebPageForInteraction() async {
+    final controller = _webController;
+    if (controller == null || !mounted) return;
+    try {
+      await controller.runJavaScript(r'''(() => {
+        try {
+          document.querySelectorAll('[data-sports-player-focus-hidden="1"]').forEach((el) => {
+            el.style.removeProperty('visibility');
+            el.removeAttribute('data-sports-player-focus-hidden');
+          });
+        } catch (_) {}
+      })();''');
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _webPageRevealedByUser = true);
   }
 
   Future<void> _showWebPlaybackReady(WebViewController controller) async {
@@ -2009,7 +2185,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           final validated = await _validatePublicMediaSource(source);
           final registered = _webCandidateRegistry[source];
           if (registered != null) registered.validated = validated;
-          _smartLog('HLS', 'candidate ${validated ? 'validated' : 'rejected'}: $source');
+          _smartLog(
+            'HLS',
+            'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
+          );
           if (!validated && evidence < 3 && !strongHls && !strongFramework) {
             _setWebSessionState(_WebSessionState.discovering);
             continue;
@@ -2263,6 +2442,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         )
         ..setNavigationDelegate(NavigationDelegate(
           onNavigationRequest: (request) {
+            if (_isDangerousWebUrl(request.url)) {
+              _smartLog('NAV', 'blocked unsafe navigation');
+              return NavigationDecision.prevent;
+            }
             if (!request.isMainFrame) return NavigationDecision.navigate;
             if (!_isAllowedWebNavigation(request.url)) {
               return NavigationDecision.prevent;
@@ -2308,7 +2491,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             // confirms HLS.js fetching real .ts segments from this document.
             // Reveal it instead of hiding it behind the startup overlay: on
             // Android autoplay may be blocked and the player needs a real tap.
-            if (_webVidmolyPlayerMode || _webVideoJsPlayerMode) {
+            if ((_webVidmolyPlayerMode || _webVideoJsPlayerMode) &&
+                _shouldShowWebPage) {
               _setWebSessionState(_WebSessionState.webReady);
               setState(() {
                 _state = _LoadState.ready;
@@ -2327,7 +2511,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               return;
             }
 
-            // Keep generic web pages hidden until playback is proven.
+            // Keep the page hidden until playback is proven when the
+            // dashboard setting requests background discovery. This still
+            // leaves the WebView mounted so autoplay/network discovery can
+            // continue; the Flutter status surface is shown above it.
             setState(() => _state = _LoadState.loading);
             if (!_webDrmDetected) {
               _setWebSessionState(_WebSessionState.webReady);
@@ -2481,7 +2668,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           registered.quarantined = true;
         }
         _webCandidateLastReason[failedUrl] = 'native playback failed: ${_describePlaybackError(error)}';
-        _smartLog('QUARANTINE', 'native candidate failed: $failedUrl');
+         _smartLog(
+           'QUARANTINE',
+           'native candidate failed: ${_safeLogUrl(failedUrl)}',
+         );
         _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
@@ -2641,6 +2831,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   Future<void> _changeSpeed(double speed) async {
     await _controller?.setPlaybackSpeed(speed);
+    if (!mounted) return;
     setState(() {
       _playbackSpeed = speed;
       _showSpeedSheet = false;
@@ -2896,6 +3087,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     setState(() => _state = _LoadState.loading);
 
     _resolvedStreamHeaders = null;
+    _showSourcePage = await PlayerVisibilityService.loadShowSourcePage();
+    _webPageRevealedByUser = false;
+    if (!mounted) return;
 
     // تحسين الهيدرز لمحاكاة مستخدم حقيقي
     _headers = {
@@ -3012,7 +3206,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             fit: StackFit.expand,
             children: [
               if (_isWebSource && _webController != null)
-                WebViewWidget(controller: _webController!),
+                Opacity(
+                  opacity: _shouldShowWebPage ? 1 : 0,
+                  child: IgnorePointer(
+                    ignoring: !_shouldShowWebPage,
+                    child: WebViewWidget(controller: _webController!),
+                  ),
+                ),
+              if (_isWebSource && !_shouldShowWebPage &&
+                  _state == _LoadState.ready)
+                _buildHiddenWebSourceStatus(),
               if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
               if (_state == _LoadState.loading &&
                   _webSessionState != _WebSessionState.humanVerificationRequired)
@@ -3164,6 +3367,45 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHiddenWebSourceStatus() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.play_circle_outline,
+                color: Colors.white70, size: 52),
+            const SizedBox(height: 14),
+            const Text(
+              'تم تشغيل المصدر في الخلفية',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 17,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'صفحة المصدر مخفية حسب إعدادات المشغل. يمكنك إظهارها عند الحاجة للتفاعل مع المشغل.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: _revealWebPageForInteraction,
+              icon: const Icon(Icons.visibility),
+              label: const Text('إظهار صفحة المصدر'),
+            ),
+          ],
+        ),
       ),
     );
   }
