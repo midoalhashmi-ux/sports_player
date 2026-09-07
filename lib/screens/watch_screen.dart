@@ -133,7 +133,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _hideTimer;
   bool _isPlaying = false;
   bool _isBuffering = false;
+  bool _bufferIndicatorVisible = false;
   Timer? _slowConnectionTimer;
+  Timer? _bufferIndicatorTimer;
   bool _slowConnectionHint = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
@@ -209,15 +211,35 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       return;
     }
     final wasBuffering = _isBuffering;
+    // Some Android media backends leave isBuffering=true for one or more
+    // callbacks after a seek. If playback is already advancing, that flag
+    // is stale and must not leave a permanent spinner on screen.
+    final positionAdvanced = value.isPlaying && value.position > _position;
+    final effectiveBuffering = value.isBuffering && !positionAdvanced;
     setState(() {
       _isPlaying = value.isPlaying;
-      _isBuffering = value.isBuffering;
+      _isBuffering = effectiveBuffering;
       _position = value.position;
       _duration = value.duration;
     });
-    if (_isBuffering && !wasBuffering) {
+    if (effectiveBuffering && !wasBuffering) {
+      _bufferIndicatorTimer?.cancel();
+      if (!_bufferIndicatorVisible) {
+        setState(() => _bufferIndicatorVisible = true);
+      }
+      // A stale buffering flag must never cover a healthy video forever.
+      _bufferIndicatorTimer = Timer(const Duration(seconds: 3), () {
+        if (mounted && _bufferIndicatorVisible) {
+          setState(() => _bufferIndicatorVisible = false);
+        }
+      });
       _startSlowConnectionTimer();
-    } else if (!_isBuffering && wasBuffering) {
+    } else if (!effectiveBuffering && wasBuffering) {
+      _bufferIndicatorTimer?.cancel();
+      _bufferIndicatorTimer = null;
+      if (_bufferIndicatorVisible) {
+        setState(() => _bufferIndicatorVisible = false);
+      }
       _cancelSlowConnectionTimer();
     }
   }
@@ -2860,6 +2882,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _hideTimer?.cancel();
     _seekFeedbackTimer?.cancel();
     _slowConnectionTimer?.cancel();
+    _bufferIndicatorTimer?.cancel();
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
@@ -2997,7 +3020,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               if (_webSessionState == _WebSessionState.humanVerificationRequired)
                 _buildHumanVerificationBanner(),
               if (_state == _LoadState.error) _buildError(),
-              if (_state == _LoadState.ready && !_isWebSource && _isBuffering)
+              if (_state == _LoadState.ready &&
+                  !_isWebSource &&
+                  _isBuffering &&
+                  _bufferIndicatorVisible)
                 const Center(
                   child: CircularProgressIndicator(color: Colors.white),
                 ),
