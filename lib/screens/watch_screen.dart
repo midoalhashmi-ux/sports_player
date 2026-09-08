@@ -48,12 +48,12 @@ class _DecodedPayload {
 class _WebNetworkCandidate {
   final String url;
   final String source;
-  final String type;
+  String type;
   final DateTime timestamp;
   String pageUrl;
   String frameUrl;
   String referer;
-  final String mime;
+  String mime;
   int evidenceScore;
   bool validated;
   bool failed;
@@ -859,10 +859,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final normalized = _normalizeCandidate(rawUrl);
     final uri = Uri.tryParse(normalized);
     if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) return;
+    final mimeLower = (mime ?? '').toLowerCase();
+    final hlsMime = mimeLower.contains('mpegurl');
     final existing = _webCandidateRegistry[normalized];
     if (existing != null) {
       existing.evidenceScore =
           (existing.evidenceScore + evidenceScore).clamp(0, 1000).toInt();
+      if (existing.type == 'unknown' &&
+          (_looksLikeHls(normalized) || hlsMime)) {
+        existing.type = 'hls';
+      }
+      if (mime != null && mime.isNotEmpty) existing.mime = mime;
       if (pageUrl != null && pageUrl.startsWith('http')) {
         // The same master can be reported first by performance entries and
         // then by the player API. Keep the most useful document context for
@@ -876,7 +883,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       return;
     }
     final candidatePageUrl = pageUrl ?? _webOriginalUrl ?? '';
-    final type = _looksLikeHls(normalized)
+    final type = _looksLikeHls(normalized) || hlsMime
         ? 'hls'
         : _looksLikeProgressiveVideo(normalized)
             ? 'progressive'
@@ -928,7 +935,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final host = uri.host.toLowerCase();
     final pathAndQuery = '${uri.path}?${uri.query}'.toLowerCase();
     return RegExp(
-      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder|app-install|download-app|push-notification)',
+      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder|app-install|download-app|push-notification)',
       caseSensitive: false,
     ).hasMatch('$host $pathAndQuery') ||
         RegExp(
@@ -1138,7 +1145,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             const p = (u.pathname || '').toLowerCase();
              const raw = String(url || '').toLowerCase();
              if (!/^https?:$/i.test(u.protocol)) return true;
-             return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|app-install|push-notification)/i.test(`${h} ${p}`) ||
+            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|app-install|push-notification)/i.test(`${h} ${p}`) ||
                /(popup|popunder|clickunder|interstitial|advertisement|ads?\b|otp|one[- ]?time|verification|verify|passcode|pin|subscription|subscribe|phone|mobile|credit[- ]?card|download-app)/i.test(`${p} ${u.search} ${raw}`);
           } catch (_) { return false; }
         };
@@ -1191,6 +1198,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               window.SportsPlayerSource.postMessage(JSON.stringify(payload));
             }
           } catch (_) {}
+        };
+        const manifestText = (text) => /#EXTM3U|#EXT-X-(STREAM-INF|TARGETDURATION|MEDIA-SEQUENCE)/i.test(String(text || '').slice(0, 12000));
+        const reportManifest = (url, source, mime) => {
+          if (!url || !/^https?:\/\//i.test(String(url))) return;
+          report({
+            type:'hls_candidate',
+            url:String(url),
+            source:source || 'manifest-response',
+            mime:mime || 'application/vnd.apple.mpegurl',
+            pageUrl:location.href,
+            frameUrl:location.href,
+            referer:document.referrer || location.href
+          });
         };
         const addCandidate = (value, source='network', mime='') => {
           try {
@@ -1320,7 +1340,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               const st = getComputedStyle(f);
               if (r.width < 180 || r.height < 100 || st.display === 'none' || st.visibility === 'hidden') return;
               const text = `${src} ${f.id || ''} ${f.className || ''}`.toLowerCase();
-              if (/(doubleclick|googlesyndication|adservice|adnxs|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
+            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
               let score = 10;
               if (r.width >= 320 && r.height >= 180) score += 25;
               else if (r.width >= 250 && r.height >= 140) score += 15;
@@ -1344,8 +1364,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           try {
             const u = new URL(url, location.href);
             const h = `${u.hostname} ${u.pathname} ${u.search}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
-            return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(h) || /(manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/)/i.test(h);
+            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
+            return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(h) ||
+              /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/i.test(h);
           } catch (_) { return false; }
         };
         const reportMediaResources = () => {
@@ -1354,7 +1375,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               const name = e && e.name ? String(e.name) : '';
               if (!mediaResourceLike(name)) return;
               report({type:'media_resource', url:name});
-              if (/\.(m3u8|m3u)(?:$|[?#])/i.test(name)) {
+              if (/\.(m3u8|m3u)(?:$|[?#])/i.test(name) ||
+                  /(?:master|playlist|manifest)(?:[./?#&]|$)|\/m3\//i.test(name)) {
                 report({type:'hls_candidate', url:name, source:'performance',
                   mime:e.initiatorType || '', pageUrl:location.href,
                   frameUrl:location.href, referer:document.referrer || location.href});
@@ -1495,11 +1517,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               try { addCandidate(typeof input === 'string' ? input : (input && input.url), 'fetch'); } catch (_) {}
               return originalFetch.apply(this, arguments).then((response) => {
                 try { addCandidate(response && response.url, 'fetch-response'); } catch (_) {}
+                const responseUrl = response && response.url ? response.url : (typeof input === 'string' ? input : '');
+                const responseMime = response && response.headers ? (response.headers.get('content-type') || '') : '';
+                if (/mpegurl/i.test(responseMime)) {
+                  reportManifest(responseUrl, 'fetch-content-type', responseMime);
+                }
                  try {
                    const copy = response.clone();
                    copy.text().then((text) => {
                      if (!text) return;
-                     try { reportPayloadCandidates(JSON.parse(text), 'fetch-json'); } catch (_) {}
+                     if (manifestText(text)) {
+                       reportManifest(responseUrl, 'fetch-manifest', responseMime);
+                     } else {
+                       try { reportPayloadCandidates(JSON.parse(text), 'fetch-json'); } catch (_) {}
+                     }
                    }).catch(() => {});
                  } catch (_) {}
                 return response;
@@ -1518,8 +1549,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                  addCandidate(url, 'xhr');
                  this.addEventListener('load', () => {
                    try {
+                     const responseUrl = this.responseURL || url || '';
+                     const responseMime = this.getResponseHeader('content-type') || '';
                      if (typeof this.responseText === 'string' && this.responseText) {
-                       reportPayloadCandidates(JSON.parse(this.responseText), 'xhr-json');
+                       if (manifestText(this.responseText)) {
+                         reportManifest(responseUrl, 'xhr-manifest', responseMime);
+                       } else {
+                         reportPayloadCandidates(JSON.parse(this.responseText), 'xhr-json');
+                       }
                      }
                    } catch (_) {}
                  });
@@ -1542,7 +1579,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           if (!/^https?:\/\//i.test(v)) return;
           const l = v.toLowerCase();
           if (/\.(m3u8|mpd|mp4|m4v|webm|mov)(?:$|[?#])/i.test(v) ||
-              /(?:m3u8|manifest|playlist|master|stream|live|hls)(?:[?&=\/]|$)/i.test(l)) out.add(v);
+              /(?:m3u8|manifest|playlist|master|stream|live|hls)(?:[.?&=\/]|$)/i.test(l) ||
+              /\/m3\//i.test(l)) out.add(v);
         };
         document.querySelectorAll('video').forEach(v => {
           add(v.currentSrc); add(v.src);
@@ -1575,7 +1613,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _scoreDetectedSource(String url) {
     final lower = url.toLowerCase();
     var score = 0;
-    if (lower.contains('.m3u8') || lower.contains('.m3u')) score += 100;
+    if (_looksLikeHls(url)) score += 100;
     else if (lower.contains('.mpd')) score += 85;
     else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) score += 55;
     if (lower.contains('live')) score += 35;
@@ -1588,7 +1626,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return score;
   }
 
-  bool _looksLikeHls(String url) => RegExp(r'\.m3u8?(?:$|[?#])', caseSensitive: false).hasMatch(url);
+  bool _looksLikeHls(String url) => RegExp(
+        r'(?:\.m3u8?(?:$|[?#])|/(?:hls|m3)/|(?:master|playlist|manifest)(?:[./?#&]|$))',
+        caseSensitive: false,
+      ).hasMatch(url);
   bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
 
   Map<String, String> _headersForCandidate(
@@ -1723,8 +1764,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         try {
           performance.getEntriesByType('resource').forEach((e) => {
             const n = String(e.name || '').toLowerCase();
-            if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(n) || /(manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/)/.test(n)) {
-              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
+            if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(n) || /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/.test(n)) {
+              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
             }
           });
         } catch (_) {}
@@ -2342,8 +2383,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
-          final score = _scoreDetectedSource(source) + (frameworkSources.contains(sourceRaw) ? 85 : 0);
           final registered = _webCandidateRegistry[source];
+          final score = _scoreDetectedSource(source) +
+              (registered?.type == 'hls' ? 85 : 0) +
+              (frameworkSources.contains(sourceRaw) ? 85 : 0);
           final registryEvidence = registered?.evidenceScore ?? 0;
           _webCandidateEvidence[source] =
               (_webCandidateEvidence[source] ?? 0) + 1 + (registryEvidence ~/ 25);
@@ -2353,7 +2396,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           if (!_canTrialNative(source)) continue;
 
           final evidence = _webCandidateEvidence[source] ?? 0;
-          final strongHls = _looksLikeHls(source) && score >= 100;
+          final strongHls =
+              (registered?.type == 'hls' || _looksLikeHls(source)) &&
+                  score >= 100;
           final strongFramework = frameworkSources.contains(sourceRaw) && score >= 80;
           if (evidence < 2 && !strongHls && !strongFramework) continue;
           // A URL observed in the browser is not enough. Native replay is
@@ -2393,6 +2438,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             quality,
             fallbackToWeb: true,
             playbackHeaders: candidateHeaders,
+            formatHintOverride:
+                registered?.type == 'hls' ? VideoFormat.hls : null,
           );
           return;
         }
@@ -2776,7 +2823,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality,
-      {bool fallbackToWeb = false, Map<String, String>? playbackHeaders}) async {
+      {
+        bool fallbackToWeb = false,
+        Map<String, String>? playbackHeaders,
+        VideoFormat? formatHintOverride,
+      }) async {
     if (fallbackToWeb) {
       _setWebSessionState(_WebSessionState.nativeTrial);
       _smartLog('NATIVE', 'trial started');
@@ -2800,11 +2851,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // in particular, since a signed/extension-less .mpd URL would
       // otherwise not be auto-detected correctly.
       final lowerQualityUrl = quality.url.toLowerCase();
-      final formatHint = lowerQualityUrl.contains('.mpd')
-          ? VideoFormat.dash
-          : (lowerQualityUrl.contains('.m3u8') || lowerQualityUrl.contains('.m3u'))
-              ? VideoFormat.hls
-              : null;
+      final formatHint = formatHintOverride ??
+          (lowerQualityUrl.contains('.mpd')
+              ? VideoFormat.dash
+              : (lowerQualityUrl.contains('.m3u8') ||
+                      lowerQualityUrl.contains('.m3u'))
+                  ? VideoFormat.hls
+                  : null);
 
       final newController = VideoPlayerController.networkUrl(
         Uri.parse(quality.url),
@@ -3495,6 +3548,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     icon: _locked ? Icons.lock : Icons.lock_open,
                     tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
                     onPressed: _toggleLock,
+                  ),
+                ),
+              if (_state == _LoadState.ready && !_isWebSource && !_locked)
+                Positioned(
+                  top: 8,
+                  left: 62,
+                  child: _circleIconButton(
+                    icon: _fit == BoxFit.cover
+                        ? Icons.crop_free
+                        : Icons.fit_screen,
+                    tooltip: _fit == BoxFit.cover
+                        ? 'احتواء الفيديو داخل الشاشة'
+                        : 'تعبئة الشاشة',
+                    onPressed: _toggleFit,
                   ),
                 ),
               // Web players own their internal controls, so keep the

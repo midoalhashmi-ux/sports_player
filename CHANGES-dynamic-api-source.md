@@ -16,6 +16,18 @@
   derived `Origin`/`Referer` headers when replayed by the native player. This
   covers JSON playback endpoints such as `/api/videos/.../playback` whose final
   URL is a temporary `.m3u8` link on another CDN host.
+- Manifest discovery now also accepts HLS playlists returned as `text/plain`
+  or without a video extension, including `master.txt` and `/m3/` URLs. It
+  confirms the response from `#EXTM3U`/HLS tags and passes an explicit HLS
+  format hint to the native player.
+- The WebView filter includes the ad domains observed in the anime HAR
+  (`adsco.re`, `betteradsystem.com`, `scogienaira.cyou`, `li.backsetaspises.com`,
+  `yt.vacantazon.com`, `taghas.com`, `inboxdollars.sjv.io`,
+  `moolahsyangtze.shop`, `wvdme.com`, and `rtmark.net`) while leaving the
+  actual `vmpx.online` HLS host untouched.
+- Added a visible screen-fit button for native playback. It toggles between
+  keeping the full video visible with possible black bars and filling the
+  available screen while preserving the video's aspect ratio.
 
 Full device testing is still required because the final URL is short-lived and
 the Android network path may differ from a desktop browser.
