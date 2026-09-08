@@ -313,7 +313,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           isLive: true,
           servers: [
             StreamServerOption(
-              label: 'المصدر المُستخرج تلقائياً',
+              label: 'المصدر',
               qualities: [StreamQuality(label: 'تلقائي', url: candidate.url)],
             ),
           ],
@@ -342,7 +342,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         isLive: true,
         servers: [
           StreamServerOption(
-            label: 'المصدر المُستخرج',
+            label: 'المصدر ',
             qualities: [StreamQuality(label: 'تلقائي', url: resolvedUrl)],
           ),
         ],
