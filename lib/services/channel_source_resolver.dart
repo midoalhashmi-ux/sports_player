@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'api_source_resolver.dart';
 import 'stream_auth_service.dart';
 import 'stream_models.dart';
 
@@ -33,6 +34,62 @@ class ChannelSourceResolver {
             .trim();
         if (referer != null && referer.isNotEmpty) sourceHeaders['referer'] = referer;
         if (userAgent != null && userAgent.isNotEmpty) sourceHeaders['user-agent'] = userAgent;
+      }
+
+      // API ديناميكي: نخزّن عنوان API المستقر فقط، ثم نطلب منه رابط البث
+      // المؤقت أثناء التشغيل. apiHeaders مخصصة لطلب API، بينما sourceHeaders
+      // تبقى هيدرز التشغيل/Referer الخاصة برابط HLS النهائي. للتوافق مع
+      // السجلات القديمة، إذا غابت apiHeaders نستخدم sourceHeaders للطلب أيضاً.
+      if (data != null && data['streamType'] == 'api') {
+        final apiUrl = (data['sourceUrl'] ?? data['apiUrl'] ?? '').toString().trim();
+        if (apiUrl.isEmpty) {
+          return StreamSession.failure('لم يتم ضبط رابط API لهذه القناة بعد.');
+        }
+        final apiHeaders = <String, String>{};
+        final rawApiHeaders = data['apiHeaders'];
+        if (rawApiHeaders is Map) {
+          for (final entry in rawApiHeaders.entries) {
+            final key = entry.key.toString().trim().toLowerCase();
+            final value = entry.value?.toString().trim() ?? '';
+            if ((key == 'referer' || key == 'user-agent') && value.isNotEmpty) {
+              apiHeaders[key] = value;
+            }
+          }
+        }
+        final requestHeaders = apiHeaders.isNotEmpty ? apiHeaders : sourceHeaders;
+        final candidates = await ApiSourceResolver.resolve(
+          apiUrl,
+          headers: requestHeaders,
+          onDiagnostic: (message) => ApiSourceResolver.safeDiagnostic(
+            'channel=${_safeId(channelId)} $message',
+          ),
+        );
+        final playable = candidates.where(
+          (item) => _isPlayableUrl(item.url) || item.reason == 'direct media response',
+        );
+        final candidate = playable.isEmpty ? null : playable.first;
+        if (candidate == null) {
+          return StreamSession.failure(
+            'تعذر استخراج رابط بث صالح من API. تحقق من نوع الرد أو إعدادات Headers.',
+          );
+        }
+        final lower = candidate.url.toLowerCase();
+        final kind = lower.contains('.mpd')
+            ? StreamKind.dash
+            : lower.contains('.m3u8') || lower.contains('.m3u')
+                ? StreamKind.hls
+                : StreamKind.progressive;
+        return StreamSession.success(
+          kind: kind,
+          isLive: data['status'] == 'live',
+          servers: [
+            StreamServerOption(
+              label: 'API ديناميكي',
+              qualities: [StreamQuality(label: 'تلقائي', url: candidate.url)],
+            ),
+          ],
+          headers: sourceHeaders,
+        );
       }
 
       // يمكن للوحة التحكم تحديد أن المصدر صفحة ويب رسمية بدلاً من رابط
@@ -97,5 +154,22 @@ class ChannelSourceResolver {
       // عبر Cloud Function بدلاً من الفشل الكامل.
     }
     return StreamAuthService.requestSession(channelId);
+  }
+
+  static bool _isPlayableUrl(String url) {
+    final lower = url.toLowerCase();
+    return lower.contains('.m3u8') ||
+        lower.contains('.m3u') ||
+        lower.contains('.mpd') ||
+        RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])').hasMatch(lower) ||
+        lower.contains('/live/') ||
+        lower.contains('/stream/') ||
+        lower.contains('/playlist/') ||
+        lower.contains('/manifest/');
+  }
+
+  static String _safeId(String value) {
+    final clean = value.replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    return clean.length > 32 ? clean.substring(0, 32) : clean;
   }
 }

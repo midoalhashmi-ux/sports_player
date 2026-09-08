@@ -32,12 +32,23 @@ class ApiSourceResolver {
     String url, {
     Map<String, String>? headers,
     int maxDepth = 3,
+    void Function(String message)? onDiagnostic,
   }) async {
     final out = <ApiSourceCandidate>[];
     final visited = <String>{};
-    await _walk(url, headers ?? const {}, 0, maxDepth, visited, out);
+    final diagnostic = onDiagnostic ?? safeDiagnostic;
+    diagnostic('start host=${_safeHost(url)}');
+    await _walk(url, headers ?? const {}, 0, maxDepth, visited, out, diagnostic);
     out.sort((a, b) => b.score.compareTo(a.score));
+    diagnostic('complete candidates=${out.length}');
     return out;
+  }
+
+  /// Emits only redacted diagnostics: host and path are retained, while query
+  /// strings (where temporary tokens usually live) are never logged.
+  static void safeDiagnostic(String message) {
+    // ignore: avoid_print
+    print('[ApiSourceResolver] $message');
   }
 
   static Future<void> _walk(
@@ -47,6 +58,7 @@ class ApiSourceResolver {
     int maxDepth,
     Set<String> visited,
     List<ApiSourceCandidate> out,
+    void Function(String message) diagnostic,
   ) async {
     if (depth > maxDepth || visited.contains(url)) return;
     final uri = Uri.tryParse(url);
@@ -54,6 +66,7 @@ class ApiSourceResolver {
     visited.add(url);
 
     try {
+      diagnostic('request depth=$depth ${_safeLocation(url)}');
       final request = http.Request('GET', uri)
         ..followRedirects = false
         ..maxRedirects = 0;
@@ -66,13 +79,14 @@ class ApiSourceResolver {
       });
       final streamed = await request.send().timeout(const Duration(seconds: 12));
       final response = await http.Response.fromStream(streamed);
+      diagnostic('response depth=$depth status=${response.statusCode}');
 
       if (response.statusCode >= 300 && response.statusCode < 400) {
         final location = response.headers['location'];
         if (location != null && location.isNotEmpty) {
           final next = uri.resolve(location).toString();
           _addIfUseful(next, headers, 220, 'HTTP redirect', out);
-          await _walk(next, headers, depth + 1, maxDepth, visited, out);
+          await _walk(next, headers, depth + 1, maxDepth, visited, out, diagnostic);
         }
         return;
       }
@@ -91,12 +105,47 @@ class ApiSourceResolver {
       final texts = <String>{body};
       texts.addAll(_decodeLayers(body));
 
+      final beforeCandidates = out.length;
       for (final text in texts) {
         _extractTextCandidates(text, uri, headers, depth, maxDepth, visited, out);
       }
-    } catch (_) {
+      // إذا احتوى رد الـ API على رابط redirect أو HLS، نزور المرشح نفسه
+      // أيضاً. بهذه الطريقة نتابع 302 الموجودة داخل الرابط المستخرج ونحصل
+      // على الرابط النهائي/Content-Type، بدلاً من الاكتفاء بتخمين النص.
+      final discovered = out
+          .skip(beforeCandidates)
+          .map((candidate) => candidate.url)
+          .toSet();
+      for (final candidateUrl in discovered) {
+        if (candidateUrl != url) {
+          await _walk(
+            candidateUrl,
+            headers,
+            depth + 1,
+            maxDepth,
+            visited,
+            out,
+            diagnostic,
+          );
+        }
+      }
+    } catch (error) {
+      diagnostic('request failed type=${error.runtimeType}');
       // Best-effort resolver. WebView discovery remains the fallback.
     }
+  }
+
+  static String _safeHost(String value) {
+    final uri = Uri.tryParse(value);
+    return uri?.host.isNotEmpty == true ? uri!.host : 'invalid-url';
+  }
+
+  static String _safeLocation(String value) {
+    final uri = Uri.tryParse(value);
+    if (uri == null || uri.host.isEmpty) return 'invalid-url';
+    final path = uri.path.isEmpty ? '/' : uri.path;
+    final clipped = path.length > 80 ? '${path.substring(0, 80)}…' : path;
+    return '${uri.scheme}://${uri.host}$clipped';
   }
 
   static void _extractTextCandidates(
