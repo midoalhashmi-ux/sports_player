@@ -50,9 +50,9 @@ class _WebNetworkCandidate {
   final String source;
   final String type;
   final DateTime timestamp;
-  final String pageUrl;
-  final String frameUrl;
-  final String referer;
+  String pageUrl;
+  String frameUrl;
+  String referer;
   final String mime;
   int evidenceScore;
   bool validated;
@@ -143,6 +143,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   double _volume = 100;
   bool _muted = false;
   bool _fullscreen = false;
+  bool _isLandscape = true;
 
   bool _locked = false;
   BoxFit _fit = BoxFit.contain;
@@ -196,7 +197,42 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    // A video screen is landscape-first. The explicit orientation button
+    // below is the only thing that switches it back to portrait.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_setPlayerOrientation(true));
+    });
     unawaited(_prepareAndStartPlayback());
+  }
+
+  Future<void> _setPlayerOrientation(bool landscape) async {
+    if (mounted) {
+      setState(() {
+        _isLandscape = landscape;
+        if (!landscape) _fullscreen = false;
+      });
+    }
+    try {
+      await SystemChrome.setPreferredOrientations(
+        landscape
+            ? const [
+                DeviceOrientation.landscapeLeft,
+                DeviceOrientation.landscapeRight,
+              ]
+            : const [
+                DeviceOrientation.portraitUp,
+                DeviceOrientation.portraitDown,
+              ],
+      );
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (_) {
+      // Orientation control is best effort on platforms that do not expose it.
+    }
+  }
+
+  Future<void> _toggleOrientation() async {
+    await _setPlayerOrientation(!_isLandscape);
+    _scheduleHide();
   }
 
   // ---------------------- player listener ----------------------
@@ -816,6 +852,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     required String source,
     String? mime,
     int evidenceScore = 0,
+    String? pageUrl,
+    String? frameUrl,
+    String? referer,
   }) {
     final normalized = _normalizeCandidate(rawUrl);
     final uri = Uri.tryParse(normalized);
@@ -824,9 +863,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (existing != null) {
       existing.evidenceScore =
           (existing.evidenceScore + evidenceScore).clamp(0, 1000).toInt();
+      if (pageUrl != null && pageUrl.startsWith('http')) {
+        // The same master can be reported first by performance entries and
+        // then by the player API. Keep the most useful document context for
+        // native replay headers.
+        existing.pageUrl = pageUrl;
+        existing.frameUrl = frameUrl ?? pageUrl;
+      }
+      if (referer != null && referer.startsWith('http')) {
+        existing.referer = referer;
+      }
       return;
     }
-    final pageUrl = _webOriginalUrl ?? '';
+    final candidatePageUrl = pageUrl ?? _webOriginalUrl ?? '';
     final type = _looksLikeHls(normalized)
         ? 'hls'
         : _looksLikeProgressiveVideo(normalized)
@@ -837,9 +886,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       source: source,
       type: type,
       timestamp: DateTime.now(),
-      pageUrl: pageUrl,
-      frameUrl: pageUrl,
-      referer: _webContextHeaders?['referer'] ?? '',
+      pageUrl: candidatePageUrl,
+      frameUrl: frameUrl ?? candidatePageUrl,
+      referer: referer ?? _webContextHeaders?['referer'] ?? '',
       mime: mime ?? '',
       evidenceScore: evidenceScore,
     );
@@ -898,6 +947,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
     if (!identical(controller, _webController)) return;
     final type = decoded['type']?.toString() ?? '';
+    _captureMessageWebContext(decoded);
     if (type == 'drm_detected') {
       if (!mounted) return;
       setState(() {
@@ -918,7 +968,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
       _webLastMediaEvidenceAt = DateTime.now();
       if (_looksLikeHls(rawResourceUrl)) {
-        _registerWebCandidate(rawResourceUrl, source: 'performance', evidenceScore: 20);
+        _registerWebCandidate(
+          rawResourceUrl,
+          source: 'performance',
+          evidenceScore: 20,
+          pageUrl: decoded['pageUrl']?.toString(),
+          frameUrl: decoded['frameUrl']?.toString(),
+          referer: decoded['referer']?.toString(),
+        );
       }
       _extendWebStartupDeadline(const Duration(seconds: 5));
       return;
@@ -939,6 +996,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           source: decoded['source']?.toString() ?? 'network',
           mime: decoded['mime']?.toString(),
           evidenceScore: 25,
+          pageUrl: decoded['pageUrl']?.toString(),
+          frameUrl: decoded['frameUrl']?.toString(),
+          referer: decoded['referer']?.toString(),
         );
         _webMediaEvidenceScore =
             (_webMediaEvidenceScore + 12).clamp(0, 100).toInt();
@@ -1034,6 +1094,36 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     } finally {
       _webIframePromotionInFlight = false;
     }
+  }
+
+  void _captureMessageWebContext(Map<dynamic, dynamic> decoded) {
+    final rawPage = decoded['pageUrl']?.toString() ?? '';
+    final page = Uri.tryParse(rawPage);
+    if (page == null ||
+        !page.hasScheme ||
+        (page.scheme != 'http' && page.scheme != 'https')) {
+      return;
+    }
+    final context = <String, String>{...?_webContextHeaders};
+    final origin = _originForUri(page);
+    if (origin.isNotEmpty) {
+      context['origin'] = origin;
+      // Cross-origin media requests use the page origin as their Referer
+      // under the browser's strict-origin referrer policy. The candidate
+      // helper below applies this same rule during native replay.
+      context['referer'] = '$origin/';
+    }
+    final reportedReferer = decoded['referer']?.toString() ?? '';
+    if (reportedReferer.startsWith('http') && reportedReferer == rawPage) {
+      context['referer'] = reportedReferer;
+    }
+    if (mounted && context.isNotEmpty) _webContextHeaders = context;
+  }
+
+  String _originForUri(Uri uri) {
+    if (!uri.hasScheme || uri.host.isEmpty) return '';
+    final port = uri.hasPort ? ':${uri.port}' : '';
+    return '${uri.scheme}://${uri.host}$port';
   }
 
   Future<void> _installWebProtection(WebViewController controller) async {
@@ -1501,7 +1591,36 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _looksLikeHls(String url) => RegExp(r'\.m3u8?(?:$|[?#])', caseSensitive: false).hasMatch(url);
   bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
 
-  Future<bool> _validatePublicMediaSource(String url) async {
+  Map<String, String> _headersForCandidate(
+      String source, _WebNetworkCandidate? candidate) {
+    final headers = <String, String>{..._effectiveStreamHeaders()};
+    final sourceUri = Uri.tryParse(source);
+    final pageUri = Uri.tryParse(candidate?.pageUrl ?? '');
+    if (sourceUri == null ||
+        pageUri == null ||
+        !sourceUri.hasScheme ||
+        !pageUri.hasScheme ||
+        pageUri.host.isEmpty) {
+      return headers;
+    }
+
+    final sourcePort = sourceUri.hasPort ? sourceUri.port : null;
+    final pagePort = pageUri.hasPort ? pageUri.port : null;
+    final sameOrigin = sourceUri.scheme == pageUri.scheme &&
+        sourceUri.host.toLowerCase() == pageUri.host.toLowerCase() &&
+        sourcePort == pagePort;
+    if (!sameOrigin) {
+      final pageOrigin = _originForUri(pageUri);
+      if (pageOrigin.isNotEmpty) {
+        headers['origin'] = pageOrigin;
+        headers['referer'] = '$pageOrigin/';
+      }
+    }
+    return headers;
+  }
+
+  Future<bool> _validatePublicMediaSource(String url,
+      {Map<String, String>? requestHeaders}) async {
     try {
       final uri = Uri.parse(url);
       final headers = <String, String>{
@@ -1509,6 +1628,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         'accept': '*/*',
         ...?_webContextHeaders,
         ...?_resolvedStreamHeaders,
+        ...?requestHeaders,
       };
       if (_looksLikeHls(url)) {
         final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
@@ -2223,8 +2343,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
           final score = _scoreDetectedSource(source) + (frameworkSources.contains(sourceRaw) ? 85 : 0);
-          final registryEvidence =
-              _webCandidateRegistry[source]?.evidenceScore ?? 0;
+          final registered = _webCandidateRegistry[source];
+          final registryEvidence = registered?.evidenceScore ?? 0;
           _webCandidateEvidence[source] =
               (_webCandidateEvidence[source] ?? 0) + 1 + (registryEvidence ~/ 25);
           if (score < 80) continue;
@@ -2244,8 +2364,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           // Best-effort validation. A negative validation is not fatal when
           // the browser has already supplied strong evidence (for example a
           // stream requiring Referer/Origin/cookies).
-          final validated = await _validatePublicMediaSource(source);
-          final registered = _webCandidateRegistry[source];
+          final candidateHeaders = _headersForCandidate(source, registered);
+          final validated = await _validatePublicMediaSource(
+            source,
+            requestHeaders: candidateHeaders,
+          );
           if (registered != null) registered.validated = validated;
           _smartLog(
             'HLS',
@@ -2269,6 +2392,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             StreamServerOption(label: 'المصدر المكتشف تلقائياً', qualities: [quality]),
             quality,
             fallbackToWeb: true,
+            playbackHeaders: candidateHeaders,
           );
           return;
         }
@@ -2651,7 +2775,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _playServerQuality(
-      StreamServerOption server, StreamQuality quality, {bool fallbackToWeb = false}) async {
+      StreamServerOption server, StreamQuality quality,
+      {bool fallbackToWeb = false, Map<String, String>? playbackHeaders}) async {
     if (fallbackToWeb) {
       _setWebSessionState(_WebSessionState.nativeTrial);
       _smartLog('NATIVE', 'trial started');
@@ -2684,9 +2809,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final newController = VideoPlayerController.networkUrl(
         Uri.parse(quality.url),
         formatHint: formatHint,
-        httpHeaders: {
-          ..._effectiveStreamHeaders(),
-        },
+        httpHeaders: playbackHeaders ?? _effectiveStreamHeaders(),
       );
       _controller = newController;
       _position = Duration.zero;
@@ -2848,14 +2971,30 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _toggleFullscreen() async {
-    setState(() => _fullscreen = !_fullscreen);
-    if (_fullscreen) {
+    final nextFullscreen = !_fullscreen;
+    setState(() {
+      _fullscreen = nextFullscreen;
+      if (nextFullscreen) _isLandscape = true;
+    });
+    if (nextFullscreen) {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       await SystemChrome.setPreferredOrientations(
           [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
     } else {
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      // Leaving fullscreen does not unexpectedly rotate the viewer back to
+      // portrait. Portrait remains an explicit choice via the top button.
+      await SystemChrome.setPreferredOrientations(
+        _isLandscape
+            ? const [
+                DeviceOrientation.landscapeLeft,
+                DeviceOrientation.landscapeRight,
+              ]
+            : const [
+                DeviceOrientation.portraitUp,
+                DeviceOrientation.portraitDown,
+              ],
+      );
     }
   }
 
@@ -3358,6 +3497,22 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _toggleLock,
                   ),
                 ),
+              // Web players own their internal controls, so keep the
+              // orientation action available as a Flutter overlay as well.
+              if (_state == _LoadState.ready && _isWebSource)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: _circleIconButton(
+                    icon: _isLandscape
+                        ? Icons.screen_lock_rotation
+                        : Icons.screen_rotation,
+                    tooltip: _isLandscape
+                        ? 'التبديل إلى الوضع العمودي'
+                        : 'التبديل إلى الوضع الأفقي',
+                    onPressed: _toggleOrientation,
+                  ),
+                ),
               if (_state == _LoadState.ready && !_isWebSource && _playbackSpeed != 1.0)
                 Positioned(
                   top: 12,
@@ -3392,12 +3547,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final double height = size.height == 0 ? 9.0 : size.height;
     return RepaintBoundary(
       key: _videoBoundaryKey,
-      child: FittedBox(
-        fit: _fit,
-        child: SizedBox(
-          width: width,
-          height: height,
-          child: VideoPlayer(controller),
+      child: ClipRect(
+        child: SizedBox.expand(
+          child: FittedBox(
+            fit: _fit,
+            clipBehavior: Clip.hardEdge,
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: VideoPlayer(controller),
+            ),
+          ),
         ),
       ),
     );
@@ -3559,8 +3719,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     required IconData icon,
     required String tooltip,
     required VoidCallback? onPressed,
-    double size = 40,
-    double iconSize = 20,
+    double size = 48,
+    double iconSize = 24,
     Widget? child,
   }) {
     return Padding(
@@ -3590,6 +3750,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Widget _buildControls() {
     final isLive = _session?.isLive ?? false;
     final canSeek = _contentIsSeekable;
+    final compactControls = MediaQuery.sizeOf(context).width < 600;
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -3614,7 +3775,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _exit,
                   ),
                   const SizedBox(width: 6),
-                  if (isLive && !canSeek)
+                  if (isLive && !canSeek && !compactControls)
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 9, vertical: 4),
@@ -3654,14 +3815,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     onPressed: _toggleMute,
                   ),
                   SizedBox(
-                    width: 78,
+                    width: compactControls ? 54 : 104,
                     child: SliderTheme(
                       data: SliderTheme.of(context).copyWith(
-                        trackHeight: 2.5,
+                        trackHeight: 3.5,
                         thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 5),
+                            enabledThumbRadius: 7),
                         overlayShape:
-                            const RoundSliderOverlayShape(overlayRadius: 12),
+                            const RoundSliderOverlayShape(overlayRadius: 16),
                       ),
                       child: Slider(
                         value: _muted ? 0 : _volume,
@@ -3672,6 +3833,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         onChanged: _setVolume,
                       ),
                     ),
+                  ),
+                  _circleIconButton(
+                    icon: _isLandscape
+                        ? Icons.screen_lock_rotation
+                        : Icons.screen_rotation,
+                    tooltip: _isLandscape
+                        ? 'التبديل إلى الوضع العمودي'
+                        : 'التبديل إلى الوضع الأفقي',
+                    onPressed: _toggleOrientation,
                   ),
                   _circleIconButton(
                     icon: Icons.more_vert,
@@ -3689,16 +3859,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     _circleIconButton(
                       icon: Icons.replay_10,
                       tooltip: 'تراجع 10 ثواني',
-                      size: 52,
-                      iconSize: 28,
+                      size: 58,
+                      iconSize: 30,
                       onPressed: () => _seekBy(const Duration(seconds: -10)),
                     ),
                   const SizedBox(width: 22),
                   _circleIconButton(
                     icon: _isPlaying ? Icons.pause : Icons.play_arrow,
                     tooltip: _isPlaying ? 'إيقاف مؤقت' : 'تشغيل',
-                    size: 72,
-                    iconSize: 40,
+                    size: 84,
+                    iconSize: 46,
                     onPressed: _togglePlay,
                   ),
                   const SizedBox(width: 22),
@@ -3706,8 +3876,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     _circleIconButton(
                       icon: Icons.forward_10,
                       tooltip: 'تقديم 10 ثواني',
-                      size: 52,
-                      iconSize: 28,
+                      size: 58,
+                      iconSize: 30,
                       onPressed: () => _seekBy(const Duration(seconds: 10)),
                     ),
                 ],
