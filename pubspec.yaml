@@ -1,0 +1,58 @@
+name: sports_player
+description: BinSheikh player
+publish_to: 'none'
+version: 1.0.5+6
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.6
+  firebase_core: ^2.32.0
+  cloud_firestore: ^4.15.5
+  app_links: ^6.3.2
+
+  # محرك تشغيل يدعم HLS وMP4/التقدمي (Android عبر ExoPlayer) بحجم صغير —
+  # لا يدعم DASH/RTMP/MKV فعلياً رغم ما كان مكتوباً سابقاً (التطبيق أندرويد
+  # فقط حالياً وكل القنوات المحمية تُقدَّم HLS، فما فيه أثر عملي)
+  video_player: ^2.9.2
+
+  # طلبات HTTP بسيطة تُستخدم في خدمة مصادقة البث (StreamAuthService)
+  http: ^1.2.2
+
+  # إبقاء الشاشة مضاءة أثناء المشاهدة
+  wakelock_plus: ^1.2.8
+
+  # حفظ الروابط المضافة يدوياً على الجهاز (شاشة "Add URL")
+  shared_preferences: ^2.3.2
+
+  # حفظ لقطات الشاشة في المعرض
+  path_provider: ^2.1.4
+  image_gallery_saver_plus: ^3.0.5
+
+  # إعلانات AdMob (بيني + بانر)
+  google_mobile_ads: ^5.2.0
+
+  # مشاركة التطبيق عبر قوائم مشاركة النظام
+  share_plus: ^10.0.2
+
+  # فتح متجر Google Play وروابط خارجية من صفحة "اتصل بنا"
+  url_launcher: ^6.3.1
+
+  # عرض صفحات البث الرسمية داخل شاشة المشاهدة عند استخدام streamType=web
+  webview_flutter: ^4.10.0
+
+  # قراءة رقم إصدار التطبيق المثبَّت فعلياً على الجهاز، تُستخدم في
+  # VersionCheckService لمقارنته بـ minVersion من لوحة التحكم (شاشة
+  # التحديث الإجباري)
+  package_info_plus: ^8.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+
+flutter:
+  uses-material-design: true
