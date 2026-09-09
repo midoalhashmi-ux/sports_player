@@ -44,6 +44,26 @@ class _DecodedPayload {
   int get hashCode => text.hashCode;
 }
 
+/// نتيجة _relayManifestViaWebView: إما قائمة جودات مكتشفة (تسمية + رابط،
+/// من master playlist)، أو ملف m3u8 محلي جاهز للتشغيل مباشرة (من media
+/// playlist).
+class _RelayedManifest {
+  final List<MapEntry<String, String>>? variants;
+  final File? localFile;
+  const _RelayedManifest._({this.variants, this.localFile});
+
+  factory _RelayedManifest.variants(List<MapEntry<String, String>> variants) =>
+      _RelayedManifest._(variants: variants);
+  factory _RelayedManifest.localFile(File file) =>
+      _RelayedManifest._(localFile: file);
+
+  bool get isLocalFile => localFile != null;
+
+  String describe() => isLocalFile
+      ? 'local_file(${localFile!.path.split('/').last})'
+      : 'variants(${variants?.length ?? 0})';
+}
+
 /// A short-lived registry for media candidates observed during the current
 /// WebView session. URLs are discovered from the page/session only; they are
 /// never persisted or hard-coded.
@@ -795,6 +815,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   DateTime? _webLastMediaEvidenceAt;
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
+  // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
+  // محاولة واحدة فقط لكل جلسة ويب (مو لكل رابط) لتفادي أي تكرار لا نهائي
+  // لو الرابط البديل المكتشف فشل هو الآخر.
+  final Map<String, Completer<String?>> _pendingManifestFetches = {};
+  bool _webManifestRelayAttempted = false;
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -999,6 +1024,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
     if (!identical(controller, _webController)) return;
     final type = decoded['type']?.toString() ?? '';
+    if (type == 'manifest_fetched') {
+      // لا نمرّر هذي الرسالة لـ _captureMessageWebContext — pageUrl فيها هو
+      // رابط المانفست نفسه لا صفحة القناة، فلا نريده يستبدل سياق الترويسات.
+      final requestId = decoded['requestId']?.toString() ?? '';
+      final text = decoded['text']?.toString();
+      final completer = _pendingManifestFetches.remove(requestId);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete((text == null || text.isEmpty) ? null : text);
+      }
+      return;
+    }
     _captureMessageWebContext(decoded);
     if (type == 'drm_detected') {
       _slog('DRM_DETECTED', 'system=${decoded['system']}');
@@ -1715,6 +1751,111 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         caseSensitive: false,
       ).hasMatch(url);
   bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
+
+  /// يطلب من WebView نفسه (بجلسته وكوكيزه الحقيقية) يجيب محتوى رابط نصياً
+  /// عبر fetch()، ويرجعه لنا هنا. ضروري لأن evaluateJavascript لا ينتظر
+  /// اكتمال Promise، فنستخدم نفس قناة الرسائل الموجودة (SportsPlayerSource)
+  /// بدل انتظار نتيجة مباشرة من runJavaScriptReturningResult.
+  Future<String?> _fetchTextViaWebView(String url,
+      {Duration timeout = const Duration(seconds: 8)}) async {
+    final controller = _webController;
+    if (controller == null) return null;
+    final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+    final completer = Completer<String?>();
+    _pendingManifestFetches[requestId] = completer;
+    try {
+      final urlJson = jsonEncode(url);
+      final requestIdJson = jsonEncode(requestId);
+      await controller.runJavaScript('''(function() {
+        fetch($urlJson, {credentials: 'include'}).then(function(res) {
+          return res.text();
+        }).catch(function() {
+          return '';
+        }).then(function(text) {
+          try {
+            if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
+              window.SportsPlayerSource.postMessage(JSON.stringify({type:'manifest_fetched', requestId:$requestIdJson, text:text}));
+            }
+          } catch (_) {}
+        });
+      })();''');
+    } catch (_) {
+      _pendingManifestFetches.remove(requestId);
+      return null;
+    }
+    try {
+      return await completer.future.timeout(timeout);
+    } catch (_) {
+      _pendingManifestFetches.remove(requestId);
+      return null;
+    }
+  }
+
+  /// عندما يفشل رابط HLS بالتشغيل الأصلي رغم ثقة عالية بأنه المصدر الصحيح
+  /// (عادة خطأ "Source error" من ExoPlayer)، الاحتمال الأقوى أن نقطة
+  /// الحماية (جلسة/توكن/بصمة اتصال) خاصة بهذا الرابط بالذات، وليست شيئاً
+  /// WebView يحمله تلقائياً معه فقط (زي الكوكيز العادية اللي عالجناها في
+  /// _headersForCandidate). بدل إعادة نفس المحاولة الفاشلة، نطلب من
+  /// WebView نفسه — المُثبَت نجاحه بتشغيل هذا الفيديو فعلياً — يجيب محتوى
+  /// الرابط بجلسته الحقيقية، ثم:
+  /// - لو "master playlist" (فيها عدة جودات عبر #EXT-X-STREAM-INF): نرجّع
+  ///   كل روابط الجودات المكتشفة (الأعلى جودة أولاً) لنجرّبها ونعرضها.
+  /// - لو "media playlist" (فيها السيجمنتات مباشرة عبر #EXTINF): نكتبها
+  ///   كملف محلي مؤقت (بروابط مطلقة)، فيقرأ ExoPlayer القائمة من الملف
+  ///   المحلي دون أي طلب لرابط الحماية إطلاقاً، ولا يطلب شبكياً إلا ملفات
+  ///   السيجمنت نفسها (غالباً غير محمية بنفس القوة).
+  Future<_RelayedManifest?> _relayManifestViaWebView(String manifestUrl) async {
+    final text = await _fetchTextViaWebView(manifestUrl);
+    if (text == null || !text.contains('#EXTM3U')) return null;
+
+    final lines = text.split(RegExp(r'\r?\n'));
+
+    if (text.contains('#EXT-X-STREAM-INF')) {
+      // (ترتيب الفرز, الدقة/التسمية, الرابط) — الفرز يعتمد BANDWIDTH لأنه
+      // موجود دائماً بينما RESOLUTION اختياري بالمواصفة.
+      final variants = <(int, String, String)>[];
+      for (var i = 0; i < lines.length; i++) {
+        if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
+        final bwMatch = RegExp(r'BANDWIDTH=(\d+)').firstMatch(lines[i]);
+        final bandwidth = int.tryParse(bwMatch?.group(1) ?? '') ?? 0;
+        final resMatch = RegExp(r'RESOLUTION=\d+x(\d+)').firstMatch(lines[i]);
+        final height = resMatch?.group(1);
+        var j = i + 1;
+        while (j < lines.length && lines[j].trim().isEmpty) j++;
+        if (j >= lines.length) continue;
+        final urlLine = lines[j].trim();
+        if (urlLine.isEmpty || urlLine.startsWith('#')) continue;
+        final label = height != null
+            ? '${height}p'
+            : (bandwidth > 0 ? '${(bandwidth / 1000).round()} kbps' : 'تلقائي');
+        variants.add((bandwidth, label, _resolveRelativeUrl(urlLine, manifestUrl)));
+      }
+      if (variants.isEmpty) return null;
+      variants.sort((a, b) => b.$1.compareTo(a.$1));
+      final seen = <String>{};
+      final ordered = <MapEntry<String, String>>[];
+      for (final v in variants) {
+        if (seen.add(v.$3)) ordered.add(MapEntry(v.$2, v.$3));
+      }
+      return _RelayedManifest.variants(ordered);
+    }
+
+    if (!text.contains('#EXTINF')) return null;
+    final rewritten = lines.map((line) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty || trimmed.startsWith('#')) return line;
+      return _resolveRelativeUrl(trimmed, manifestUrl);
+    }).join('\n');
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File(
+          '${dir.path}/relayed_manifest_${DateTime.now().microsecondsSinceEpoch}.m3u8');
+      await file.writeAsString(rewritten);
+      return _RelayedManifest.localFile(file);
+    } catch (_) {
+      return null;
+    }
+  }
 
   // حارس أخير قبل أي محاولة تشغيل أصلي: صور الغلاف (poster/thumbnail) أو
   // ملفات أصول الصفحة (css/js/خطوط) قد تتسرب أحياناً لقائمة المرشحين عبر
@@ -2792,6 +2933,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webCandidateEvidence.clear();
     _webCandidateLastReason.clear();
     _webCandidateRegistry.clear();
+    _webManifestRelayAttempted = false;
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
@@ -3010,6 +3152,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _activeQuality = quality;
     });
     try {
+      // تبديل جودة/سيرفر يدوي أثناء تشغيل فعلي (مو أول محاولة قادمة من
+      // WebView) يجب يكمل من نفس النقطة بدل ما يرجّع الفيديو لبدايته.
+      final resumeFrom = (!fallbackToWeb &&
+              _controller?.value.isInitialized == true &&
+              _position > Duration.zero)
+          ? _position
+          : null;
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
@@ -3033,12 +3182,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         httpHeaders: playbackHeaders ?? _effectiveStreamHeaders(),
       );
       _controller = newController;
-      _position = Duration.zero;
+      _position = resumeFrom ?? Duration.zero;
       _duration = Duration.zero;
       _isPlaying = false;
       newController.addListener(_videoListener);
       if (fallbackToWeb) await _muteWebForNativeTrial(true);
       await newController.initialize();
+      if (resumeFrom != null) {
+        try {
+          await newController.seekTo(resumeFrom);
+        } catch (_) {}
+      }
       await newController.setPlaybackSpeed(_playbackSpeed);
       await newController.setVolume(_muted ? 0 : _volume / 100);
       await newController.play();
@@ -3093,6 +3247,65 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           'NATIVE_TRIAL_FAILED',
           'url=${_safeLogUrl(failedUrl)} error=${_describePlaybackError(error)} rawError=$error nativeAttempts=$_webNativeAttempts/$_webMaxNativeAttempts — staying on WebView',
         );
+
+        // محاولة إنقاذ إضافية (مرة واحدة لكل جلسة، ولا تُحتسب من ميزانية
+        // المحاولات العادية): لو الرابط الفاشل يشبه HLS، نطلب من WebView
+        // نفسه يجيب محتواه بجلسته الحقيقية — راجع _relayManifestViaWebView.
+        if (!_webManifestRelayAttempted &&
+            _looksLikeHls(failedUrl) &&
+            _webController != null &&
+            mounted) {
+          _webManifestRelayAttempted = true;
+          final relayed = await _relayManifestViaWebView(failedUrl);
+          if (relayed != null && mounted) {
+            _slog('MANIFEST_RELAY_SUCCESS',
+                'url=${_safeLogUrl(failedUrl)} kind=${relayed.describe()}');
+            if (relayed.isLocalFile) {
+              // بصيغة file:// (لا مسار عادي) حتى يتعرف Uri.parse بجهة
+              // _playServerQuality عليه كرابط صالح — ExoPlayer يدعم رؤوس
+              // HTTP مخصّصة حتى مع ملف محلي، وتُطبَّق فعلياً على طلبات
+              // السيجمنت البعيدة اللي يذكرها الملف (موثّق من فحص كود
+              // video_player_android نفسه).
+              final fileUri = Uri.file(relayed.localFile!.path).toString();
+              await _playServerQuality(
+                StreamServerOption(label: server.label, qualities: [
+                  StreamQuality(label: quality.label, url: fileUri)
+                ]),
+                StreamQuality(label: quality.label, url: fileUri),
+                fallbackToWeb: true,
+                playbackHeaders: playbackHeaders,
+                formatHintOverride: VideoFormat.hls,
+              );
+              return;
+            }
+            final qualities = [
+              for (final v in relayed.variants!)
+                StreamQuality(label: v.key, url: v.value),
+            ];
+            final relayedServer =
+                StreamServerOption(label: server.label, qualities: qualities);
+            if (mounted) {
+              setState(() {
+                _session = StreamSession.success(
+                  kind: StreamKind.hls,
+                  isLive: _session?.isLive ?? true,
+                  servers: [relayedServer],
+                );
+              });
+            }
+            await _playServerQuality(
+              relayedServer,
+              qualities.first,
+              fallbackToWeb: true,
+              playbackHeaders: playbackHeaders,
+              formatHintOverride: VideoFormat.hls,
+            );
+            return;
+          }
+          _slog('MANIFEST_RELAY_FAILED', 'url=${_safeLogUrl(failedUrl)}');
+          if (!mounted) return;
+        }
+
         _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
