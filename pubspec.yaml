@@ -10,6 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
   cupertino_icons: ^1.0.6
+
+  # خط Tajawal الاحترافي للهوية البصرية الموحّدة (راجع lib/theme/app_theme.dart)
+  google_fonts: ^6.2.1
+
   firebase_core: ^2.32.0
   cloud_firestore: ^4.15.5
   app_links: ^6.3.2

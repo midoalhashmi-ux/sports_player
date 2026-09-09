@@ -10,6 +10,7 @@ import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
 import 'services/ad_service.dart';
 import 'services/version_check_service.dart';
+import 'theme/app_theme.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -94,7 +95,7 @@ class _BootAppState extends State<_BootApp> {
     if (forceUpdateInfo != null) {
       return MaterialApp(
         debugShowCheckedModeBanner: false,
-        theme: ThemeData.dark(useMaterial3: true),
+        theme: AppTheme.dark,
         locale: const Locale('ar'),
         home: ForceUpdateScreen(info: forceUpdateInfo),
       );
@@ -106,11 +107,11 @@ class _BootAppState extends State<_BootApp> {
 class _LoadingApp extends StatelessWidget {
   const _LoadingApp();
   @override
-  Widget build(BuildContext context) => const MaterialApp(
+  Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
-        home: Scaffold(
-          backgroundColor: Colors.black,
-          body: Center(child: CircularProgressIndicator(color: Colors.white)),
+        theme: AppTheme.dark,
+        home: const Scaffold(
+          body: Center(child: CircularProgressIndicator()),
         ),
       );
 }
@@ -121,14 +122,13 @@ class _ErrorApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) => MaterialApp(
         debugShowCheckedModeBanner: false,
+        theme: AppTheme.dark,
         home: Scaffold(
-          backgroundColor: Colors.black,
           body: Center(
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Text('تعذر بدء تطبيق المشغل.\n\n$error',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white)),
+                  textAlign: TextAlign.center),
             ),
           ),
         ),
@@ -211,7 +211,7 @@ class _PlayerAppState extends State<PlayerApp> {
       navigatorKey: navigatorKey,
       title: 'BinSheikh Player',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(useMaterial3: true),
+      theme: AppTheme.dark,
       locale: const Locale('ar'),
       // لا توجد شاشة بداية (Splash) في تطبيق المشغل إطلاقاً — شاشة
       // البداية موجودة فقط في التطبيق العادي (BinSheikh). إذا فُتح
