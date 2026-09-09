@@ -20,4 +20,21 @@ class PlayerVisibilityService {
       return true;
     }
   }
+
+  /// Reads the optional hidden diagnostic-log button switch from
+  /// settings/player.diagnosticLogEnabled. Defaults to false so the button
+  /// stays invisible for every user unless explicitly turned on from the
+  /// dashboard.
+  static Future<bool> loadDiagnosticLogEnabled() async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('settings')
+          .doc('player')
+          .get();
+      final value = snapshot.data()?['diagnosticLogEnabled'];
+      return value is bool ? value : false;
+    } catch (_) {
+      return false;
+    }
+  }
 }
