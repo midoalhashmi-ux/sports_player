@@ -4131,7 +4131,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             margin: const EdgeInsets.only(top: 12, left: 16, right: 16),
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             decoration: BoxDecoration(
-              color: Colors.black.withOpacity(0.78),
+              color: Colors.black.withValues(alpha: 0.78),
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: Colors.white24),
             ),
@@ -4210,7 +4210,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       child: Tooltip(
         message: tooltip,
         child: Material(
-          color: Colors.black.withOpacity(0.35),
+          color: Colors.black.withValues(alpha: 0.35),
           shape: const CircleBorder(),
           child: InkWell(
             customBorder: const CircleBorder(),
