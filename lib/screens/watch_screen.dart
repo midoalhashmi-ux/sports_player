@@ -1222,7 +1222,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               window.__sportsPlayerMediaCandidates.push(v);
             }
             if (/\.(m3u8|m3u)(?:$|[?#])/i.test(v) ||
-                /(?:master|playlist|manifest|hls)(?:[?&=\/]|$)/i.test(v)) {
+                /(?:master|playlist|manifest|hls)(?:[.?&=\/]|$)/i.test(v)) {
               report({
                 type:'hls_candidate',
                 url:v,
@@ -1557,6 +1557,22 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                        } else {
                          reportPayloadCandidates(JSON.parse(this.responseText), 'xhr-json');
                        }
+                       return;
+                     }
+                     // بعض مواقع الأفلام تطلب responseType=arraybuffer/blob عمداً
+                     // حتى لا يستطيع أي فاحص بسيط قراءة this.responseText مباشرة.
+                     // نفك ترميز البايتات هنا كنص UTF-8 ونطبّق نفس فحص #EXTM3U.
+                     if (this.response instanceof ArrayBuffer) {
+                       const text = new TextDecoder('utf-8').decode(this.response);
+                       if (manifestText(text)) {
+                         reportManifest(responseUrl, 'xhr-manifest-buffer', responseMime);
+                       }
+                     } else if (this.response instanceof Blob) {
+                       this.response.text().then((text) => {
+                         if (manifestText(text)) {
+                           reportManifest(responseUrl, 'xhr-manifest-blob', responseMime);
+                         }
+                       }).catch(() => {});
                      }
                    } catch (_) {}
                  });
