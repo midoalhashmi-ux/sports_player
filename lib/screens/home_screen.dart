@@ -9,6 +9,7 @@ import '../services/ad_service.dart';
 import '../services/feature_flags_service.dart';
 import '../services/saved_link_service.dart';
 import '../services/session_log_service.dart';
+import '../theme/app_theme.dart';
 import 'add_url_screen.dart';
 import 'contact_screen.dart';
 import 'terms_privacy_screen.dart';
@@ -187,9 +188,29 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Future<void> _delete(SavedLink link) async {
-    await SavedLinkService.delete(link.id);
-    _reload();
+  Future<void> _confirmDelete(SavedLink link) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('حذف الرابط؟'),
+        content: Text('راح يُحذف "${link.title}" نهائياً من قائمتك.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('إلغاء'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await SavedLinkService.delete(link.id);
+      _reload();
+    }
   }
 
   void _openContact() {
@@ -215,6 +236,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
     return Scaffold(
       appBar: AppBar(
         title: const Text('BinSheikh Player'),
@@ -226,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-      drawer: _buildDrawer(),
+      drawer: _buildDrawer(accent),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: _openAddUrl,
         icon: const Icon(Icons.add),
@@ -239,7 +261,7 @@ class _HomeScreenState extends State<HomeScreen> {
           // ولا يظهر بشكل معطّل عند الإخفاء.
           if (_premiumEnabled)
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
               child: SizedBox(
                 width: double.infinity,
                 child: ElevatedButton.icon(
@@ -249,90 +271,48 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFFFFC107),
                     foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
                   ),
                 ),
               ),
             ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: Text(
-                'الروابط المحفوظة',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+            child: Row(
+              children: [
+                Text(
+                  'الروابط المحفوظة',
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w700,
+                      ),
                 ),
-              ),
+                const Spacer(),
+                if (_links.isNotEmpty)
+                  Text(
+                    '${_links.length}',
+                    style: TextStyle(
+                      color: AppTheme.onSurfaceMuted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+              ],
             ),
           ),
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : _links.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.live_tv_outlined,
-                                size: 48, color: Colors.white38),
-                            const SizedBox(height: 12),
-                            const Text(
-                              'لا توجد روابط محفوظة',
-                              style:
-                                  TextStyle(color: Colors.white54, fontSize: 16),
-                            ),
-                            const SizedBox(height: 6),
-                            const Text(
-                              'اضغط "إضافة رابط" لإضافة رابط بث أو أي مصدر تشغيله',
-                              textAlign: TextAlign.center,
-                              style:
-                                  TextStyle(color: Colors.white38, fontSize: 13),
-                            ),
-                            const SizedBox(height: 16),
-                            OutlinedButton.icon(
-                              onPressed: _openAddUrl,
-                              icon: const Icon(Icons.add_link),
-                              label: const Text('إضافة رابط الآن'),
-                            ),
-                          ],
-                        ),
-                      )
+                    ? _buildEmptyState(accent)
                     : ListView.separated(
-                        padding: const EdgeInsets.all(12),
+                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                         itemCount: _links.length,
-                        separatorBuilder: (_, __) => const SizedBox(height: 8),
-                        itemBuilder: (context, index) {
-                          final link = _links[index];
-                          return Card(
-                            child: ListTile(
-                              title: Text(link.title),
-                              subtitle: Text(
-                                link.url,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              onTap: () => _play(link),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    tooltip: 'تعديل',
-                                    icon: const Icon(Icons.edit_outlined),
-                                    onPressed: () => _openEditUrl(link),
-                                  ),
-                                  IconButton(
-                                    tooltip: 'حذف',
-                                    icon: const Icon(Icons.delete_outline),
-                                    onPressed: () => _delete(link),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        },
+                        separatorBuilder: (_, __) => const SizedBox(height: 10),
+                        itemBuilder: (context, index) => _LinkCard(
+                          link: _links[index],
+                          accent: accent,
+                          onTap: () => _play(_links[index]),
+                          onEdit: () => _openEditUrl(_links[index]),
+                          onDelete: () => _confirmDelete(_links[index]),
+                        ),
                       ),
           ),
           // بانر الإعلانات — في الشاشة الرئيسية فقط، لا يظهر إطلاقاً في
@@ -348,69 +328,212 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  Widget _buildDrawer() {
+  Widget _buildEmptyState(Color accent) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 84,
+              height: 84,
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.live_tv_outlined, size: 40, color: accent),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              'لا توجد روابط محفوظة بعد',
+              style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'أضف رابط بث أو أي مصدر فيديو لتشغيله من هنا مباشرة',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: AppTheme.onSurfaceMuted, height: 1.4),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton.icon(
+              onPressed: _openAddUrl,
+              icon: const Icon(Icons.add_link),
+              label: const Text('إضافة رابط الآن'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDrawer(Color accent) {
     return Drawer(
       child: SafeArea(
-        child: ListView(
-          padding: EdgeInsets.zero,
+        child: Column(
           children: [
-            const DrawerHeader(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                crossAxisAlignment: CrossAxisAlignment.start,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 28, 20, 20),
+              child: Row(
                 children: [
-                  Icon(Icons.live_tv, size: 40, color: Colors.white),
-                  SizedBox(height: 8),
-                  Text('BinSheikh Player',
-                      style: TextStyle(color: Colors.white, fontSize: 18)),
+                  Container(
+                    width: 52,
+                    height: 52,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.15),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(Icons.live_tv, color: accent, size: 28),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(
+                    child: Text(
+                      'BinSheikh Player',
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                    ),
+                  ),
                 ],
               ),
             ),
-            ListTile(
-              leading: const Icon(Icons.mail_outline),
-              title: const Text('اتصل بنا'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _openContact();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.share_outlined),
-              title: const Text('مشاركة التطبيق'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _shareApp();
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.star_outline),
-              title: const Text('قيّم التطبيق'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _rateApp();
-              },
-            ),
-            const Divider(),
-            ListTile(
-              leading: const Icon(Icons.description_outlined),
-              title: const Text('الشروط والخصوصية'),
-              onTap: () {
-                Navigator.of(context).pop();
-                _openTermsPrivacy();
-              },
-            ),
-            // مخفي تماماً ما لم يُفعَّل صراحةً من لوحة التحكم — أداة تشخيص
-            // داخلية، ليست ميزة للمستخدم العادي.
-            if (_debugLogButtonEnabled)
-              ListTile(
-                leading: const Icon(Icons.bug_report_outlined),
-                title: const Text('تصدير سجل التشخيص'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  _exportDebugLog();
-                },
+            const Divider(height: 1),
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                children: [
+                  _drawerItem(
+                    icon: Icons.mail_outline,
+                    label: 'اتصل بنا',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _openContact();
+                    },
+                  ),
+                  _drawerItem(
+                    icon: Icons.share_outlined,
+                    label: 'مشاركة التطبيق',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _shareApp();
+                    },
+                  ),
+                  _drawerItem(
+                    icon: Icons.star_outline,
+                    label: 'قيّم التطبيق',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _rateApp();
+                    },
+                  ),
+                  const Divider(height: 24),
+                  _drawerItem(
+                    icon: Icons.description_outlined,
+                    label: 'الشروط والخصوصية',
+                    onTap: () {
+                      Navigator.of(context).pop();
+                      _openTermsPrivacy();
+                    },
+                  ),
+                  // مخفي تماماً ما لم يُفعَّل صراحةً من لوحة التحكم — أداة
+                  // تشخيص داخلية، ليست ميزة للمستخدم العادي.
+                  if (_debugLogButtonEnabled)
+                    _drawerItem(
+                      icon: Icons.bug_report_outlined,
+                      label: 'تصدير سجل التشخيص',
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        _exportDebugLog();
+                      },
+                    ),
+                ],
               ),
+            ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerItem({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      leading: Icon(icon),
+      title: Text(label),
+      onTap: onTap,
+    );
+  }
+}
+
+class _LinkCard extends StatelessWidget {
+  final SavedLink link;
+  final Color accent;
+  final VoidCallback onTap;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  const _LinkCard({
+    required this.link,
+    required this.accent,
+    required this.onTap,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Container(
+                width: 46,
+                height: 46,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.14),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(Icons.play_arrow_rounded, color: accent),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      link.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      link.url,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: AppTheme.onSurfaceMuted, fontSize: 12.5),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                tooltip: 'تعديل',
+                icon: const Icon(Icons.edit_outlined, size: 21),
+                onPressed: onEdit,
+              ),
+              IconButton(
+                tooltip: 'حذف',
+                icon: const Icon(Icons.delete_outline, size: 21),
+                color: Colors.redAccent,
+                onPressed: onDelete,
+              ),
+            ],
+          ),
         ),
       ),
     );

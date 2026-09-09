@@ -24,10 +24,10 @@ class ForceUpdateScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
     return PopScope(
       canPop: false,
       child: Scaffold(
-        backgroundColor: Colors.black,
         body: SafeArea(
           child: Center(
             child: Padding(
@@ -35,44 +35,37 @@ class ForceUpdateScreen extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Icon(Icons.system_update_alt_rounded,
-                      color: Colors.white, size: 64),
-                  const SizedBox(height: 24),
+                  Container(
+                    width: 96,
+                    height: 96,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.14),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(Icons.system_update_alt_rounded,
+                        color: accent, size: 46),
+                  ),
+                  const SizedBox(height: 28),
                   const Text(
                     'يوجد تحديث جديد',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
                     textAlign: TextAlign.center,
                   ),
                   const SizedBox(height: 12),
-                  const Text(
+                  Text(
                     'الإصدار الحالي من التطبيق قديم ولا يمكن الاستمرار به.\n'
                     'يرجى تحميل آخر تحديث للمتابعة.',
-                    style: TextStyle(color: Colors.white70, fontSize: 15),
+                    style: TextStyle(color: Colors.white.withValues(alpha: 0.7), fontSize: 15, height: 1.5),
                     textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 32),
+                  const SizedBox(height: 36),
                   SizedBox(
                     width: double.infinity,
+                    height: 52,
                     child: ElevatedButton.icon(
                       onPressed: () => _openUpdateUrl(context),
                       icon: const Icon(Icons.download_rounded),
                       label: const Text('تحميل التحديث'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        textStyle: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
                     ),
                   ),
                 ],

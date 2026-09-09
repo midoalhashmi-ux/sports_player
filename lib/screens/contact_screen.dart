@@ -56,44 +56,70 @@ class _ContactScreenState extends State<ContactScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.primary;
     return Scaffold(
       appBar: AppBar(title: const Text('اتصل بنا')),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const Text(
-              'راسلنا لأي استفسار أو مشكلة تواجهك أثناء المشاهدة.',
-              style: TextStyle(color: Colors.white70),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(14),
             ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _nameController,
-              decoration: const InputDecoration(labelText: 'الاسم (اختياري)'),
+            child: Row(
+              children: [
+                Icon(Icons.support_agent_outlined, color: accent),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'راسلنا لأي استفسار أو مشكلة تواجهك أثناء المشاهدة، وبنرد عليك بأقرب وقت.',
+                    style: TextStyle(height: 1.4),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _messageController,
-              maxLines: 5,
-              decoration: const InputDecoration(
-                labelText: 'رسالتك',
-                alignLabelWithHint: true,
+          ),
+          const SizedBox(height: 24),
+          TextField(
+            controller: _nameController,
+            textInputAction: TextInputAction.next,
+            decoration: const InputDecoration(
+              labelText: 'الاسم (اختياري)',
+              prefixIcon: Icon(Icons.person_outline),
+            ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _messageController,
+            maxLines: 5,
+            decoration: const InputDecoration(
+              labelText: 'رسالتك',
+              alignLabelWithHint: true,
+              prefixIcon: Padding(
+                padding: EdgeInsets.only(bottom: 80),
+                child: Icon(Icons.message_outlined),
               ),
             ),
-            const SizedBox(height: 20),
-            FilledButton(
+          ),
+          const SizedBox(height: 24),
+          SizedBox(
+            height: 50,
+            child: FilledButton.icon(
               onPressed: _sending ? null : _send,
-              child: _sending
+              icon: _sending
                   ? const SizedBox(
                       height: 18,
                       width: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
                     )
-                  : const Text('إرسال'),
+                  : const Icon(Icons.send_rounded, size: 19),
+              label: Text(_sending ? 'جاري الإرسال…' : 'إرسال'),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

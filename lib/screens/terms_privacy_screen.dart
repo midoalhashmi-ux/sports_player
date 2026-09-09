@@ -91,10 +91,10 @@ class _TermsPrivacyScreenState extends State<TermsPrivacyScreen> {
 
   Widget _buildTextTab(String text) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(20),
       child: Text(
         text,
-        style: const TextStyle(color: Colors.white70, height: 1.6),
+        style: TextStyle(color: Colors.white.withValues(alpha: 0.85), height: 1.7, fontSize: 14.5),
       ),
     );
   }

@@ -51,6 +51,13 @@ class AppTheme {
         ),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
+      tabBarTheme: TabBarThemeData(
+        labelColor: accent,
+        unselectedLabelColor: onSurfaceMuted,
+        indicatorColor: accent,
+        labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+        unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+      ),
       cardTheme: CardThemeData(
         color: surface,
         elevation: 0,
@@ -86,6 +93,15 @@ class AppTheme {
         style: TextButton.styleFrom(
           foregroundColor: accent,
           textStyle: const TextStyle(fontWeight: FontWeight.w600),
+        ),
+      ),
+      filledButtonTheme: FilledButtonThemeData(
+        style: FilledButton.styleFrom(
+          backgroundColor: accent,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          textStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
         ),
       ),
       iconButtonTheme: IconButtonThemeData(

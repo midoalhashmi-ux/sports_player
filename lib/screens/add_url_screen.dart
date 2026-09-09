@@ -73,46 +73,54 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(widget.isEditing ? 'تعديل الرابط' : 'إضافة رابط'),
+        title: Text(widget.isEditing ? 'تعديل الرابط' : 'إضافة رابط جديد'),
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            TextField(
-              controller: _titleController,
-              decoration: const InputDecoration(labelText: 'العنوان'),
+      body: ListView(
+        padding: const EdgeInsets.all(20),
+        children: [
+          TextField(
+            controller: _titleController,
+            textInputAction: TextInputAction.next,
+            decoration: const InputDecoration(
+              labelText: 'العنوان',
+              prefixIcon: Icon(Icons.title_outlined),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _urlController,
-              decoration: const InputDecoration(labelText: 'الرابط'),
-              keyboardType: TextInputType.url,
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _urlController,
+            keyboardType: TextInputType.url,
+            textInputAction: TextInputAction.next,
+            decoration: const InputDecoration(
+              labelText: 'رابط البث',
+              prefixIcon: Icon(Icons.link_rounded),
             ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _userAgentController,
-              decoration: const InputDecoration(
-                labelText: 'User Agent',
-                helperText: 'اختياري',
-              ),
+          ),
+          const SizedBox(height: 14),
+          TextField(
+            controller: _userAgentController,
+            decoration: const InputDecoration(
+              labelText: 'User Agent',
+              helperText: 'اختياري — لبعض الروابط التي تتطلب متصفحاً محدداً',
+              prefixIcon: Icon(Icons.perm_device_information_outlined),
             ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _saving ? null : _save,
-                child: _saving
-                    ? const SizedBox(
-                        height: 18,
-                        width: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Text(widget.isEditing ? 'حفظ التعديلات' : 'حفظ'),
-              ),
+          ),
+          const SizedBox(height: 28),
+          SizedBox(
+            height: 50,
+            child: FilledButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                  ? const SizedBox(
+                      height: 18,
+                      width: 18,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: Colors.white),
+                    )
+                  : Text(widget.isEditing ? 'حفظ التعديلات' : 'حفظ الرابط'),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

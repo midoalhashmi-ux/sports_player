@@ -23,6 +23,7 @@ import '../services/api_source_resolver.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
 import '../services/session_log_service.dart';
+import '../theme/app_theme.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -3497,7 +3498,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _openSpeedSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF141414),
+      backgroundColor: AppTheme.surface,
       builder: (context) {
         return SafeArea(
           child: ListView(
@@ -3640,7 +3641,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (session == null) return;
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF141414),
+      backgroundColor: AppTheme.surface,
       builder: (context) {
         return SafeArea(
           child: ListView(
@@ -4054,7 +4055,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             height: 34,
             child: CircularProgressIndicator(
               strokeWidth: 3.2,
-              color: Colors.redAccent,
+              color: AppTheme.accent,
             ),
           ),
           const SizedBox(height: 14),
@@ -4425,7 +4426,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _openMoreOptionsSheet() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF141414),
+      backgroundColor: AppTheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
