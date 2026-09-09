@@ -1,11 +1,14 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cross_file/cross_file.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/ad_service.dart';
+import '../services/feature_flags_service.dart';
 import '../services/saved_link_service.dart';
+import '../services/session_log_service.dart';
 import 'add_url_screen.dart';
 import 'contact_screen.dart';
 import 'terms_privacy_screen.dart';
@@ -34,6 +37,11 @@ class _HomeScreenState extends State<HomeScreen> {
   String _premiumUrl = '';
   String _premiumButtonText = 'الاشتراك المميز';
 
+  // زر "تصدير سجل التشخيص" — مخفي تماماً افتراضياً، ولا يظهر إلا لو فعّله
+  // المطوّر من لوحة التحكم (settings/features.debugLogButtonEnabled). راجع
+  // FeatureFlagsService لتفاصيل القيمة الافتراضية الآمنة (fail-safe = مخفي).
+  bool _debugLogButtonEnabled = false;
+
   BannerAd? _bannerAd;
   bool _bannerFailed = false;
 
@@ -43,6 +51,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _reload();
     _loadStoreUrl();
     _loadPremiumSettings();
+    _loadDebugLogSetting();
     // تهيئة خدمة الإعلانات هنا (بدل main.dart المحمي) — آمنة الاستدعاء
     // أكثر من مرة، وتضمن أن الإعلان البيني يكون جاهزاً غالباً قبل ما
     // يفتح المستخدم أول قناة.
@@ -111,6 +120,26 @@ class _HomeScreenState extends State<HomeScreen> {
     final uri = Uri.tryParse(_premiumUrl);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+
+  Future<void> _loadDebugLogSetting() async {
+    await FeatureFlagsService.instance.ensureLoaded();
+    if (!mounted) return;
+    setState(() {
+      _debugLogButtonEnabled = FeatureFlagsService.instance.debugLogButtonEnabled;
+    });
+  }
+
+  Future<void> _exportDebugLog() async {
+    final file = await SessionLogService.instance.exportAsTxt();
+    if (!mounted) return;
+    if (file == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('لا يوجد سجل تشخيص بعد — شغّل قناة أولاً ثم أعد المحاولة')),
+      );
+      return;
+    }
+    await Share.shareXFiles([XFile(file.path)], text: 'سجل تشخيص BinSheikh Player');
   }
 
   void _loadBanner() {
@@ -370,6 +399,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 _openTermsPrivacy();
               },
             ),
+            // مخفي تماماً ما لم يُفعَّل صراحةً من لوحة التحكم — أداة تشخيص
+            // داخلية، ليست ميزة للمستخدم العادي.
+            if (_debugLogButtonEnabled)
+              ListTile(
+                leading: const Icon(Icons.bug_report_outlined),
+                title: const Text('تصدير سجل التشخيص'),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _exportDebugLog();
+                },
+              ),
           ],
         ),
       ),

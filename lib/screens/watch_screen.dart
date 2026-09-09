@@ -21,6 +21,7 @@ import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/player_visibility_service.dart';
+import '../services/session_log_service.dart';
 
 enum _LoadState { loading, error, ready }
 
@@ -197,6 +198,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    SessionLogService.instance.startSession(
+      'channelId=${widget.channelId} externalUrl=${widget.externalUrl}',
+    );
     // A video screen is landscape-first. The explicit orientation button
     // below is the only thing that switches it back to portrait.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -310,9 +314,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // fragment simply cannot be resolved over HTTP for ANY site, so the
       // only architecturally correct move is to hand the complete, unmodified
       // URL to WebView and let the page's own JavaScript route/render it.
+      _slog('RESOLVE_CHANNEL_URL', 'initialUrl=${_safeLogUrl(initialUrl)}');
       final parsedInitial = Uri.tryParse(initialUrl);
       final isSpaRoute = parsedInitial != null && parsedInitial.fragment.isNotEmpty;
       if (isSpaRoute) {
+        _slog('SPA_ROUTE_DETECTED', 'handing full URL to WebView unresolved');
         return StreamSession.success(
           kind: StreamKind.web,
           isLive: true,
@@ -332,8 +338,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         headers: _headers,
         maxDepth: 3,
       );
+      _slog('API_SOURCE_RESOLVER', 'candidates=${apiCandidates.length}');
       for (final candidate in apiCandidates.take(5)) {
-        if (!_isDirectPlayable(candidate.url)) continue;
+        if (!_isDirectPlayable(candidate.url)) {
+          _slog('API_CANDIDATE_SKIPPED', 'url=${_safeLogUrl(candidate.url)} reason=not_direct_playable');
+          continue;
+        }
         _resolvedStreamHeaders = candidate.headers;
         final lower = candidate.url.toLowerCase();
         final kind = (lower.contains('.m3u8') || lower.contains('.m3u')) ? StreamKind.hls
@@ -344,6 +354,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // are played the same as HLS/MP4 — see _playServerQuality's
         // formatHint, which is what actually tells ExoPlayer to use its DASH
         // extractor instead of guessing from the URL alone.
+        _slog('API_CANDIDATE_ACCEPTED', 'url=${_safeLogUrl(candidate.url)} kind=$kind');
         return StreamSession.success(
           kind: kind,
           isLive: true,
@@ -358,8 +369,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
       final resolvedUrl = await _resolveStreamUrl(initialUrl);
       if (resolvedUrl == null) {
+        _slog('RESOLVE_STREAM_URL_FAILED', 'initialUrl=${_safeLogUrl(initialUrl)}');
         return StreamSession.failure('تعذر حل رابط البث.');
       }
+      _slog('RESOLVE_STREAM_URL_RESULT', 'resolvedUrl=${_safeLogUrl(resolvedUrl)}');
 
       final lower = resolvedUrl.toLowerCase();
       final isHls = lower.contains('.m3u8') || lower.contains('.m3u');
@@ -436,18 +449,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
       if (response.statusCode >= 300 && response.statusCode < 400) {
         final location = response.headers['location'];
-        if (location == null || location.isEmpty) return null;
+        if (location == null || location.isEmpty) {
+          _slog('FETCH_HOP', 'url=${_safeLogUrl(currentUrl)} status=${response.statusCode} reason=empty_redirect_location');
+          return null;
+        }
         final next = uri.resolve(location).toString();
+        _slog('FETCH_HOP_REDIRECT', 'from=${_safeLogUrl(currentUrl)} to=${_safeLogUrl(next)} status=${response.statusCode}');
         return _ResolvedPublicUrl(next, headers);
       }
 
-      if (response.statusCode < 200 || response.statusCode >= 400) return null;
+      if (response.statusCode < 200 || response.statusCode >= 400) {
+        _slog('FETCH_HOP', 'url=${_safeLogUrl(currentUrl)} status=${response.statusCode} reason=bad_status');
+        return null;
+      }
 
       final responseHeaders = <String, String>{...headers};
       final body = response.body;
 
       if (contentType.contains('mpegurl') || contentType.contains('dash+xml') ||
           _isDirectPlayable(currentUrl) || _containsMediaMarker(body)) {
+        _slog('FETCH_HOP_DIRECT_MEDIA', 'url=${_safeLogUrl(currentUrl)} contentType=$contentType');
         return _ResolvedPublicUrl(currentUrl, responseHeaders);
       }
 
@@ -468,7 +489,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
 
       return _ResolvedPublicUrl(currentUrl, responseHeaders);
-    } catch (_) {
+    } catch (e) {
+      _slog('FETCH_HOP_EXCEPTION', 'url=${_safeLogUrl(currentUrl)} error=$e');
       return null;
     } finally {
       client.close();
@@ -789,6 +811,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (kDebugMode) debugPrint('[$scope] $message');
   }
 
+  // يسجّل بسجل التشخيص القابل للتصدير (SessionLogService) — منفصل تماماً
+  // عن _smartLog (الذي يطبع فقط بوضع التطوير)، حتى يبقى متاحاً بنسخة
+  // الإنتاج عند تفعيل زر التشخيص من لوحة التحكم.
+  void _slog(String phase, [String details = '']) {
+    SessionLogService.instance.log(phase, details);
+  }
+
   String _safeLogUrl(String value) {
     final uri = Uri.tryParse(value);
     if (uri == null) return '<invalid-url>';
@@ -935,7 +964,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final host = uri.host.toLowerCase();
     final pathAndQuery = '${uri.path}?${uri.query}'.toLowerCase();
     return RegExp(
-      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder|app-install|download-app|push-notification)',
+      r'(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|interstitial|clickunder|app-install|download-app|push-notification)',
       caseSensitive: false,
     ).hasMatch('$host $pathAndQuery') ||
         RegExp(
@@ -956,6 +985,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final type = decoded['type']?.toString() ?? '';
     _captureMessageWebContext(decoded);
     if (type == 'drm_detected') {
+      _slog('DRM_DETECTED', 'system=${decoded['system']}');
       if (!mounted) return;
       setState(() {
         _webDrmDetected = true;
@@ -974,6 +1004,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
       _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
       _webLastMediaEvidenceAt = DateTime.now();
+      _slog(
+        'MEDIA_RESOURCE',
+        'url=${_safeLogUrl(rawResourceUrl)} segmentEvidence=$segmentEvidence score=$_webMediaEvidenceScore hits=$_webMediaResourceHits',
+      );
       if (_looksLikeHls(rawResourceUrl)) {
         _registerWebCandidate(
           rawResourceUrl,
@@ -993,6 +1027,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _webLastMediaEvidenceAt = DateTime.now();
       _extendWebStartupDeadline(const Duration(seconds: 10));
       _smartLog('VIDEOJS', 'player detected');
+      _slog('VIDEOJS_PLAYER_DETECTED', 'score=$_webMediaEvidenceScore');
       return;
     }
     if (type == 'hls_candidate') {
@@ -1012,6 +1047,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _webLastMediaEvidenceAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 5));
         _smartLog('HLS', 'network candidate event received');
+        _slog(
+          'HLS_CANDIDATE_FROM_JS',
+          'url=${_safeLogUrl(rawUrl)} source=${decoded['source']} mime=${decoded['mime']} score=$_webMediaEvidenceScore',
+        );
       }
       return;
     }
@@ -1030,6 +1069,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             'PLAYBACK',
             'web evidence: playing=$playing currentTime=${currentTime.toStringAsFixed(2)}',
           );
+          _slog(
+            'WEB_PLAYBACK_EVIDENCE',
+            'playing=$playing ready=$ready currentTime=${currentTime.toStringAsFixed(2)} score=$_webMediaEvidenceScore',
+          );
           // Do not switch UI on this event alone. The sentinel still needs
           // two snapshots, and the native gate still needs a validated source.
           unawaited(_confirmWebPlaybackAndKickDetection(controller));
@@ -1045,6 +1088,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (rawUrl == _webLastPromotedIframeUrl || _webIframePromotionInFlight || _webIframePromotionAttempts >= 2) return;
     if (_webPlaybackReady || _webDrmDetected) return;
     final shouldPromote = score >= 88 || (_webInteractionAttempts > 0 && score >= 70);
+    _slog(
+      'IFRAME_CANDIDATE',
+      'url=${_safeLogUrl(rawUrl)} score=$score shouldPromote=$shouldPromote interactionAttempts=$_webInteractionAttempts',
+    );
     if (!shouldPromote) return;
     unawaited(_promoteIframeToPlayerDocument(controller, rawUrl, score));
   }
@@ -1069,6 +1116,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Future<void> _promoteIframeToPlayerDocument(
       WebViewController controller, String iframeUrl, int score) async {
     if (!mounted || _webIframePromotionInFlight || _webIframePromotionAttempts >= 2 || _webPlaybackReady || _webDrmDetected) return;
+    _slog('IFRAME_PROMOTE_START', 'url=${_safeLogUrl(iframeUrl)} score=$score attempt=${_webIframePromotionAttempts + 1}');
     _webIframePromotionInFlight = true;
     _webIframePromotionAttempts++;
     _webLastPromotedIframeUrl = iframeUrl;
@@ -1086,8 +1134,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final current = _webController;
         if (current == null) return;
         final proof = await _webPlaybackSentinel(current);
-        if (proof || _webMediaEvidenceScore >= 60) return;
+        if (proof || _webMediaEvidenceScore >= 60) {
+          _slog('IFRAME_PROMOTE_CONFIRMED', 'url=${_safeLogUrl(iframeUrl)} proof=$proof score=$_webMediaEvidenceScore');
+          return;
+        }
         if (_webIframePromotionAttempts < 2 && parentUrl != null && parentUrl.isNotEmpty) {
+          _slog('IFRAME_PROMOTE_TIMEOUT_REVERT', 'url=${_safeLogUrl(iframeUrl)} backTo=${_safeLogUrl(parentUrl)}');
           _webPromotedPlayerMode = false;
           _webSourceOrigin = Uri.tryParse(parentUrl)?.host;
           try {
@@ -1145,7 +1197,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             const p = (u.pathname || '').toLowerCase();
              const raw = String(url || '').toLowerCase();
              if (!/^https?:$/i.test(u.protocol)) return true;
-            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|app-install|push-notification)/i.test(`${h} ${p}`) ||
+            return /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|onclick|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|app-install|push-notification)/i.test(`${h} ${p}`) ||
                /(popup|popunder|clickunder|interstitial|advertisement|ads?\b|otp|one[- ]?time|verification|verify|passcode|pin|subscription|subscribe|phone|mobile|credit[- ]?card|download-app)/i.test(`${p} ${u.search} ${raw}`);
           } catch (_) { return false; }
         };
@@ -1340,7 +1392,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               const st = getComputedStyle(f);
               if (r.width < 180 || r.height < 100 || st.display === 'none' || st.visibility === 'hidden') return;
               const text = `${src} ${f.id || ''} ${f.className || ''}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
+            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
               let score = 10;
               if (r.width >= 320 && r.height >= 180) score += 25;
               else if (r.width >= 250 && r.height >= 140) score += 15;
@@ -1364,7 +1416,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           try {
             const u = new URL(url, location.href);
             const h = `${u.hostname} ${u.pathname} ${u.search}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
+            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
             return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(h) ||
               /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/i.test(h);
           } catch (_) { return false; }
@@ -1781,7 +1833,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           performance.getEntriesByType('resource').forEach((e) => {
             const n = String(e.name || '').toLowerCase();
             if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(n) || /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/.test(n)) {
-              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
+              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
             }
           });
         } catch (_) {}
@@ -1822,7 +1874,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Future<String?> _findBestIframeCandidate(WebViewController controller) async {
     try {
       final result = await controller.runJavaScriptReturningResult(r'''(() => {
-        const bad = /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|clickunder|interstitial)/i;
+        const bad = /(doubleclick|googlesyndication|googleadservices|adservice|adnxs|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|outbrain|taboola|mgid|criteo|scorecardresearch|popup|popunder|clickunder|interstitial)/i;
         const out = [];
         document.querySelectorAll('iframe').forEach((f) => {
           const src = (f.src || f.getAttribute('src') || '').trim();
@@ -2256,6 +2308,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webDetectorTimer?.cancel();
     final generation = _webSessionGeneration;
     var attempts = 0;
+    _slog('AUTO_DETECT_START', 'generation=$generation');
     _setWebSessionState(_WebSessionState.discovering);
 
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
@@ -2288,6 +2341,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         }
         if (verifying) {
           if (_webSessionState != _WebSessionState.humanVerificationRequired) {
+            _slog('HUMAN_VERIFICATION_DETECTED', 'revealing real page to user, pausing auto-detect');
             _webHumanVerificationDetected = true;
             // Keep a real challenge visible and interactive. We do not solve
             // it; we only hand the page back to the user.
@@ -2299,6 +2353,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           return;
         }
         if (_webHumanVerificationDetected) {
+          _slog('HUMAN_VERIFICATION_CLEARED', 'resuming auto-detect');
           _webHumanVerificationDetected = false;
           _setWebSessionState(_WebSessionState.discovering);
           if (mounted) setState(() {});
@@ -2306,6 +2361,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
 
       if (attempts++ >= 15) {
+        _slog('AUTO_DETECT_BUDGET_EXHAUSTED', 'attempts=$attempts generation=$generation mediaEvidence=$_webMediaEvidenceScore mediaHits=$_webMediaResourceHits');
         timer.cancel();
         _webDetectorTimer = null;
         if (_webSessionIsActive(generation) && _webSessionState == _WebSessionState.discovering) {
@@ -2358,6 +2414,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           final candidateHost = candidateUri?.host.toLowerCase() ?? '';
           final currentHost = _webSourceOrigin?.toLowerCase() ?? '';
           final playerish = RegExp(r'(embed|shell|player|video|watch|stream|play|live)', caseSensitive: false).hasMatch(iframeCandidate);
+          _slog(
+            'IFRAME_POLL_CANDIDATE',
+            'url=${_safeLogUrl(iframeCandidate)} playerish=$playerish crossHost=${candidateHost != currentHost}',
+          );
           if (playerish || candidateHost != currentHost) {
             await _promoteIframeToPlayerDocument(controller, iframeCandidate, 80);
             return;
@@ -2385,9 +2445,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           ..._webCandidateRegistry.keys,
         }.toList();
         if (!_webSessionIsActive(generation)) return;
+        _slog(
+          'SOURCES_SCAN',
+          'attempt=$attempts framework=${frameworkSources.length} generic=${genericSources.length} registry=${_webCandidateRegistry.length} total=${sources.length}',
+        );
 
         if (_webInteractionAttempts < _webMaxInteractionAttempts && !await _webPlaybackSentinel(controller)) {
+          _slog('AUTO_CLICK_ATTEMPT', 'interactionAttempts=$_webInteractionAttempts/$_webMaxInteractionAttempts');
           final interacted = await _runSmartInteraction(controller);
+          _slog('AUTO_CLICK_RESULT', 'clicked=$interacted');
           if (interacted) {
             timer.cancel();
             _webDetectorTimer = null;
@@ -2406,26 +2472,39 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           final registryEvidence = registered?.evidenceScore ?? 0;
           _webCandidateEvidence[source] =
               (_webCandidateEvidence[source] ?? 0) + 1 + (registryEvidence ~/ 25);
-          if (score < 80) continue;
+          if (score < 80) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=score_too_low score=$score');
+            continue;
+          }
           final uri = Uri.tryParse(source);
           if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) continue;
-          if (!_canTrialNative(source)) continue;
+          if (!_canTrialNative(source)) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=cannot_trial_native');
+            continue;
+          }
 
           final evidence = _webCandidateEvidence[source] ?? 0;
           final strongHls =
               (registered?.type == 'hls' || _looksLikeHls(source)) &&
                   score >= 100;
           final strongFramework = frameworkSources.contains(sourceRaw) && score >= 80;
-          if (evidence < 2 && !strongHls && !strongFramework) continue;
+          if (evidence < 2 && !strongHls && !strongFramework) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=insufficient_evidence evidence=$evidence score=$score');
+            continue;
+          }
           // A URL observed in the browser is not enough. Native replay is
           // allowed only after the browser has proved real playback.
-          if (!webPlaybackProven && !_webPlaybackProven) continue;
+          if (!webPlaybackProven && !_webPlaybackProven) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=web_playback_not_proven_yet');
+            continue;
+          }
 
           _setWebSessionState(_WebSessionState.validating);
           // Best-effort validation. A negative validation is not fatal when
           // the browser has already supplied strong evidence (for example a
           // stream requiring Referer/Origin/cookies).
           final candidateHeaders = _headersForCandidate(source, registered);
+          _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
           final validated = await _validatePublicMediaSource(
             source,
             requestHeaders: candidateHeaders,
@@ -2435,7 +2514,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             'HLS',
             'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
           );
+          _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(source)} validated=$validated');
           if (!validated && evidence < 3 && !strongHls && !strongFramework) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=failed_validation');
             _setWebSessionState(_WebSessionState.discovering);
             continue;
           }
@@ -2446,6 +2527,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _extendWebStartupDeadline(const Duration(seconds: 12));
           _webSeenSources.add(source);
           _webCandidateLastReason[source] = 'validated candidate, evidence=$evidence, score=$score';
+          _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
           timer.cancel();
 
           final quality = StreamQuality(label: 'المصدر المكتشف تلقائياً', url: source);
@@ -2464,6 +2546,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // passed the gate. Keep the real page visible as the primary fallback.
         if (_webVidmolyPlayerMode) {
           if (_webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2) {
+            _slog('FALLBACK_TO_WEBVIEW', 'reason=vidmoly_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits');
             await _revealVidmolyPlayer(controller);
           }
           return;
@@ -2473,6 +2556,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               _webMediaResourceHits >= 1 ||
               webPlaybackProven ||
               _webPlaybackProven) {
+            _slog('FALLBACK_TO_WEBVIEW', 'reason=videojs_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits');
             await _revealVideoJsPlayer(controller);
           }
           return;
@@ -2626,6 +2710,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _openWebSource(String url) async {
+    _slog('OPEN_WEB_SOURCE', _safeLogUrl(url));
     _webDetectorTimer?.cancel();
     _webSessionGeneration++;
     _webSessionState = _WebSessionState.loadingPage;
@@ -2693,10 +2778,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           onNavigationRequest: (request) {
             if (_isDangerousWebUrl(request.url)) {
               _smartLog('NAV', 'blocked unsafe navigation');
+              _slog('NAV_BLOCKED_UNSAFE', _safeLogUrl(request.url));
               return NavigationDecision.prevent;
             }
-            if (!request.isMainFrame) return NavigationDecision.navigate;
+            if (!request.isMainFrame) {
+              _slog('NAV_SUBFRAME_ALLOWED', _safeLogUrl(request.url));
+              return NavigationDecision.navigate;
+            }
             if (!_isAllowedWebNavigation(request.url)) {
+              _slog('NAV_BLOCKED_DISALLOWED', _safeLogUrl(request.url));
               return NavigationDecision.prevent;
             }
             if (_webInitialLoadCompleted) {
@@ -2708,14 +2798,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 // them here can leave a working player stuck on its first page.
                 // Ad/popup hosts are still rejected by _isAllowedWebNavigation.
                 if (!_webPromotedPlayerMode) {
+                  _slog(
+                    'NAV_BLOCKED_CROSS_ORIGIN',
+                    'from=$originHost to=$requestHost promoted=$_webPromotedPlayerMode',
+                  );
                   return NavigationDecision.prevent;
                 }
               }
             }
+            _slog('NAV_ALLOWED', _safeLogUrl(request.url));
             return NavigationDecision.navigate;
           },
           onPageFinished: (finishedUrl) async {
             _webInitialLoadCompleted = true;
+            _slog('PAGE_FINISHED', _safeLogUrl(finishedUrl));
             // The initial source may be RistoAnime, then V11 promotes its
             // Vidmoly iframe to the main document. Re-evaluate the player mode
             // on every completed main-frame navigation so the promoted embed
@@ -2751,9 +2847,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               await _applyPlayerFocus(controller);
               if (_webVidmolyPlayerMode) {
                 _smartLog('VIDMOLY', 'player detected; priming JW/HTML5 controls');
+                _slog('KNOWN_PLAYER_DETECTED', 'vidmoly — showing WebView as ready, native trial skipped');
                 await _primeVidmolyPlayback(controller);
               } else if (_webVideoJsPlayerMode) {
                 _smartLog('VIDEOJS', 'player detected; priming Video.js/HTML5 controls');
+                _slog('KNOWN_PLAYER_DETECTED', 'video.js — showing WebView as ready, native trial skipped');
                 await _primeVideoJsPlayback(controller);
               }
               unawaited(_autoDetectWebSource(controller));
@@ -2767,10 +2865,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             setState(() => _state = _LoadState.loading);
             if (!_webDrmDetected) {
               _setWebSessionState(_WebSessionState.webReady);
+              _slog('KICK_AUTO_DETECT', 'from onPageFinished, generation=$_webSessionGeneration');
               unawaited(_autoDetectWebSource(controller));
+            } else {
+              _slog('DRM_ALREADY_DETECTED', 'skipping auto-detect after page load');
             }
           },
           onWebResourceError: (error) {
+            _slog(
+              'WEB_RESOURCE_ERROR',
+              'code=${error.errorCode} desc=${error.description} mainFrame=${error.isForMainFrame} sessionState=$_webSessionState',
+            );
             if (mounted && error.isForMainFrame == true && _webSessionState != _WebSessionState.candidateTrial && _webSessionState != _WebSessionState.nativePlaying) {
               setState(() {
                 _state = _LoadState.error;
@@ -2848,6 +2953,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _setWebSessionState(_WebSessionState.nativeTrial);
       _smartLog('NATIVE', 'trial started');
     }
+    _slog(
+      'PLAY_SERVER_QUALITY_START',
+      'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb',
+    );
     setState(() {
       _state = _LoadState.loading;
       // During a WebView-originated Native trial the browser is the
@@ -2900,6 +3009,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _setWebSessionState(_WebSessionState.nativePlaying);
         _smartLog('NATIVE', 'playback proof success; switching WebView -> Native');
       }
+      _slog(
+        'PLAY_SERVER_QUALITY_SUCCESS',
+        'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb — final state: ${fallbackToWeb ? 'NATIVE (switched from WebView)' : 'NATIVE (direct)'}',
+      );
       setState(() {
         _state = _LoadState.ready;
         if (fallbackToWeb) _isWebSource = false;
@@ -2926,6 +3039,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
            'QUARANTINE',
            'native candidate failed: ${_safeLogUrl(failedUrl)}',
          );
+        _slog(
+          'NATIVE_TRIAL_FAILED',
+          'url=${_safeLogUrl(failedUrl)} error=${_describePlaybackError(error)} rawError=$error nativeAttempts=$_webNativeAttempts/$_webMaxNativeAttempts — staying on WebView',
+        );
         _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
@@ -2944,12 +3061,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             }
           });
         } else {
+          _slog(
+            'NATIVE_TRIALS_GIVEN_UP',
+            'attempts=$_webNativeAttempts/$_webMaxNativeAttempts drmDetected=$_webDrmDetected — final state: WEBVIEW ONLY',
+          );
           _setWebSessionState(_webDrmDetected
               ? _WebSessionState.drmWebOnly
               : _WebSessionState.webReady);
         }
         return;
       }
+      _slog('PLAY_SERVER_QUALITY_FAILED', 'url=${_safeLogUrl(quality.url)} error=${_describePlaybackError(error)} rawError=$error');
       setState(() {
         _state = _LoadState.error;
         _errorMessage = _describePlaybackError(error);
@@ -3334,6 +3456,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    SessionLogService.instance.endSession('screen disposed (state=$_state, isWebSource=$_isWebSource)');
     _webDetectorTimer?.cancel();
     _webStartupTimeoutTimer?.cancel();
     _webPromotionFallbackTimer?.cancel();
@@ -3354,6 +3477,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   // ---------------------- تعديل _startSession (استخدام المعالجة الجديدة) ----------------------
   Future<void> _startSession() async {
+    _slog('START_SESSION', 'channelId=${widget.channelId} externalUrl=${widget.externalUrl}');
     setState(() => _state = _LoadState.loading);
 
     _resolvedStreamHeaders = null;
@@ -3410,9 +3534,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       var cmsResolverAvailable = true;
       try {
         cmsSession = await ChannelSourceResolver.resolve(channelId);
-      } catch (_) {
+      } catch (e) {
         cmsResolverAvailable = false;
+        _slog('CMS_RESOLVER', 'threw: $e');
       }
+      _slog(
+        'CMS_RESOLVER',
+        'available=$cmsResolverAvailable found=${cmsSession != null} kind=${cmsSession?.kind}',
+      );
 
       if (cmsResolverAvailable && cmsSession != null) {
         session = cmsSession;
@@ -3440,14 +3569,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (!mounted) return;
 
     if (session == null || !session.ok || session.servers.isEmpty) {
+      final message = session?.errorMessage ?? 'تعذر تشغيل البث.';
+      _slog('SESSION_RESOLVE_FAILED', message);
       setState(() {
         _state = _LoadState.error;
-        _errorMessage = session?.errorMessage ?? 'تعذر تشغيل البث.';
+        _errorMessage = message;
       });
       return;
     }
 
     _session = session;
+    _slog(
+      'SESSION_RESOLVED',
+      'kind=${session.kind} url=${_safeLogUrl(session.servers.first.qualities.first.url)}',
+    );
     if (session.kind == StreamKind.web) {
       await _openWebSource(session.servers.first.qualities.first.url);
       return;
