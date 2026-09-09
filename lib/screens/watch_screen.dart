@@ -863,7 +863,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   bool _webSessionIsActive(int generation) =>
       mounted && generation == _webSessionGeneration &&
-      _webSessionState != _WebSessionState.stopped;
+      _webSessionState != _WebSessionState.stopped &&
+      // بعد نجاح الانتقال للمشغل الأصلي لا داعٍ لأي اكتشاف إضافي — تركه
+      // نشطاً كان يخلّي صفحة WebView (المخفية بالخلفية) تستمر بالتنقل
+      // وأحياناً يعيد محاولة تشغيل أصلي ثانية فيهدم النسخة الشغّالة فعلياً.
+      _webSessionState != _WebSessionState.nativePlaying;
 
   String _normalizeCandidate(String url) {
     final uri = Uri.tryParse(url.trim());
@@ -1718,7 +1722,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
   bool _isNonMediaAsset(String url) => RegExp(
-        r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json)(?:$|[?#])',
+        r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
         caseSensitive: false,
       ).hasMatch(url);
 
@@ -2089,7 +2093,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           try { v = new URL(v, location.href).toString(); } catch (_) { return; }
           if (/^https?:\/\//i.test(v)) out.add(v);
         };
-        const nonMediaAsset = /\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json)(?:$|[?#])/i;
+        const nonMediaAsset = /\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])/i;
         const addDeep = (value, depth=0) => {
           if (depth > 5 || value == null) return;
           if (typeof value === 'string') {
@@ -3046,6 +3050,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       if (fallbackToWeb) {
         _setWebSessionState(_WebSessionState.nativePlaying);
+        // الاكتشاف بالخلفية لم يعد له داعٍ بعد نجاح التشغيل الأصلي — تركه
+        // شغّالاً كان يخلّي الصفحة تستمر بالتنقل (تسمح بإعلانات/تحويلات
+        // جديدة لم تكن ظاهرة وقت الاكتشاف الأول)، وأحياناً يكتشف "مرشحاً"
+        // آخر ويعيد محاولة تشغيل أصلي ثانية فتُهدم النسخة الشغّالة فعلياً
+        // ويُعاد إنشاؤها من الصفر — وهذا سبب "إعادة تشغيل الصفحة" العشوائية.
+        _webDetectorTimer?.cancel();
+        _webDetectorTimer = null;
         _smartLog('NATIVE', 'playback proof success; switching WebView -> Native');
       }
       _slog(
