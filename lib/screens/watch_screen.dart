@@ -15,7 +15,6 @@ import 'package:webview_flutter/webview_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
-import 'package:share_plus/share_plus.dart';
 
 import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
@@ -785,37 +784,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // settings/player.showSourcePage means visible.
   bool _showSourcePage = true;
   bool _webPageRevealedByUser = false;
-  // Hidden diagnostic-log button (settings/player.diagnosticLogEnabled).
-  // Invisible to every user by default; only appears once turned on from
-  // the dashboard, e.g. for the developer's own device while investigating
-  // a specific channel.
-  bool _diagnosticLogEnabled = false;
-  final List<String> _diagnosticLogBuffer = <String>[];
-  static const int _diagnosticLogMaxLines = 400;
 
   void _smartLog(String scope, String message) {
     if (kDebugMode) debugPrint('[$scope] $message');
-    // Buffered regardless of build mode so the diagnostic-log button also
-    // works on release builds (Codemagic APKs), where kDebugMode is false
-    // and nothing would otherwise be recorded.
-    _diagnosticLogBuffer.add('${DateTime.now().toIso8601String()} [$scope] $message');
-    if (_diagnosticLogBuffer.length > _diagnosticLogMaxLines) {
-      _diagnosticLogBuffer.removeAt(0);
-    }
-  }
-
-  Future<void> _shareDiagnosticLog() async {
-    if (_diagnosticLogBuffer.isEmpty) {
-      _smartLog('DIAG', 'share requested with empty buffer');
-    }
-    final text = _diagnosticLogBuffer.isEmpty
-        ? 'لا توجد سجلات بعد لهذه المحاولة.'
-        : _diagnosticLogBuffer.join('\n');
-    try {
-      await Share.share(text, subject: 'سجل تشخيص المشغل');
-    } catch (_) {
-      // Sharing can fail silently on some devices; nothing else to do here.
-    }
   }
 
   String _safeLogUrl(String value) {
@@ -3387,8 +3358,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
     _resolvedStreamHeaders = null;
     _showSourcePage = await PlayerVisibilityService.loadShowSourcePage();
-    _diagnosticLogEnabled =
-        await PlayerVisibilityService.loadDiagnosticLogEnabled();
     _webPageRevealedByUser = false;
     if (!mounted) return;
 
@@ -3587,42 +3556,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     child: _buildControls(),
                   ),
                 ),
-              if (_state == _LoadState.ready && !_isWebSource && (_controlsVisible || _locked))
+              if (_state == _LoadState.ready && !_isWebSource)
                 Positioned(
                   top: 8,
                   left: 8,
-                  child: AnimatedOpacity(
-                    // Stays visible while locked (the only way to unlock,
-                    // since tapping the screen is disabled in that state);
-                    // otherwise fades with the rest of the controls.
-                    opacity: (_controlsVisible || _locked) ? 1 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: _circleIconButton(
-                      icon: _locked ? Icons.lock : Icons.lock_open,
-                      tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
-                      onPressed: _toggleLock,
-                    ),
+                  child: _circleIconButton(
+                    icon: _locked ? Icons.lock : Icons.lock_open,
+                    tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
+                    onPressed: _toggleLock,
                   ),
                 ),
               if (_state == _LoadState.ready && !_isWebSource && !_locked)
                 Positioned(
                   top: 8,
                   left: 62,
-                  child: AnimatedOpacity(
-                    opacity: _controlsVisible ? 1 : 0,
-                    duration: const Duration(milliseconds: 200),
-                    child: IgnorePointer(
-                      ignoring: !_controlsVisible,
-                      child: _circleIconButton(
-                        icon: _fit == BoxFit.cover
-                            ? Icons.crop_free
-                            : Icons.fit_screen,
-                        tooltip: _fit == BoxFit.cover
-                            ? 'احتواء الفيديو داخل الشاشة'
-                            : 'تعبئة الشاشة',
-                        onPressed: _toggleFit,
-                      ),
-                    ),
+                  child: _circleIconButton(
+                    icon: _fit == BoxFit.cover
+                        ? Icons.crop_free
+                        : Icons.fit_screen,
+                    tooltip: _fit == BoxFit.cover
+                        ? 'احتواء الفيديو داخل الشاشة'
+                        : 'تعبئة الشاشة',
+                    onPressed: _toggleFit,
                   ),
                 ),
               // Web players own their internal controls, so keep the
@@ -4135,18 +4090,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         _takeScreenshot();
                       },
               ),
-              if (_diagnosticLogEnabled)
-                ListTile(
-                  leading: const Icon(Icons.bug_report, color: Colors.white),
-                  title: const Text('نسخ سجل التشخيص',
-                      style: TextStyle(color: Colors.white)),
-                  subtitle: const Text('يظهر فقط عند تفعيله من لوحة التحكم',
-                      style: TextStyle(color: Colors.white54, fontSize: 12)),
-                  onTap: () {
-                    Navigator.pop(sheetContext);
-                    _shareDiagnosticLog();
-                  },
-                ),
             ],
           ),
         );
