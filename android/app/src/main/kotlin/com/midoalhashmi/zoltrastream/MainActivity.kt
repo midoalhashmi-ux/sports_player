@@ -4,6 +4,7 @@ import android.app.PictureInPictureParams
 import android.content.res.Configuration
 import android.os.Build
 import android.util.Rational
+import android.webkit.CookieManager
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -16,6 +17,7 @@ import io.flutter.plugin.common.MethodChannel
 /// النشاط الافتراضي.
 class MainActivity : FlutterActivity() {
     private var pipChannel: MethodChannel? = null
+    private var cookieChannel: MethodChannel? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -29,6 +31,26 @@ class MainActivity : FlutterActivity() {
                     val aspectWidth = call.argument<Int>("aspectWidth") ?: 16
                     val aspectHeight = call.argument<Int>("aspectHeight") ?: 9
                     result.success(enterPip(aspectWidth, aspectHeight))
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // يقرأ كوكيز WebView الحقيقية (بما فيها HttpOnly) لرابط معيّن، حتى
+        // يقدر مشغّل الفيديو الأصلي (ExoPlayer) يرسلها مع طلبه المباشر —
+        // راجع NativeCookieService.dart بجهة Dart لتفاصيل السبب.
+        val cookies =
+            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "sports_player/cookies")
+        cookieChannel = cookies
+        cookies.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getCookie" -> {
+                    val url = call.argument<String>("url")
+                    if (url.isNullOrEmpty()) {
+                        result.success(null)
+                    } else {
+                        result.success(CookieManager.getInstance().getCookie(url))
+                    }
                 }
                 else -> result.notImplemented()
             }

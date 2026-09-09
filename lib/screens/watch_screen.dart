@@ -20,6 +20,7 @@ import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
+import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
 import '../services/session_log_service.dart';
 
@@ -191,7 +192,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _scheduleHide();
 
     await AdService.instance.showInterstitialThenProceed(() {
-      if (mounted && identical(_activeInstance, this)) _startSession();
+      if (_sessionStarted) return;
+      if (mounted && identical(_activeInstance, this)) {
+        _sessionStarted = true;
+        _startSession();
+      }
     });
   }
 
@@ -806,6 +811,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // settings/player.showSourcePage means visible.
   bool _showSourcePage = true;
   bool _webPageRevealedByUser = false;
+  // يمنع _startSession() من التشغيل أكثر من مرة لنفس الشاشة، حتى لو رجع
+  // استدعاء AdService.showInterstitialThenProceed أكثر من مرة (سباق بين
+  // نسختين من WatchScreen تفتحان بسرعة لنفس القناة، أو أي سبب آخر). بدون
+  // هذا الحارس كانت الصفحة تُعاد من الصفر منتصف عملية الاكتشاف، فتُهدر
+  // عشرات الثواني من مهلة محاولة التشغيل الأصلي — وهذا سبب رئيسي لتذبذب
+  // نجاح الانتقال للمشغل الأصلي حتى بالمصادر التي تنجح عادة.
+  bool _sessionStarted = false;
 
   void _smartLog(String scope, String message) {
     if (kDebugMode) debugPrint('[$scope] $message');
@@ -1700,29 +1712,49 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       ).hasMatch(url);
   bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
 
-  Map<String, String> _headersForCandidate(
-      String source, _WebNetworkCandidate? candidate) {
+  // حارس أخير قبل أي محاولة تشغيل أصلي: صور الغلاف (poster/thumbnail) أو
+  // ملفات أصول الصفحة (css/js/خطوط) قد تتسرب أحياناً لقائمة المرشحين عبر
+  // فحص إعدادات المشغلات (JWPlayer/Video.js تحتوي غالباً حقل "image" بجانب
+  // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
+  // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
+  bool _isNonMediaAsset(String url) => RegExp(
+        r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json)(?:$|[?#])',
+        caseSensitive: false,
+      ).hasMatch(url);
+
+  Future<Map<String, String>> _headersForCandidate(
+      String source, _WebNetworkCandidate? candidate) async {
     final headers = <String, String>{..._effectiveStreamHeaders()};
     final sourceUri = Uri.tryParse(source);
     final pageUri = Uri.tryParse(candidate?.pageUrl ?? '');
-    if (sourceUri == null ||
-        pageUri == null ||
-        !sourceUri.hasScheme ||
-        !pageUri.hasScheme ||
-        pageUri.host.isEmpty) {
-      return headers;
+    if (sourceUri != null &&
+        pageUri != null &&
+        sourceUri.hasScheme &&
+        pageUri.hasScheme &&
+        pageUri.host.isNotEmpty) {
+      final sourcePort = sourceUri.hasPort ? sourceUri.port : null;
+      final pagePort = pageUri.hasPort ? pageUri.port : null;
+      final sameOrigin = sourceUri.scheme == pageUri.scheme &&
+          sourceUri.host.toLowerCase() == pageUri.host.toLowerCase() &&
+          sourcePort == pagePort;
+      if (!sameOrigin) {
+        final pageOrigin = _originForUri(pageUri);
+        if (pageOrigin.isNotEmpty) {
+          headers['origin'] = pageOrigin;
+          headers['referer'] = '$pageOrigin/';
+        }
+      }
     }
 
-    final sourcePort = sourceUri.hasPort ? sourceUri.port : null;
-    final pagePort = pageUri.hasPort ? pageUri.port : null;
-    final sameOrigin = sourceUri.scheme == pageUri.scheme &&
-        sourceUri.host.toLowerCase() == pageUri.host.toLowerCase() &&
-        sourcePort == pagePort;
-    if (!sameOrigin) {
-      final pageOrigin = _originForUri(pageUri);
-      if (pageOrigin.isNotEmpty) {
-        headers['origin'] = pageOrigin;
-        headers['referer'] = '$pageOrigin/';
+    // document.cookie (المصدر الحالي لـ headers['cookie'] عبر
+    // _webContextHeaders) لا يرى كوكيز الجلسة المعلَّمة HttpOnly. نقرأها
+    // هنا من مدير كوكيز WebView الأصلي لنفس دومين المصدر تحديداً (قد يكون
+    // دوميناً مختلفاً عن صفحة القناة نفسها، مثل CDN بث منفصل)، ونستبدل بها
+    // أي قيمة أضعف مأخوذة من جافاسكربت.
+    if (sourceUri != null && sourceUri.hasScheme) {
+      final nativeCookie = await NativeCookieService.getCookie(source);
+      if (nativeCookie != null && nativeCookie.isNotEmpty) {
+        headers['cookie'] = nativeCookie;
       }
     }
     return headers;
@@ -2057,10 +2089,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           try { v = new URL(v, location.href).toString(); } catch (_) { return; }
           if (/^https?:\/\//i.test(v)) out.add(v);
         };
+        const nonMediaAsset = /\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json)(?:$|[?#])/i;
         const addDeep = (value, depth=0) => {
           if (depth > 5 || value == null) return;
           if (typeof value === 'string') {
-            if (/^https?:\/\//i.test(value.trim()) || /\.(m3u8|mpd|mp4|m4v|webm|mov)(?:$|[?#])/i.test(value)) add(value);
+            const trimmed = value.trim();
+            // "sources"/"file" objects also commonly carry a sibling "image"/
+            // "poster" thumbnail field. A blanket "any https:// string" match
+            // was sweeping those in too — they are never a playable source.
+            if (nonMediaAsset.test(trimmed)) return;
+            if (/^https?:\/\//i.test(trimmed) || /\.(m3u8|mpd|mp4|m4v|webm|mov)(?:$|[?#])/i.test(trimmed)) add(value);
             return;
           }
           if (Array.isArray(value)) { value.slice(0,40).forEach(v => addDeep(v, depth+1)); return; }
@@ -2465,6 +2503,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
+          if (_isNonMediaAsset(source)) continue;
           final registered = _webCandidateRegistry[source];
           final score = _scoreDetectedSource(source) +
               (registered?.type == 'hls' ? 85 : 0) +
@@ -2503,7 +2542,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           // Best-effort validation. A negative validation is not fatal when
           // the browser has already supplied strong evidence (for example a
           // stream requiring Referer/Origin/cookies).
-          final candidateHeaders = _headersForCandidate(source, registered);
+          final candidateHeaders = await _headersForCandidate(source, registered);
           _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
           final validated = await _validatePublicMediaSource(
             source,
