@@ -817,10 +817,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
-  // محاولة واحدة فقط لكل جلسة ويب (مو لكل رابط) لتفادي أي تكرار لا نهائي
-  // لو الرابط البديل المكتشف فشل هو الآخر.
+  // محاولة واحدة فقط لكل رابط مرشّح (وليس لكل جلسة ويب بالكامل) — كانت
+  // محاولة واحدة لكل الجلسة تمنع أي إنقاذ عن كل مرشّح فشل تشغيله أصلياً
+  // بعد أول مرشّح (شوهد فعلياً بسجل تشخيص: مرشّح ثانٍ فشل native trial بدون
+  // أي محاولة MANIFEST_RELAY له إطلاقاً لأن المحاولة الوحيدة استُهلكت على
+  // الأول). التتبّع لكل رابط يمنع لا يزال التكرار اللا نهائي على *نفس*
+  // الرابط لو فشل الإنقاذ نفسه.
   final Map<String, Completer<String?>> _pendingManifestFetches = {};
-  bool _webManifestRelayAttempted = false;
+  final Set<String> _webManifestRelayAttemptedUrls = <String>{};
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -1040,10 +1044,29 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // لا نمرّر هذي الرسالة لـ _captureMessageWebContext — pageUrl فيها هو
       // رابط المانفست نفسه لا صفحة القناة، فلا نريده يستبدل سياق الترويسات.
       final requestId = decoded['requestId']?.toString() ?? '';
-      final text = decoded['text']?.toString();
+      final results = decoded['results'];
+      String? winningText;
+      if (results is List) {
+        for (final entry in results) {
+          if (entry is! Map) continue;
+          final attemptText = entry['text']?.toString() ?? '';
+          final mode = entry['mode']?.toString() ?? '?';
+          final status = entry['status'];
+          final error = entry['error']?.toString() ?? '';
+          _slog(
+            'MANIFEST_FETCH_ATTEMPT',
+            'mode=$mode status=$status ok=${entry['ok']} length=${attemptText.length} error=$error',
+          );
+          if (winningText == null &&
+              attemptText.isNotEmpty &&
+              attemptText.contains('#EXTM3U')) {
+            winningText = attemptText;
+          }
+        }
+      }
       final completer = _pendingManifestFetches.remove(requestId);
       if (completer != null && !completer.isCompleted) {
-        completer.complete((text == null || text.isEmpty) ? null : text);
+        completer.complete(winningText);
       }
       return;
     }
@@ -1768,8 +1791,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   /// عبر fetch()، ويرجعه لنا هنا. ضروري لأن evaluateJavascript لا ينتظر
   /// اكتمال Promise، فنستخدم نفس قناة الرسائل الموجودة (SportsPlayerSource)
   /// بدل انتظار نتيجة مباشرة من runJavaScriptReturningResult.
+  ///
+  /// يجرّب أولاً بدون كوكيز (credentials:'omit'): أغلب CDNs التي تستضيف
+  /// المانفست على نطاق مختلف عن صفحة اللاعب (مثل هذه الحالة تحديداً) ترسل
+  /// `Access-Control-Allow-Origin: *`، وهذا يتعارض تماماً مع أي طلب يحمل
+  /// كوكيز (credentials:'include') حسب مواصفة CORS نفسها — فيفشل الطلب
+  /// صامتاً حتى لو كان مشغّل الصفحة نفسه (hls.js/video.js) قد جلب نفس
+  /// الرابط بنجاح للتو بدون كوكيز. لو فشلت المحاولة الأولى، نجرّب
+  /// بكوكيز (لحالة العكس: مانفست محمي بجلسة وليس عبر أصل مختلف).
+  /// كل محاولة تُسجَّل بسبب فشلها الفعلي (حالة HTTP أو رسالة الخطأ) بدل
+  /// فشل صامت واحد لا يوضّح شيئاً — انظر MANIFEST_FETCH_ATTEMPT بالسجل.
   Future<String?> _fetchTextViaWebView(String url,
-      {Duration timeout = const Duration(seconds: 8)}) async {
+      {Duration timeout = const Duration(seconds: 12)}) async {
     final controller = _webController;
     if (controller == null) return null;
     final requestId = DateTime.now().microsecondsSinceEpoch.toString();
@@ -1779,14 +1812,22 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final urlJson = jsonEncode(url);
       final requestIdJson = jsonEncode(requestId);
       await controller.runJavaScript('''(function() {
-        fetch($urlJson, {credentials: 'include'}).then(function(res) {
-          return res.text();
-        }).catch(function() {
-          return '';
-        }).then(function(text) {
+        function attempt(mode) {
+          return fetch($urlJson, {credentials: mode}).then(function(res) {
+            return res.text().then(function(text) {
+              return {text: text, status: res.status, ok: res.ok, mode: mode, error: ''};
+            });
+          }).catch(function(err) {
+            return {text: '', status: 0, ok: false, mode: mode, error: (err && err.message) ? String(err.message) : String(err)};
+          });
+        }
+        attempt('omit').then(function(first) {
+          if (first.ok && first.text && first.text.indexOf('#EXTM3U') !== -1) return [first];
+          return attempt('include').then(function(second) { return [first, second]; });
+        }).then(function(results) {
           try {
             if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
-              window.SportsPlayerSource.postMessage(JSON.stringify({type:'manifest_fetched', requestId:$requestIdJson, text:text}));
+              window.SportsPlayerSource.postMessage(JSON.stringify({type:'manifest_fetched', requestId:$requestIdJson, results: results}));
             }
           } catch (_) {}
         });
@@ -3019,7 +3060,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webCandidateEvidence.clear();
     _webCandidateLastReason.clear();
     _webCandidateRegistry.clear();
-    _webManifestRelayAttempted = false;
+    _webManifestRelayAttemptedUrls.clear();
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
@@ -3343,14 +3384,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           'url=${_safeLogUrl(failedUrl)} error=${_describePlaybackError(error)} rawError=$error nativeAttempts=$_webNativeAttempts/$_webMaxNativeAttempts — staying on WebView',
         );
 
-        // محاولة إنقاذ إضافية (مرة واحدة لكل جلسة، ولا تُحتسب من ميزانية
+        // محاولة إنقاذ إضافية (مرة واحدة لكل رابط، ولا تُحتسب من ميزانية
         // المحاولات العادية): لو الرابط الفاشل يشبه HLS، نطلب من WebView
         // نفسه يجيب محتواه بجلسته الحقيقية — راجع _relayManifestViaWebView.
-        if (!_webManifestRelayAttempted &&
+        // مقصور على http(s) لأن ملف محلي (file://) الناتج من إنقاذ سابق على
+        // نفس هذا المرشّح لا معنى لإعادة "جلبه عبر WebView" من جديد.
+        final failedUri = Uri.tryParse(failedUrl);
+        final failedUrlIsHttp = failedUri != null &&
+            (failedUri.scheme == 'http' || failedUri.scheme == 'https');
+        if (!_webManifestRelayAttemptedUrls.contains(failedUrl) &&
+            failedUrlIsHttp &&
             _looksLikeHls(failedUrl) &&
             _webController != null &&
             mounted) {
-          _webManifestRelayAttempted = true;
+          _webManifestRelayAttemptedUrls.add(failedUrl);
           final relayed = await _relayManifestViaWebView(failedUrl);
           if (relayed != null && mounted) {
             _slog('MANIFEST_RELAY_SUCCESS',
