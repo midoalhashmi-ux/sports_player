@@ -3538,9 +3538,58 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _scheduleHide();
   }
 
-  void _toggleFit() {
-    setState(
-        () => _fit = _fit == BoxFit.contain ? BoxFit.cover : BoxFit.contain);
+  void _setFit(BoxFit fit) {
+    setState(() => _fit = fit);
+  }
+
+  // ثلاثة أوضاع عرض بدل التبديل بين وضعين فقط — شاشات الهواتف تختلف
+  // نسبتها (19.5:9، 20:9، 21:9...) عن نسبة الفيديو غالباً، فوضع واحد
+  // لا يناسب كل الأجهزة: "احتواء" يترك حوافاً سوداء لكن يعرض الفيديو
+  // كاملاً، و"تعبئة" تملأ الشاشة لكن قد تقصّ حواف الصورة (والترجمة
+  // المدمجة القريبة من الحافة)، و"تمديد" تملأ الشاشة بدون قص أي جزء
+  // (بديل عملي لمن يزعجه القص أكثر من التمدد الطفيف).
+  static const _fitModes = <BoxFit, (String, String, IconData)>{
+    BoxFit.contain: ('احتواء', 'يعرض الفيديو كاملاً، قد تظهر حواف سوداء', Icons.fit_screen),
+    BoxFit.cover: ('تعبئة الشاشة', 'يملأ الشاشة بالكامل، قد يقصّ حواف الصورة', Icons.crop_free),
+    BoxFit.fill: ('تمديد', 'يملأ الشاشة بدون قص، مع تمدد بسيط للصورة', Icons.aspect_ratio),
+  };
+
+  void _openFitModeSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Wrap(
+            children: [
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
+                child: Text('وضع عرض الفيديو',
+                    style: TextStyle(color: Colors.white70)),
+              ),
+              for (final entry in _fitModes.entries)
+                ListTile(
+                  leading: Icon(entry.value.$3, color: Colors.white),
+                  title: Text(entry.value.$1,
+                      style: const TextStyle(color: Colors.white)),
+                  subtitle: Text(entry.value.$2,
+                      style: const TextStyle(color: Colors.white54, fontSize: 12)),
+                  trailing: _fit == entry.key
+                      ? const Icon(Icons.check, color: Colors.greenAccent)
+                      : null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    _setFit(entry.key);
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   void _jumpToLive() {
@@ -4060,13 +4109,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     child: IgnorePointer(
                       ignoring: !_controlsVisible,
                       child: _circleIconButton(
-                        icon: _fit == BoxFit.cover
-                            ? Icons.crop_free
-                            : Icons.fit_screen,
-                        tooltip: _fit == BoxFit.cover
-                            ? 'احتواء الفيديو داخل الشاشة'
-                            : 'تعبئة الشاشة',
-                        onPressed: _toggleFit,
+                        icon: _fitModes[_fit]?.$3 ?? Icons.aspect_ratio,
+                        tooltip: 'وضع عرض الفيديو (${_fitModes[_fit]?.$1 ?? ''})',
+                        onPressed: _openFitModeSheet,
                       ),
                     ),
                   ),
@@ -4532,12 +4577,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 title: const Text('وضع العرض',
                     style: TextStyle(color: Colors.white)),
                 subtitle: Text(
-                  _fit == BoxFit.contain ? 'ملائم للشاشة' : 'تعبئة الشاشة',
+                  _fitModes[_fit]?.$1 ?? '',
                   style: const TextStyle(color: Colors.white54, fontSize: 12),
                 ),
                 onTap: () {
                   Navigator.pop(sheetContext);
-                  _toggleFit();
+                  _openFitModeSheet();
                 },
               ),
               if (_session != null &&
