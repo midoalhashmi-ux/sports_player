@@ -3401,6 +3401,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _setWebSessionState(_webDrmDetected
               ? _WebSessionState.drmWebOnly
               : _WebSessionState.webReady);
+          // بدون هذا، _state يبقى "جاري التحميل" للأبد بعد استنفاد كل
+          // محاولات التشغيل الأصلي — يظهر مؤشر تحميل دائم فوق فيديو يعمل
+          // فعلياً بداخل WebView (شوهد بسجل تشخيص فعلي: السيجمنتات تُجلب
+          // بنجاح مستمر رغم فشل كل محاولات ExoPlayer)، ويمنع المستخدم من
+          // التفاعل مع الصفحة (شرط "_state == ready" أضيف لاحقاً لمنع
+          // لمسات عشوائية أثناء الاكتشاف الصامت) رغم إن WebView هو فعلياً
+          // المشغّل النهائي بهذه الحالة.
+          if (mounted) setState(() => _state = _LoadState.ready);
         }
         return;
       }
