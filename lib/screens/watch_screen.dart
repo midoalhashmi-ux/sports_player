@@ -3058,6 +3058,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           onPageFinished: (finishedUrl) async {
             _webInitialLoadCompleted = true;
             _slog('PAGE_FINISHED', _safeLogUrl(finishedUrl));
+            // بعد نجاح التشغيل الأصلي (nativePlaying)، الـ WebView يبقى حياً
+            // بالخلفية فقط كاحتياط (مثلاً لإعادة جلب الـ manifest لاحقاً عند
+            // تبديل الجودة)، لكنه غالباً يستمر يتنقّل وحده عبر سلسلة تحويلات
+            // إعلانية (073m.com → afu.php → مواقع أخرى). بدون هذا الحارس، كل
+            // تنقّل كان يعيد ضبط _state لـ "جاري التحميل" (يخفي الفيديو
+            // الشغّال فعلياً خلف شاشة بحث وهمية) ويطلق دورة اكتشاف وتشغيل
+            // كاملة ثانية لنفس المصدر — بدون إيقاف الأولى، فيسمع المستخدم
+            // صوتين متزامنين. راجع سجل تشخيص فعلي وثّق هذا بالضبط.
+            if (_webSessionState == _WebSessionState.nativePlaying) return;
             // The initial source may be RistoAnime, then V11 promotes its
             // Vidmoly iframe to the main document. Re-evaluate the player mode
             // on every completed main-frame navigation so the promoted embed
