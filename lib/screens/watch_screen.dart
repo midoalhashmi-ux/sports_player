@@ -837,6 +837,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // settings/player.showSourcePage means visible.
   bool _showSourcePage = true;
   bool _webPageRevealedByUser = false;
+  // شاشة "تم تشغيل المصدر في الخلفية" غالباً مرحلة عابرة (بضع ثوانٍ) قبل
+  // ما يتحول التشغيل للمشغل الأصلي — إظهارها فوراً يسبب وميضاً مزعجاً.
+  // نؤجّل ظهورها بمهلة قصيرة؛ لو انتهت الحالة العابرة قبل انقضائها (الحالة
+  // الشائعة) لا تظهر إطلاقاً، وتبقى مؤشر التحميل العادي كافياً.
+  bool _hiddenSourceGraceElapsed = false;
+  Timer? _hiddenSourceGraceTimer;
+  // رسالة الانتظار تتغيّر مع الوقت لتطمئن المستخدم إن المشغل ما زال
+  // شغّالاً (لا يبدو متجمّداً) بدل نص ثابت واحد قد يدفعه يرجع للخلف
+  // ظناً منه إن التشغيل تعطّل.
+  DateTime? _loadingBeganAt;
+  Timer? _loadingTickerTimer;
   // يمنع _startSession() من التشغيل أكثر من مرة لنفس الشاشة، حتى لو رجع
   // استدعاء AdService.showInterstitialThenProceed أكثر من مرة (سباق بين
   // نسختين من WatchScreen تفتحان بسرعة لنفس القناة، أو أي سبب آخر). بدون
@@ -2417,6 +2428,55 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _webPageRevealedByUser ||
       _webSessionState == _WebSessionState.humanVerificationRequired;
 
+  bool get _isHiddenWebSourceActive =>
+      _isWebSource && !_shouldShowWebPage && _state == _LoadState.ready;
+
+  /// يبدأ (مرة واحدة) مؤقّت المهلة القصيرة قبل إظهار شاشة "تم تشغيل
+  /// المصدر بالخلفية"، ويلغيه لو خرجنا من هذه الحالة قبل انقضائه (تحوّل
+  /// التشغيل بسرعة للمشغل الأصلي، الحالة الشائعة — فلا تظهر الشاشة إطلاقاً).
+  void _syncHiddenSourceGraceTimer() {
+    if (_isHiddenWebSourceActive) {
+      _hiddenSourceGraceTimer ??= Timer(const Duration(seconds: 2), () {
+        if (mounted) setState(() => _hiddenSourceGraceElapsed = true);
+      });
+    } else if (_hiddenSourceGraceTimer != null) {
+      _hiddenSourceGraceTimer!.cancel();
+      _hiddenSourceGraceTimer = null;
+      _hiddenSourceGraceElapsed = false;
+    }
+  }
+
+  bool get _isLoadingContent =>
+      _state == _LoadState.loading ||
+      (_isHiddenWebSourceActive && !_hiddenSourceGraceElapsed);
+
+  /// يشغّل مؤقّتاً دوريّاً أثناء التحميل فقط، حتى تتغيّر رسالة الانتظار
+  /// تلقائياً مع مرور الوقت (راجع _loadingMessageFor).
+  void _syncLoadingTicker() {
+    if (_isLoadingContent) {
+      _loadingBeganAt ??= DateTime.now();
+      _loadingTickerTimer ??= Timer.periodic(const Duration(seconds: 3), (_) {
+        if (mounted) setState(() {});
+      });
+    } else if (_loadingTickerTimer != null) {
+      _loadingTickerTimer!.cancel();
+      _loadingTickerTimer = null;
+      _loadingBeganAt = null;
+    }
+  }
+
+  String get _loadingMessage {
+    final began = _loadingBeganAt;
+    final elapsed = began == null ? Duration.zero : DateTime.now().difference(began);
+    if (elapsed >= const Duration(seconds: 15)) {
+      return 'ما زلنا نجهّز المصدر… بعض الروابط تحتاج وقتاً أطول قليلاً، شكراً لصبرك';
+    }
+    if (elapsed >= const Duration(seconds: 6)) {
+      return 'يرجى الانتظار قليلاً حتى يتم تجهيز المحتوى…';
+    }
+    return 'جاري تشغيل المحتوى…';
+  }
+
   Future<void> _revealWebPageForInteraction() async {
     final controller = _webController;
     if (controller == null || !mounted) return;
@@ -3727,6 +3787,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _hiddenSourceGraceTimer?.cancel();
+    _loadingTickerTimer?.cancel();
     _seekFeedbackTimer?.cancel();
     _slowConnectionTimer?.cancel();
     _bufferIndicatorTimer?.cancel();
@@ -3859,6 +3921,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // ---------------------- build ----------------------
   @override
   Widget build(BuildContext context) {
+    _syncHiddenSourceGraceTimer();
+    _syncLoadingTicker();
     final content = GestureDetector(
       // Let platform WebView gestures go directly to the page/player.
       // The outer playback gesture layer is only needed for native video.
@@ -3876,15 +3940,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 Opacity(
                   opacity: _shouldShowWebPage ? 1 : 0,
                   child: IgnorePointer(
-                    ignoring: !_shouldShowWebPage,
+                    // نمنع لمسات المستخدم أثناء الاكتشاف الصامت بالخلفية
+                    // (المصدر لم "يجهز" بعد) — أي نقرة عشوائية هناك قد
+                    // تضغط إعلاناً أو تنقّل الصفحة وتكسر منطق الاكتشاف.
+                    // نسمح باللمس فقط لو: المصدر جاهز فعلاً، أو مطلوب
+                    // تحقق بشري (captcha) يحتاج تفاعل المستخدم، أو المستخدم
+                    // كشف الصفحة يدوياً بنفسه (زر "إظهار صفحة المصدر").
+                    ignoring: !_shouldShowWebPage ||
+                        (_state != _LoadState.ready &&
+                            _webSessionState !=
+                                _WebSessionState.humanVerificationRequired &&
+                            !_webPageRevealedByUser),
                     child: WebViewWidget(controller: _webController!),
                   ),
                 ),
-              if (_isWebSource && !_shouldShowWebPage &&
-                  _state == _LoadState.ready)
+              if (_isHiddenWebSourceActive && _hiddenSourceGraceElapsed)
                 _buildHiddenWebSourceStatus(),
               if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
-              if (_state == _LoadState.loading &&
+              if (_isLoadingContent &&
                   _webSessionState != _WebSessionState.humanVerificationRequired)
                 _buildLoading(),
               if (_webSessionState == _WebSessionState.humanVerificationRequired)
@@ -4077,7 +4150,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           ),
           const SizedBox(height: 14),
           Text(
-            'جاري تشغيل المحتوى…',
+            _loadingMessage,
             textAlign: TextAlign.center,
             style: TextStyle(
               color: Colors.white,
