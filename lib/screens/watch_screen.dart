@@ -1874,10 +1874,21 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // فحص إعدادات المشغلات (JWPlayer/Video.js تحتوي غالباً حقل "image" بجانب
   // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
-  bool _isNonMediaAsset(String url) => RegExp(
-        r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
-        caseSensitive: false,
-      ).hasMatch(url);
+  bool _isNonMediaAsset(String url) {
+    if (RegExp(
+      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
+      caseSensitive: false,
+    ).hasMatch(url)) {
+      return true;
+    }
+    // رابط بلا مسار حقيقي (نطاق مجرّد، أو "/" فقط) لا يمكن أبداً يكون رابط
+    // بث فعلي — شوهد فعلياً مرشحاً كاذباً بسجل تشخيص (مثل
+    // "https://example.com//") تسرّب من فحص عام وتسبب بمحاولة تشغيل أصلي
+    // فاشلة مضمونة بدل استبعاده من البداية.
+    final uri = Uri.tryParse(url);
+    if (uri != null && (uri.path.isEmpty || uri.path == '/')) return true;
+    return false;
+  }
 
   Future<Map<String, String>> _headersForCandidate(
       String source, _WebNetworkCandidate? candidate) async {
@@ -2745,21 +2756,35 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
 
           _setWebSessionState(_WebSessionState.validating);
-          // Best-effort validation. A negative validation is not fatal when
-          // the browser has already supplied strong evidence (for example a
-          // stream requiring Referer/Origin/cookies).
           final candidateHeaders = await _headersForCandidate(source, registered);
-          _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
-          final validated = await _validatePublicMediaSource(
-            source,
-            requestHeaders: candidateHeaders,
-          );
-          if (registered != null) registered.validated = validated;
-          _smartLog(
-            'HLS',
-            'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
-          );
-          _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(source)} validated=$validated');
+          bool validated;
+          if (strongHls || strongFramework) {
+            // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
+            // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
+            // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
+            // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
+            // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
+            // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
+            // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
+            // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
+            validated = true;
+            _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(source)} reason=strong_evidence score=$score');
+          } else {
+            // Best-effort validation. A negative validation is not fatal when
+            // the browser has already supplied strong evidence (for example a
+            // stream requiring Referer/Origin/cookies).
+            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
+            validated = await _validatePublicMediaSource(
+              source,
+              requestHeaders: candidateHeaders,
+            );
+            if (registered != null) registered.validated = validated;
+            _smartLog(
+              'HLS',
+              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
+            );
+            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(source)} validated=$validated');
+          }
           if (!validated && evidence < 3 && !strongHls && !strongFramework) {
             _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=failed_validation');
             _setWebSessionState(_WebSessionState.discovering);
