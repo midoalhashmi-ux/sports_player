@@ -3383,14 +3383,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _scheduleHide() {
     _hideTimer?.cancel();
     _hideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _isPlaying && !_locked) {
+      if (mounted && _isPlaying) {
         setState(() => _controlsVisible = false);
       }
     });
   }
 
   void _toggleControls() {
-    if (_locked) return;
     setState(() => _controlsVisible = !_controlsVisible);
     if (_controlsVisible) _scheduleHide();
   }
@@ -3463,11 +3462,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   void _toggleLock() {
-    setState(() => _locked = !_locked);
-    if (!_locked) {
-      setState(() => _controlsVisible = true);
-      _scheduleHide();
-    }
+    setState(() {
+      _locked = !_locked;
+      _controlsVisible = true;
+    });
+    _scheduleHide();
   }
 
   void _toggleFit() {
@@ -3860,20 +3859,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // ---------------------- build ----------------------
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: SafeArea(
-        child: GestureDetector(
-          // Let platform WebView gestures go directly to the page/player.
-          // The outer playback gesture layer is only needed for native video.
-          onTap: _isWebSource ? null : _toggleControls,
-          onDoubleTapDown: _isWebSource ? null : _handleDoubleTapDown,
-          onHorizontalDragStart: _isWebSource ? null : _onHorizontalDragStart,
-          onHorizontalDragUpdate: _isWebSource ? null : _onHorizontalDragUpdate,
-          onHorizontalDragEnd: _isWebSource ? null : _onHorizontalDragEnd,
-          onVerticalDragStart: _isWebSource ? null : _onVerticalDragStart,
-          onVerticalDragUpdate: _isWebSource ? null : _onVerticalDragUpdate,
-          child: Stack(
+    final content = GestureDetector(
+      // Let platform WebView gestures go directly to the page/player.
+      // The outer playback gesture layer is only needed for native video.
+      onTap: _isWebSource ? null : _toggleControls,
+      onDoubleTapDown: _isWebSource ? null : _handleDoubleTapDown,
+      onHorizontalDragStart: _isWebSource ? null : _onHorizontalDragStart,
+      onHorizontalDragUpdate: _isWebSource ? null : _onHorizontalDragUpdate,
+      onHorizontalDragEnd: _isWebSource ? null : _onHorizontalDragEnd,
+      onVerticalDragStart: _isWebSource ? null : _onVerticalDragStart,
+      onVerticalDragUpdate: _isWebSource ? null : _onVerticalDragUpdate,
+      child: Stack(
             fit: StackFit.expand,
             children: [
               if (_isWebSource && _webController != null)
@@ -3959,24 +3955,38 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 Positioned(
                   top: 8,
                   left: 8,
-                  child: _circleIconButton(
-                    icon: _locked ? Icons.lock : Icons.lock_open,
-                    tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
-                    onPressed: _toggleLock,
+                  child: AnimatedOpacity(
+                    opacity: _controlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_controlsVisible,
+                      child: _circleIconButton(
+                        icon: _locked ? Icons.lock : Icons.lock_open,
+                        tooltip: _locked ? 'إلغاء القفل' : 'قفل الشاشة',
+                        onPressed: _toggleLock,
+                      ),
+                    ),
                   ),
                 ),
               if (_state == _LoadState.ready && !_isWebSource && !_locked)
                 Positioned(
                   top: 8,
                   left: 62,
-                  child: _circleIconButton(
-                    icon: _fit == BoxFit.cover
-                        ? Icons.crop_free
-                        : Icons.fit_screen,
-                    tooltip: _fit == BoxFit.cover
-                        ? 'احتواء الفيديو داخل الشاشة'
-                        : 'تعبئة الشاشة',
-                    onPressed: _toggleFit,
+                  child: AnimatedOpacity(
+                    opacity: _controlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_controlsVisible,
+                      child: _circleIconButton(
+                        icon: _fit == BoxFit.cover
+                            ? Icons.crop_free
+                            : Icons.fit_screen,
+                        tooltip: _fit == BoxFit.cover
+                            ? 'احتواء الفيديو داخل الشاشة'
+                            : 'تعبئة الشاشة',
+                        onPressed: _toggleFit,
+                      ),
+                    ),
                   ),
                 ),
               // Web players own their internal controls, so keep the
@@ -4014,8 +4024,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ),
             ],
           ),
-        ),
-      ),
+    );
+    // في وضع ملء الشاشة نتجاوز SafeArea تماماً حتى يمتلئ الفيديو الشاشة
+    // الحقيقية بالكامل (وإلا قد تُقتطع حافة الفيديو، ومعها أي ترجمة
+    // مدمجة قرب أسفل الإطار، بسبب هوامش SafeArea المحجوزة). أزرار
+    // التحكم تحتفظ بـ SafeArea خاصة بها داخل _buildControls لتفادي أي
+    // نتوء بالشاشة.
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: _fullscreen ? content : SafeArea(child: content),
     );
   }
 
@@ -4277,12 +4294,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                                   fontWeight: FontWeight.w600)),
                         ],
                       ),
-                    )
-                  else if (_activeQuality != null)
-                    Text(
-                      _activeQuality!.label,
-                      style: const TextStyle(
-                          color: Colors.white70, fontSize: 12),
                     ),
                   const Spacer(),
                   if (isLive && !canSeek)

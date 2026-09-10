@@ -6,7 +6,6 @@ import 'package:share_plus/share_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/ad_service.dart';
-import '../services/feature_flags_service.dart';
 import '../services/saved_link_service.dart';
 import '../services/session_log_service.dart';
 import '../theme/app_theme.dart';
@@ -39,8 +38,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String _premiumButtonText = 'الاشتراك المميز';
 
   // زر "تصدير سجل التشخيص" — مخفي تماماً افتراضياً، ولا يظهر إلا لو فعّله
-  // المطوّر من لوحة التحكم (settings/features.debugLogButtonEnabled). راجع
-  // FeatureFlagsService لتفاصيل القيمة الافتراضية الآمنة (fail-safe = مخفي).
+  // المطوّر من لوحة التحكم (settings/player.diagnosticLogEnabled — نفس
+  // الحقل الذي تكتبه لوحة التحكم فعلياً، راجع AHMED-dashboard/app.js).
   bool _debugLogButtonEnabled = false;
 
   BannerAd? _bannerAd;
@@ -124,11 +123,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadDebugLogSetting() async {
-    await FeatureFlagsService.instance.ensureLoaded();
-    if (!mounted) return;
-    setState(() {
-      _debugLogButtonEnabled = FeatureFlagsService.instance.debugLogButtonEnabled;
-    });
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('settings')
+          .doc('player')
+          .get();
+      final enabled = snapshot.data()?['diagnosticLogEnabled'] == true;
+      if (mounted) {
+        setState(() => _debugLogButtonEnabled = enabled);
+      }
+    } catch (_) {
+      // أي خطأ (بدون إنترنت مثلاً) يبقي الزر مخفياً افتراضياً.
+    }
   }
 
   Future<void> _exportDebugLog() async {
@@ -249,10 +255,18 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
       drawer: _buildDrawer(accent),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _openAddUrl,
-        icon: const Icon(Icons.add),
-        label: const Text('إضافة رابط'),
+      floatingActionButton: Padding(
+        // نرفع الزر بارتفاع البانر (إن وُجد) حتى لا يظهر فوق جزء منه.
+        padding: EdgeInsets.only(
+          bottom: (_bannerAd != null && !_bannerFailed)
+              ? _bannerAd!.size.height.toDouble()
+              : 0,
+        ),
+        child: FloatingActionButton.extended(
+          onPressed: _openAddUrl,
+          icon: const Icon(Icons.add),
+          label: const Text('إضافة رابط'),
+        ),
       ),
       body: Column(
         children: [

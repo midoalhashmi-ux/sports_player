@@ -18,13 +18,8 @@ class FeatureFlagsService {
 
   bool _fetched = false;
   bool _youtubeEnabled = true;
-  bool _debugLogButtonEnabled = false;
 
   bool get youtubeEnabled => _youtubeEnabled;
-
-  // زر تصدير سجل التشخيص في القائمة الجانبية — مخفي افتراضياً، يظهر فقط
-  // لو فعّله المطوّر صراحةً من لوحة التحكم (settings/features.debugLogButtonEnabled).
-  bool get debugLogButtonEnabled => _debugLogButtonEnabled;
 
   /// يجلب الإعدادات مرة واحدة ويخزّنها بالذاكرة لبقية الجلسة. استدعِها
   /// قبل أول تحقق من youtubeEnabled (مثلاً عند فتح شاشة المشاهدة).
@@ -39,7 +34,6 @@ class FeatureFlagsService {
       final data = snapshot.data();
       if (data == null) return;
       _youtubeEnabled = data['youtubeEnabled'] as bool? ?? true;
-      _debugLogButtonEnabled = data['debugLogButtonEnabled'] as bool? ?? false;
     } catch (_) {
       // تعذر الجلب (بدون إنترنت مثلاً) — نبقى على الافتراضي (مفعّل)
       // بدل تعطيل الميزة بالخطأ.

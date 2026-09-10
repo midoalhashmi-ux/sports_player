@@ -92,7 +92,7 @@ class _AddUrlScreenState extends State<AddUrlScreen> {
             keyboardType: TextInputType.url,
             textInputAction: TextInputAction.next,
             decoration: const InputDecoration(
-              labelText: 'رابط البث',
+              labelText: 'المصدر',
               prefixIcon: Icon(Icons.link_rounded),
             ),
           ),
