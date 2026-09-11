@@ -1,0 +1,125 @@
+# التوثيق التقني — sports_player (تطبيق المشغل)
+
+> هذا الملف مرجع تقني شامل لهذا المستودع، بحيث يقدر أي مبرمج أو نموذج ذكاء
+> اصطناعي آخر يفهم بنية المشروع كاملة بدون الحاجة لقراءة كل الكود من الصفر.
+> **كل تعديل جوهري أو إصلاح مشكلة لاحق يجب أن يُضاف كسطر جديد في قسم "سجل
+> المشاكل والحلول" بالأسفل** — بصيغة: ظهرت المشكلة كذا، والسبب الجذري كذا،
+> وتم حلها بكذا، رقم الكوميت كذا.
+
+## 1. نظرة عامة على المنظومة الكاملة (3 مستودعات مترابطة)
+
+هذا المشروع جزء من منظومة من 3 مستودعات منفصلة على GitHub تتشارك نفس
+مشروع Firebase ونفس Cloudflare Worker:
+
+| المستودع | الدور |
+|---|---|
+| **BinSheikh** | تطبيق المحتوى الرئيسي (Flutter/Android) — يعرض للمستخدم النهائي الأقسام/القنوات/الأفلام/المسلسلات/الأنمي/مباريات اليوم. |
+| **sports_player** (هذا المستودع) | تطبيق Flutter/Android منفصل، وظيفته الوحيدة تشغيل الفيديو الفعلي. يُفتح من BinSheikh عبر `app_links` بمعرّف قناة/حلقة. فصله كتطبيق مستقل يتيح تحديثه في Play Store بدون أي حاجة لتحديث BinSheikh، ويعزل منطق حل الروابط الحقيقية/الحماية عن تطبيق المحتوى العام. |
+| **AHMED-dashboard** | لوحة تحكم ويب ثابتة (HTML/JS/CSS خام، بدون أي أداة بناء) يديرها فريق المحتوى — إضافة/تعديل الأقسام والقنوات والروابط، ومتابعة إحصائيات المشاهدة. |
+
+- **مشروع Firebase المشترك**: `sports-stream-app-36a7a` (نفس Firestore، نفس
+  Auth) — راجع `lib/firebase_options.dart`.
+- **Cloudflare Worker المشترك**: `https://binsheikh-api.binsheikh.workers.dev`
+  (كوده المصدري داخل مستودع BinSheikh في `cloudflare-worker/`) — يخدم روابط
+  البث الحقيقية ومباريات اليوم والتقييمات واستيراد المواقع.
+
+## 2. هذا المستودع (sports_player)
+
+- **الغرض**: تطبيق Flutter/Android، وظيفته الوحيدة تشغيل فيديو HLS/MP4 لقناة
+  أو حلقة معيّنة يُمرَّر إليه معرّفها.
+- **Flutter SDK المستخدم**: 3.27.0 (حسب `codemagic.yaml`).
+- **التبعيات الأساسية** (`pubspec.yaml`):
+  - `video_player` — التشغيل الأصلي (ExoPlayer على أندرويد)، يدعم HLS وMP4
+    فقط عملياً (لا DASH/RTMP/MKV رغم ما كان مكتوباً سابقاً بالكود).
+  - `webview_flutter` — لعرض صفحات بث كويب عند `streamType=web`.
+  - `firebase_core` + `cloud_firestore`.
+  - `http` — لطلبات StreamAuthService والتشخيص.
+  - `wakelock_plus`, `google_mobile_ads`, `share_plus`, `url_launcher`,
+    `package_info_plus`, `shared_preferences`, `image_gallery_saver_plus`.
+
+### بنية `lib/`
+
+- `main.dart` — نقطة الدخول: تهيئة Firebase + معالج أخطاء عام
+  (`runZonedGuarded` + `FlutterError.onError` + `PlatformDispatcher.onError`)
+  يسجّل أي خطأ غير ملتقط عبر `SessionLogService`.
+- `screens/watch_screen.dart` (~4700 سطر) — **الشاشة الأهم والأكبر**. آلة
+  حالة كاملة لتشغيل الفيديو: تجربة عدة سيرفرات/جودات (`_WebNetworkCandidate`)،
+  التبديل بين تشغيل native (`video_player`) وWebView، اكتشاف تلقائي لمصدر
+  الفيديو من صفحة ويب (`_autoDetectWebSource`) عبر تتبّع طلبات شبكة داخل
+  WebView، وتسجيل أحداث تشخيصية عبر `SessionLogService` (`_slog`) لتحليلها
+  لاحقاً من سجل مُصدَّر (راجع مهارة `stream-debug` إن وُجدت في
+  `.claude/skills/`).
+- `screens/home_screen.dart`, `add_url_screen.dart`, `contact_screen.dart`,
+  `force_update_screen.dart`, `terms_privacy_screen.dart` — شاشات مساعدة.
+- `services/stream_auth_service.dart` — يطلب جلسة بث من الووركر
+  (`POST /getStreamUrl`)، يدعم شكل استجابة متعدد السيرفرات/الجودات وشكل قديم
+  مبسّط (`{url, expiresIn}`) لتوافق رجعي.
+- `services/channel_source_resolver.dart`, `api_source_resolver.dart` — حل
+  مصدر القناة (رابط مباشر مخزَّن أو مصدر API ديناميكي).
+- `services/session_log_service.dart` — يجمع سجلاً نصياً زمنياً لكل جلسة
+  تشغيل، قابلاً للتصدير — هذا هو أساس التشخيص عن بعد بدون وصول فعلي لجهاز
+  المستخدم.
+- `services/native_cookie_service.dart`, `worker_config.dart`,
+  `version_check_service.dart`, `feature_flags_service.dart`,
+  `pip_service.dart`, `player_visibility_service.dart`,
+  `saved_link_service.dart`, `ad_service.dart`.
+- `theme/app_theme.dart` — خط Tajawal + الألوان الموحّدة.
+
+## 3. تدفق تشغيل الفيديو (مختصر)
+
+1. يُفتح `watch_screen` بمعرّف قناة/حلقة (`channelId`) من BinSheikh عبر
+   `app_links`، أو يدوياً من `add_url_screen`.
+2. `StreamAuthService.requestSession(channelId)` → `POST /getStreamUrl` على
+   الووركر.
+3. الووركر يتحقق من Firestore (`channels` + `privateStreams`) ويرجّع إما
+   رابطاً واحداً أو عدة سيرفرات/جودات.
+4. `watch_screen` يجرّب كل مصدر بالترتيب: تشغيل native أولاً
+   (`video_player`/ExoPlayer)، ولو فشل أو كان `streamType=web` يحوّل لـ
+   WebView مع اكتشاف تلقائي للمصدر الحقيقي من طلبات الشبكة.
+5. كل خطوة تُسجَّل عبر `SessionLogService` — هذا هو السجل الذي يُصدَّر من
+   التطبيق ويُستخدم للتشخيص.
+
+## 4. الحماية الأمنية
+
+روابط m3u8 الحقيقية **غير مخزّنة إطلاقاً** بهذا التطبيق ولا تُقرأ مباشرة من
+Firestore — تُجلب فقط عبر `/getStreamUrl` بالووركر (الذي يقرأ
+`privateStreams` بصلاحيات خاصة لا تصل لأي عميل).
+
+## سجل المشاكل والحلول
+
+1. **رابط بمسار "//" (فراغ مزدوج) لم يُكتشف كـ"ليس ملف وسائط"** — روابط مثل
+   `vidtube.cam//` أو `miravid.club//` كانت تمر من فحص `_isNonMediaAsset` رغم
+   أنها ليست ملفات وسائط فعلية، لأن الفحص كان يقارن `uri.path == '/'` فقط
+   ولا يطابق `uri.path == '//'` (حسب معيار RFC 3986 لتحليل روابط بمسار
+   مزدوج بعد اسم المضيف). **الحل**: تعميم الفحص إلى
+   `uri.path.replaceAll('/', '').isEmpty` (يغطي `/` و`//` وأي تكرار). —
+   الكوميت `995a558`.
+2. **حالة `nativePlaying` كانت تُستبدل بصمت** — بعد نجاح تشغيل الفيديو
+   native، كود اكتشاف الويب (`_autoDetectWebSource`) كان يعيد الحالة إلى
+   `discovering` ويعيد تشغيل منطق الاكتشاف رغم أن الفيديو يعمل فعلاً (الحارس
+   الموجود بنقطة استدعاء واحدة فقط لم يكن كافياً — كانت هناك مسارات أخرى
+   تتجاوزه). **الحل**: جعل `_setWebSessionState` نفسه (المُعدِّل المركزي)
+   يرفض مغادرة `nativePlaying`، بدل ملاحقة كل نقطة استدعاء على حدة. —
+   الكوميت `d6d1d28`.
+3. **كود ميت وتحذيرات lint** — إزالة 3 ملفات غير مستخدمة
+   (`tube_resolver.dart`, `youtube_resolver.dart`, `youtube_id_extractor.dart`
+   كانت تعتمد على تبعية `youtube_explode_dart` محذوفة أصلاً)، إصلاح
+   `invalid_null_aware_operator`، حقول غير مستخدمة، إضافة
+   `analysis_options.yaml` (`flutter_lints`). — الكوميت `3c9e51c`.
+4. **لا معالج أخطاء عام** — أي خطأ غير ملتقط كان يُسقط التطبيق بصمت بدون أي
+   أثر بالسجل. **الحل**: `runZonedGuarded` + `FlutterError.onError` +
+   `PlatformDispatcher.instance.onError` في `main.dart`، كلها تسجّل عبر
+   `SessionLogService`. — نفس الكوميت `3c9e51c`.
+5. **صعوبة تشخيص "Source error" من ExoPlayer من السجل النصي وحده** (يحتاج
+   عادة تتبّع logcat فعلي على الجهاز) — أُضيفت خطوتان:
+   - تسجيل أحداث `NATIVE_BUFFERING_START`/`NATIVE_BUFFERING_END`/
+     `NATIVE_PLAYBACK_ERROR` عند كل تحوّل حالة تشغيل native (رؤية أوضح
+     بدون منطق جديد). — الكوميت `1eae933`.
+   - فحص تشخيصي فعلي عند فشل رابط native
+     (`_logNativeFailureDiagnostics`): يُرسل طلب HTTP Range صغير
+     (`bytes=0-2047`) بنفس الهيدرز المستخدمة للتشغيل، ويُسجَّل
+     `NATIVE_TRIAL_DIAGNOSTIC` (status code / content-type / content-length /
+     زمن الاستجابة / أول جزء من الجسم) أو `NATIVE_TRIAL_DIAGNOSTIC_FAILED`
+     عند فشل الطلب نفسه. هذا يكشف من السجل النصي المُصدَّر وحده (بدون
+     device logcat) هل المشكلة 403/404/CORS/نوع محتوى خاطئ/بطء شبكة، لأي
+     مصدر. — الكوميت `721cde3`.
