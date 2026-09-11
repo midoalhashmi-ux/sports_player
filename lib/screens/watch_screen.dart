@@ -266,6 +266,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (!mounted || controller == null) return;
     final value = controller.value;
     if (value.hasError) {
+      _slog('NATIVE_PLAYBACK_ERROR', 'position=${value.position} error=${value.errorDescription}');
       setState(() {
         _state = _LoadState.error;
         _errorMessage = 'تعذر تشغيل رابط البث. جرّب مرة أخرى أو غيّر السيرفر.';
@@ -285,6 +286,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _duration = value.duration;
     });
     if (effectiveBuffering && !wasBuffering) {
+      _slog('NATIVE_BUFFERING_START', 'position=${value.position} isPlaying=${value.isPlaying}');
       _bufferIndicatorTimer?.cancel();
       if (!_bufferIndicatorVisible) {
         setState(() => _bufferIndicatorVisible = true);
@@ -297,6 +299,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       });
       _startSlowConnectionTimer();
     } else if (!effectiveBuffering && wasBuffering) {
+      _slog('NATIVE_BUFFERING_END', 'position=${value.position}');
       _bufferIndicatorTimer?.cancel();
       _bufferIndicatorTimer = null;
       if (_bufferIndicatorVisible) {
