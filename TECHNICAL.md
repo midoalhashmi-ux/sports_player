@@ -95,3 +95,4 @@ Firestore — تُجلب فقط عبر `/getStreamUrl` بالووركر (الذ�
 | 4 | لا معالج أخطاء عام — خطأ غير ملتقط يُسقط التطبيق بصمت | `runZonedGuarded`+`FlutterError.onError`+`PlatformDispatcher.onError` بـ`main.dart` | نفس `3c9e51c` |
 | 5 | تعذّر تشخيص "Source error" من ExoPlayer بالسجل النصي وحده | تسجيل أحداث buffering/error + فحص HTTP Range تشخيصي عند فشل native | `1eae933`, `721cde3` |
 | 6 | إخفاء صفحة المصدر (إعداد إلزامي) أقل موثوقية من إظهارها لمواقع JWPlayer/Video.js — Chromium لا يحتسب نقرة JS محاكاة كنقرة حقيقية لـautoplay | كشف مشغّلات عام بالخاصية (لا بالدومين) + كتم صوت أثناء التحضير بالإخفاء + رفض ادّعاء "جاهز" بدون دليل تشغيل حقيقي | `4b7cda6` |
+| 7 | `_normalizeCandidate` يضيف `#` زائدة لكل رابط مصدر (حتى بلا fragment أصلاً) — يفسد مطابقة سجل المرشحين/منع التكرار | `uri.replace(fragment:'')` ↔ `uri.removeFragment()` (مؤكَّد باختبار فعلي على SDK 3.27.0) | `1387fc1` |
