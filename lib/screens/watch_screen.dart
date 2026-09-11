@@ -1075,6 +1075,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _slog('VIDEOJS_PLAYER_DETECTED', 'score=$_webMediaEvidenceScore');
       return;
     }
+    // نفس فكرة كشف Video.js أعلاه لكن لمشغّل JWPlayer — بالخاصية (window.jwplayer
+    // أو عناصر jw-*) لا باسم الموقع/الدومين، فيعمل مع أي موقع يستخدم JWPlayer
+    // مهما كان دومينه (بدل الاعتماد فقط على قائمة دومينات Vidmoly المعروفة
+    // بـ_isVidmolyPlayerUrl، اللي لا تغطي مواقع جديدة تُستورد لاحقاً).
+    if (type == 'jwplayer_player') {
+      _webVidmolyPlayerMode = true;
+      _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
+      _extendWebStartupDeadline(const Duration(seconds: 10));
+      _smartLog('JWPLAYER', 'player detected');
+      _slog('JWPLAYER_PLAYER_DETECTED', 'score=$_webMediaEvidenceScore');
+      return;
+    }
     if (type == 'hls_candidate') {
       final rawUrl = decoded['url']?.toString().trim() ?? '';
       if (rawUrl.isNotEmpty) {
@@ -1541,6 +1553,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           };
           detectVideoJs();
            setInterval(detectVideoJs, 900);
+        } catch (_) {}
+
+        // JWPlayer intelligence: same idea as the Video.js block above, but
+        // detected by feature (window.jwplayer / jw-* markup) instead of by
+        // domain, so any site running JWPlayer gets the same treatment —
+        // not just the small list of hosts _isVidmolyPlayerUrl knows about.
+        try {
+          const detectJwPlayer = () => {
+            try {
+              const text = `${document.documentElement?.innerHTML || ''} ${Array.from(document.scripts || []).map(s => s.src || s.textContent || '').join(' ')}`;
+              const hasJwPlayer = !!window.jwplayer || !!document.querySelector('.jwplayer,.jw-wrapper,.jw-video,[id*="jwplayer" i],[class*="jwplayer" i]') ||
+                /jwplayer|jwplatform|jwpsrv/i.test(text);
+              const hasVideo = !!document.querySelector('video,.jwplayer,.jw-wrapper');
+              if (hasJwPlayer && hasVideo) {
+                report({type:'jwplayer_player', initialized:!!window.jwplayer, hasVideo:true});
+              }
+            } catch (_) {}
+          };
+          detectJwPlayer();
+          setInterval(detectJwPlayer, 900);
         } catch (_) {}
 
         // Playback heartbeat: a large class of embedded players use MSE,
@@ -2708,6 +2740,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         if (canPrime &&
             _webInteractionAttempts < _webMaxInteractionAttempts) {
           _webLastPrimeAt = DateTime.now();
+          // Chromium blocks autoplay of unmuted media without a *trusted*
+          // user gesture — a JS-synthesized click() from here never counts
+          // as one, on any site. Muted autoplay is always allowed, so while
+          // the page must stay hidden from the user we mute first: this is
+          // what actually lets the site's own player start decoding/
+          // fetching segments (real network evidence for the native-trial
+          // pipeline below) instead of silently failing to play at all.
+          // Left unmuted when the page is shown, since then a real user tap
+          // is available and audio is expected.
+          if (!_shouldShowWebPage) {
+            await _muteWebForNativeTrial(true);
+          }
           if (_webVidmolyPlayerMode) {
             await _primeVidmolyPlayback(controller);
           } else if (_webVideoJsPlayerMode) {
@@ -2873,19 +2917,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
         // Browser playback is already proven, but no safe native candidate
         // passed the gate. Keep the real page visible as the primary fallback.
+        //
+        // While the page is shown, weak evidence is enough — the user can
+        // see the page and a real tap can push a blocked player over the
+        // line. While it must stay hidden, no one can see or tap it, so
+        // claiming "ready" on weak evidence alone leaves the user stuck on
+        // a "playing in background" screen with nothing actually playing.
+        // Require real proof (advancing playback, or strong network
+        // evidence — see _webPlaybackSentinel) before revealing in that
+        // case; otherwise keep retrying instead of lying about the state.
+        final hasRealProof = webPlaybackProven || _webPlaybackProven;
         if (_webVidmolyPlayerMode) {
-          if (_webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2) {
-            _slog('FALLBACK_TO_WEBVIEW', 'reason=vidmoly_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits');
+          final hasWeakEvidence = _webMediaEvidenceScore >= 35 || _webMediaResourceHits >= 2;
+          if (hasRealProof || (_shouldShowWebPage && hasWeakEvidence)) {
+            _slog('FALLBACK_TO_WEBVIEW', 'reason=vidmoly_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits proof=$hasRealProof');
             await _revealVidmolyPlayer(controller);
           }
           return;
         }
         if (_webVideoJsPlayerMode) {
-          if (_webMediaEvidenceScore >= 25 ||
-              _webMediaResourceHits >= 1 ||
-              webPlaybackProven ||
-              _webPlaybackProven) {
-            _slog('FALLBACK_TO_WEBVIEW', 'reason=videojs_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits');
+          final hasWeakEvidence = _webMediaEvidenceScore >= 25 || _webMediaResourceHits >= 1;
+          if (hasRealProof || (_shouldShowWebPage && hasWeakEvidence)) {
+            _slog('FALLBACK_TO_WEBVIEW', 'reason=videojs_no_native_candidate score=$_webMediaEvidenceScore hits=$_webMediaResourceHits proof=$hasRealProof');
             await _revealVideoJsPlayer(controller);
           }
           return;
