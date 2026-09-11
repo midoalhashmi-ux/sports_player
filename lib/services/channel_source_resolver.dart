@@ -116,7 +116,7 @@ class ChannelSourceResolver {
       final isProtected = data == null || data['protected'] != false;
 
       if (!isProtected) {
-        final rawServers = data?['servers'] as List?;
+        final rawServers = data['servers'] as List?;
         if (rawServers != null && rawServers.isNotEmpty) {
           final servers = rawServers
               .whereType<Map>()
@@ -126,20 +126,20 @@ class ChannelSourceResolver {
           if (servers.isNotEmpty) {
             return StreamSession.success(
               kind: StreamKind.hls,
-              isLive: data?['status'] == 'live',
+              isLive: data['status'] == 'live',
               servers: servers,
               headers: sourceHeaders,
             );
           }
         }
 
-        final directUrl = data?['directUrl'] as String?;
+        final directUrl = data['directUrl'] as String?;
         if (directUrl == null || directUrl.isEmpty) {
           return StreamSession.failure('لم يتم ضبط رابط البث لهذه القناة بعد.');
         }
         return StreamSession.success(
           kind: StreamKind.hls,
-          isLive: data?['status'] == 'live',
+          isLive: data['status'] == 'live',
           servers: [
             StreamServerOption(
               label: 'مباشر',

@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
 import 'dart:ui' as ui;
-import 'dart:math'; // للـ XOR
 
 import 'package:http/http.dart' as http;
 
@@ -78,9 +77,9 @@ class _WebNetworkCandidate {
   String referer;
   String mime;
   int evidenceScore;
-  bool validated;
-  bool failed;
-  bool quarantined;
+  bool validated = false;
+  bool failed = false;
+  bool quarantined = false;
 
   _WebNetworkCandidate({
     required this.url,
@@ -92,9 +91,6 @@ class _WebNetworkCandidate {
     required this.referer,
     required this.mime,
     this.evidenceScore = 0,
-    this.validated = false,
-    this.failed = false,
-    this.quarantined = false,
   });
 }
 
@@ -176,7 +172,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // speed / screenshot
   double _playbackSpeed = 1.0;
   bool _savingScreenshot = false;
-  bool _showSpeedSheet = false;
 
   // swipe
   Offset? _swipeStart;
@@ -404,13 +399,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final isHls = lower.contains('.m3u8') || lower.contains('.m3u');
       final isDash = lower.contains('.mpd');
       final isProgressive = lower.contains('.mp4') || lower.contains('.webm') || lower.contains('.mov');
-      final isWeb = !(isHls || isDash || isProgressive);
 
       StreamKind kind;
-      if (isHls) kind = StreamKind.hls;
-      else if (isDash) kind = StreamKind.dash;
-      else if (isProgressive) kind = StreamKind.progressive;
-      else kind = StreamKind.web;
+      if (isHls) {
+        kind = StreamKind.hls;
+      } else if (isDash) {
+        kind = StreamKind.dash;
+      } else if (isProgressive) {
+        kind = StreamKind.progressive;
+      } else {
+        kind = StreamKind.web;
+      }
 
       return StreamSession.success(
         kind: kind,
@@ -699,48 +698,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return null;
   }
 
-  /// استخراج رابط من كائن JSON (يبحث في الحقول الشائعة).
-  String? _extractUrlFromJson(Map<String, dynamic> json) {
-    final candidates = ['url', 'link', 'src', 'source', 'playlist', 'stream', 'hls', 'dash', 'progressive', 'video', 'file', 'play', 'watch'];
-    for (final key in candidates) {
-      if (json.containsKey(key) && json[key] is String) {
-        final val = json[key].toString().trim();
-        if (val.isNotEmpty && (val.startsWith('http') || val.startsWith('/'))) {
-          return val;
-        }
-      }
-    }
-    // البحث في الحقول المتداخلة
-    for (final key in ['data', 'result', 'response', 'body']) {
-      if (json.containsKey(key) && json[key] is Map<String, dynamic>) {
-        final nested = _extractUrlFromJson(json[key] as Map<String, dynamic>);
-        if (nested != null) return nested;
-      }
-    }
-    return null;
-  }
-
-  /// استخراج رابط من HTML (يبحث عن video, source, iframe).
-  String? _extractUrlFromHtml(String html) {
-    final regex = RegExp(r'(?:src|data-src|href)\s*=\s*"([^"]+)"', caseSensitive: false);
-    final matches = regex.allMatches(html);
-    for (final match in matches) {
-      final url = match.group(1);
-      if (url != null && url.isNotEmpty && (url.startsWith('http') || url.startsWith('/'))) {
-        if (url.contains('.m3u8') || url.contains('.m3u') || url.contains('.mp4') || url.contains('.webm') || url.contains('.mpd')) {
-          return url;
-        }
-      }
-    }
-    // البحث عن روابط تشغيلية في النص
-    final fallbackRegex = RegExp(r"""https?://[^\s<>"'\)]+(?:\.m3u8|\.mpd|\.mp4|\.webm|\.m4v|/live/|/stream/)""", caseSensitive: false);
-    final fallbackMatch = fallbackRegex.firstMatch(html);
-    if (fallbackMatch != null) {
-      return fallbackMatch.group(0);
-    }
-    return null;
-  }
-
   /// تحويل الرابط النسبي إلى مطلق.
   String _resolveRelativeUrl(String url, String baseUrl) {
     final uri = Uri.tryParse(url);
@@ -756,15 +713,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return lower.contains('.m3u8') || lower.contains('.m3u') || lower.contains('.mpd') ||
         lower.contains('.mp4') || lower.contains('.webm') ||
         lower.contains('.m4v') || lower.contains('.mov');
-  }
-
-  /// محاولة تحليل JSON مع تجاهل الأخطاء.
-  dynamic _tryParseJson(String text) {
-    try {
-      return jsonDecode(text);
-    } catch (_) {
-      return null;
-    }
   }
 
   bool _looksLikeJson(String text) {
@@ -788,7 +736,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   final Map<String, String> _webCandidateLastReason = <String, String>{};
   Map<String, String>? _webContextHeaders;
   bool _webDrmDetected = false;
-  String? _webDrmSystem;
   int _webInteractionAttempts = 0;
   static const int _webMaxInteractionAttempts = 3;
   DateTime? _webLastInteractionAt;
@@ -813,7 +760,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   String? _webLastPromotedIframeUrl;
   int _webMediaEvidenceScore = 0;
   int _webMediaResourceHits = 0;
-  DateTime? _webLastMediaEvidenceAt;
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
@@ -935,7 +881,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (_webSessionState == _WebSessionState.validating ||
         _webSessionState == _WebSessionState.nativeTrial ||
         _webSessionState == _WebSessionState.candidateTrial ||
-        _webSessionState == _WebSessionState.nativePlaying) return false;
+        _webSessionState == _WebSessionState.nativePlaying) {
+      return false;
+    }
     final last = _webLastNativeTrialAt;
     if (last != null && DateTime.now().difference(last) < const Duration(seconds: 2)) {
       return false;
@@ -1086,7 +1034,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (!mounted) return;
       setState(() {
         _webDrmDetected = true;
-        _webDrmSystem = decoded['system']?.toString();
       });
       _webDetectorTimer?.cancel();
       _webDetectorTimer = null;
@@ -1100,7 +1047,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final resourceUrl = rawResourceUrl.toLowerCase();
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
       _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
-      _webLastMediaEvidenceAt = DateTime.now();
       _slog(
         'MEDIA_RESOURCE',
         'url=${_safeLogUrl(rawResourceUrl)} segmentEvidence=$segmentEvidence score=$_webMediaEvidenceScore hits=$_webMediaResourceHits',
@@ -1121,7 +1067,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (type == 'videojs_player') {
       _webVideoJsPlayerMode = true;
       _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
-      _webLastMediaEvidenceAt = DateTime.now();
       _extendWebStartupDeadline(const Duration(seconds: 10));
       _smartLog('VIDEOJS', 'player detected');
       _slog('VIDEOJS_PLAYER_DETECTED', 'score=$_webMediaEvidenceScore');
@@ -1141,7 +1086,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         );
         _webMediaEvidenceScore =
             (_webMediaEvidenceScore + 12).clamp(0, 100).toInt();
-        _webLastMediaEvidenceAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 5));
         _smartLog('HLS', 'network candidate event received');
         _slog(
@@ -1159,7 +1103,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (playing || (ready && currentTime > 0.15)) {
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
-        _webLastMediaEvidenceAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 8));
         if (playing || currentTime > 0.15) {
           _smartLog(
@@ -1778,9 +1721,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   int _scoreDetectedSource(String url) {
     final lower = url.toLowerCase();
     var score = 0;
-    if (_looksLikeHls(url)) score += 100;
-    else if (lower.contains('.mpd')) score += 85;
-    else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) score += 55;
+    if (_looksLikeHls(url)) {
+      score += 100;
+    } else if (lower.contains('.mpd')) {
+      score += 85;
+    } else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) {
+      score += 55;
+    }
     if (lower.contains('live')) score += 35;
     if (lower.contains('stream')) score += 25;
     if (lower.contains('channel')) score += 20;
@@ -1884,7 +1831,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final resMatch = RegExp(r'RESOLUTION=\d+x(\d+)').firstMatch(lines[i]);
         final height = resMatch?.group(1);
         var j = i + 1;
-        while (j < lines.length && lines[j].trim().isEmpty) j++;
+        while (j < lines.length && lines[j].trim().isEmpty) {
+          j++;
+        }
         if (j >= lines.length) continue;
         final urlLine = lines[j].trim();
         if (urlLine.isEmpty || urlLine.startsWith('#')) continue;
@@ -2277,7 +2226,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         }
         return JSON.stringify({clicked:false, reason:'no-safe-play-control'});
       })();''');
-      final text = result is String ? result : result?.toString() ?? '';
+      final text = result is String ? result : result.toString();
       if (text.contains('clicked') && text.contains('true')) {
         _smartLog('PLAY', 'safe play control dispatched');
         _extendWebStartupDeadline(const Duration(seconds: 15));
@@ -2404,7 +2353,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         } catch (_) {}
         return JSON.stringify(Array.from(out));
       })();''');
-      final text = result is String ? result : result?.toString() ?? '';
+      final text = result is String ? result : result.toString();
       final matches = RegExp(r'https?://[^"\s\]]+').allMatches(text);
       return matches.map((m) => m.group(0)!).toList();
     } catch (_) {
@@ -2682,7 +2631,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (_webDetectionInFlight ||
           _webSessionState == _WebSessionState.validating ||
           _webSessionState == _WebSessionState.nativeTrial ||
-          _webSessionState == _WebSessionState.candidateTrial) return;
+          _webSessionState == _WebSessionState.candidateTrial) {
+        return;
+      }
       if (_webDrmDetected) {
         _setWebSessionState(_WebSessionState.drmWebOnly);
         timer.cancel();
@@ -3067,7 +3018,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webLastPromotedIframeUrl = null;
     _webMediaEvidenceScore = 0;
     _webMediaResourceHits = 0;
-    _webLastMediaEvidenceAt = null;
     _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
@@ -3080,7 +3030,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _isWebSource = true;
       _webContextHeaders = null;
       _webDrmDetected = false;
-      _webDrmSystem = null;
     });
     try {
       final sourceUri = Uri.parse(url);
@@ -3160,7 +3109,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             if (_webPromotedPlayerMode) {
               _webMediaEvidenceScore = 0;
               _webMediaResourceHits = 0;
-              _webLastMediaEvidenceAt = null;
               _extendWebStartupDeadline(const Duration(seconds: 15));
             }
             await _installWebProtection(controller);
@@ -3701,7 +3649,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     setState(() {
       _playbackSpeed = speed;
-      _showSpeedSheet = false;
     });
     _scheduleHide();
   }
@@ -3737,9 +3684,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           ),
         );
       },
-    ).then((_) {
-      if (mounted) setState(() => _showSpeedSheet = false);
-    });
+    );
   }
 
   // ---------------------- screenshot ----------------------
@@ -3970,7 +3915,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
       'sec-fetch-site': 'same-origin',
-      ...?(_headers ?? {}),
+      ...(_headers ?? {}),
     };
 
     StreamSession? session;
@@ -4035,7 +3980,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // is unavailable), so nothing that currently works this way breaks.
         String apiUrl = channelId;
         if (!apiUrl.startsWith('http')) {
-          apiUrl = 'https://def.ycnapi.com' + (apiUrl.startsWith('/') ? '' : '/') + apiUrl;
+          apiUrl = 'https://def.ycnapi.com${apiUrl.startsWith('/') ? '' : '/'}$apiUrl';
         }
         session = await _resolveChannelUrl(apiUrl);
       }
@@ -4300,11 +4245,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           Text(
             _loadingMessage,
             textAlign: TextAlign.center,
-            style: TextStyle(
+            style: const TextStyle(
               color: Colors.white,
               fontSize: 17,
               fontWeight: FontWeight.w700,
-              shadows: const [
+              shadows: [
                 Shadow(color: Colors.black, blurRadius: 6, offset: Offset(0, 2)),
                 Shadow(color: Colors.black87, blurRadius: 12, offset: Offset(0, 1)),
               ],
@@ -4503,9 +4448,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         color: Colors.redAccent,
                         borderRadius: BorderRadius.circular(20),
                       ),
-                      child: Row(
+                      child: const Row(
                         mainAxisSize: MainAxisSize.min,
-                        children: const [
+                        children: [
                           Icon(Icons.circle, color: Colors.white, size: 8),
                           SizedBox(width: 5),
                           Text('مباشر',

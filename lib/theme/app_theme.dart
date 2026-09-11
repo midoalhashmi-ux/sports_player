@@ -50,12 +50,12 @@ class AppTheme {
         ),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
-      tabBarTheme: TabBarThemeData(
+      tabBarTheme: const TabBarThemeData(
         labelColor: accent,
         unselectedLabelColor: onSurfaceMuted,
         indicatorColor: accent,
-        labelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
-        unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
+        labelStyle: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+        unselectedLabelStyle: TextStyle(fontWeight: FontWeight.w500, fontSize: 14),
       ),
       cardTheme: CardThemeData(
         color: surface,
@@ -127,10 +127,10 @@ class AppTheme {
           borderRadius: BorderRadius.circular(12),
           borderSide: const BorderSide(color: accent, width: 1.4),
         ),
-        hintStyle: TextStyle(color: onSurfaceMuted),
-        labelStyle: TextStyle(color: onSurfaceMuted),
+        hintStyle: const TextStyle(color: onSurfaceMuted),
+        labelStyle: const TextStyle(color: onSurfaceMuted),
       ),
-      listTileTheme: ListTileThemeData(
+      listTileTheme: const ListTileThemeData(
         iconColor: Colors.white,
         textColor: Colors.white,
         selectedColor: accent,

@@ -1,5 +1,4 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:cross_file/cross_file.dart';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:share_plus/share_plus.dart';
@@ -303,7 +302,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 if (_links.isNotEmpty)
                   Text(
                     '${_links.length}',
-                    style: TextStyle(
+                    style: const TextStyle(
                       color: AppTheme.onSurfaceMuted,
                       fontWeight: FontWeight.w600,
                     ),
@@ -364,7 +363,7 @@ class _HomeScreenState extends State<HomeScreen> {
               style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
-            Text(
+            const Text(
               'أضف رابط بث أو أي مصدر فيديو لتشغيله من هنا مباشرة',
               textAlign: TextAlign.center,
               style: TextStyle(color: AppTheme.onSurfaceMuted, height: 1.4),
@@ -530,7 +529,7 @@ class _LinkCard extends StatelessWidget {
                       link.url,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: AppTheme.onSurfaceMuted, fontSize: 12.5),
+                      style: const TextStyle(color: AppTheme.onSurfaceMuted, fontSize: 12.5),
                     ),
                   ],
                 ),
