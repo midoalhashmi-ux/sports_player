@@ -2919,8 +2919,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             quality,
             fallbackToWeb: true,
             playbackHeaders: candidateHeaders,
+            // registered?.type == 'hls' alone missed real cases: a candidate
+            // can be confirmed HLS by strongHls (URL pattern, e.g. a '/hls/'
+            // path segment) above without ever having a matching registry
+            // entry — e.g. when the exact URL string picked up a trailing
+            // '/' somewhere between collection and this point. Without an
+            // explicit hint, ExoPlayer falls back to guessing the container
+            // from the URL's file extension, which fails outright on a URL
+            // that doesn't literally end in ".m3u8" — producing a generic
+            // "Source error" for content that is genuinely playable HLS.
+            // strongHls already carries this exact judgement (also used
+            // just above to skip redundant validation); reuse it here too.
             formatHintOverride:
-                registered?.type == 'hls' ? VideoFormat.hls : null,
+                (registered?.type == 'hls' || strongHls) ? VideoFormat.hls : null,
           );
           return;
         }
