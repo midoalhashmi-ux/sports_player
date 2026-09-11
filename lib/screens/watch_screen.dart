@@ -1935,6 +1935,56 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return headers;
   }
 
+  // بعد فشل تجربة تشغيل أصلي، ExoPlaybackException تعطي رسالة عامة جداً
+  // ("Source error") بلا أي تفصيل حقيقي (403؟ استجابة فارغة؟ صفحة HTML
+  // بدل مانفست حقيقي؟ توكن منتهي؟) — والسبب الحقيقي غالباً غير قابل
+  // للتشخيص من سجل نصي وحده، يحتاج logcat الجهاز فعلياً. هذا الفحص يطلب
+  // نفس الرابط بنفس الترويسات اللي استخدمها ExoPlayer، مباشرة بعد الفشل
+  // (بفارق أقل من ثانية، حتى لا يفوّت رابطاً موقّتاً قصير الأجل)، ويسجّل
+  // حالة HTTP الفعلية ونوع المحتوى وأول جزء من الجسم — بدون أي حاجة
+  // لـ logcat لاحقاً. تشغيله بالخلفية (unawaited) حتى لا يؤخر محاولة
+  // الإنقاذ عبر WebView التي تأتي بعده مباشرة وحساسة للتوقيت.
+  Future<void> _logNativeFailureDiagnostics(
+      String url, Map<String, String>? playbackHeaders) async {
+    try {
+      final uri = Uri.tryParse(url);
+      if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) return;
+      final headers = <String, String>{
+        ...(playbackHeaders ?? _effectiveStreamHeaders()),
+        // نكتفي بأول 2 كيلوبايت — يكفي لمعرفة هل الرد مانفست/سيجمنت حقيقي
+        // أو صفحة خطأ، بدون تحميل الملف كاملاً لمجرد التشخيص.
+        'range': 'bytes=0-2047',
+      };
+      final stopwatch = Stopwatch()..start();
+      final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+      stopwatch.stop();
+      final contentType = (response.headers['content-type'] ?? '').toLowerCase();
+      final looksTextual = contentType.isEmpty ||
+          contentType.contains('text') ||
+          contentType.contains('json') ||
+          contentType.contains('mpegurl') ||
+          contentType.contains('xml');
+      String snippet;
+      if (looksTextual) {
+        final text = response.body;
+        snippet = text
+            .substring(0, text.length.clamp(0, 200))
+            .replaceAll('\n', ' ')
+            .replaceAll('\r', '');
+      } else {
+        snippet = '<binary ${response.bodyBytes.length} bytes>';
+      }
+      _slog(
+        'NATIVE_TRIAL_DIAGNOSTIC',
+        'url=${_safeLogUrl(url)} status=${response.statusCode} contentType=$contentType '
+        'contentLength=${response.headers['content-length'] ?? response.bodyBytes.length} '
+        'latencyMs=${stopwatch.elapsedMilliseconds} snippet="$snippet"',
+      );
+    } catch (e) {
+      _slog('NATIVE_TRIAL_DIAGNOSTIC_FAILED', 'url=${_safeLogUrl(url)} error=$e');
+    }
+  }
+
   Future<bool> _validatePublicMediaSource(String url,
       {Map<String, String>? requestHeaders}) async {
     try {
@@ -3348,6 +3398,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           'NATIVE_TRIAL_FAILED',
           'url=${_safeLogUrl(failedUrl)} error=${_describePlaybackError(error)} rawError=$error nativeAttempts=$_webNativeAttempts/$_webMaxNativeAttempts — staying on WebView',
         );
+        unawaited(_logNativeFailureDiagnostics(failedUrl, playbackHeaders));
 
         // محاولة إنقاذ إضافية (مرة واحدة لكل رابط، ولا تُحتسب من ميزانية
         // المحاولات العادية): لو الرابط الفاشل يشبه HLS، نطلب من WebView
