@@ -176,13 +176,27 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   String? _seekFeedback;
   Timer? _seekFeedbackTimer;
 
+  // شارة نصية مؤقتة وسط الشاشة (وضع العرض عند كل نقرة تبديل، ونسبة التكبير
+  // أثناء التقريب/الإبعاد بإصبعين) — شكل عام واحد يُستخدم للاثنين.
+  String? _centerToast;
+  Timer? _centerToastTimer;
+
+  // تكبير/تصغير بإصبعين (مثل MX Player): 1.0 = 100% الحجم الطبيعي.
+  double _zoomScale = 1.0;
+  double _zoomGestureBaseScale = 1.0;
+
   // speed / screenshot
   double _playbackSpeed = 1.0;
   bool _savingScreenshot = false;
 
-  // swipe
+  // swipe/scale — بوابة واحدة موحّدة (GestureDetector لا يسمح بخلط
+  // onHorizontalDrag*/onVerticalDrag* مع onScale* على نفس الأداة، والتكبير
+  // بإصبعين يحتاج onScale أصلاً) — سحبة إصبع واحد تُقفَل على محور أفقي
+  // (تقديم/تأخير) أو رأسي (صوت) حسب أي اتجاه تحرّك أكثر أولاً، ولمسّتان
+  // تُعامَلان دائماً كتكبير بغض النظر عن أي قفل محور سابق.
   Offset? _swipeStart;
   bool _seekingFromSwipe = false;
+  String? _dragAxisLock; // null | 'h' | 'v' | 'zoom'
 
   static const _swipeThreshold = 28.0;
   static const _speedOptions = [0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0];
@@ -286,12 +300,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     // is stale and must not leave a permanent spinner on screen.
     final positionAdvanced = value.isPlaying && value.position > _position;
     final effectiveBuffering = value.isBuffering && !positionAdvanced;
-    setState(() {
-      _isPlaying = value.isPlaying;
-      _isBuffering = effectiveBuffering;
-      _position = value.position;
-      _duration = value.duration;
-    });
+    final playingChanged = _isPlaying != value.isPlaying;
+    final bufferingFlagChanged = _isBuffering != effectiveBuffering;
+    // Update the raw fields unconditionally (the stall watchdog and the
+    // progress bar/time text next time controls are shown both need
+    // accurate values), but only ask Flutter to rebuild this whole
+    // screen when something actually visible changed, or the on-screen
+    // progress bar/time text needs the fresh position while it's shown.
+    // video_player fires this listener several times a second during
+    // normal playback; rebuilding the entire Stack (many Positioned/
+    // AnimatedOpacity children) on every tick for no visible reason was
+    // wasted work landing on the same frame as decode/render — reported
+    // as a brief, recurring stutter across several unrelated sources,
+    // which points at UI-thread jank rather than a per-source issue.
+    _isPlaying = value.isPlaying;
+    _isBuffering = effectiveBuffering;
+    _position = value.position;
+    _duration = value.duration;
+    if (playingChanged || bufferingFlagChanged || _controlsVisible) {
+      setState(() {});
+    }
     if (effectiveBuffering && !wasBuffering) {
       _slog('NATIVE_BUFFERING_START', 'position=${value.position} isPlaying=${value.isPlaying}');
       _bufferIndicatorTimer?.cancel();
@@ -3753,8 +3781,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _scheduleHide();
   }
 
-  void _setFit(BoxFit fit) {
-    setState(() => _fit = fit);
+  void _showCenterToast(String text, {Duration duration = const Duration(milliseconds: 700)}) {
+    _centerToastTimer?.cancel();
+    setState(() => _centerToast = text);
+    _centerToastTimer = Timer(duration, () {
+      if (mounted) setState(() => _centerToast = null);
+    });
+  }
+
+  // تبديل بنقرة واحدة بدل قائمة منسدلة — بعض الخيارات كانت تظهر أسفل حافة
+  // الشاشة بدون إمكانية سحب لأعلى بحسب حجم الشاشة/الخط. كل نقرة تنتقل
+  // للوضع التالي بالترتيب (وتلف من الأخير للأول)، مع شارة نصية مؤقتة وسط
+  // الشاشة تعرض اسم الوضع الجديد فوراً.
+  void _cycleFit() {
+    final modes = _fitModes.keys.toList();
+    final next = modes[(modes.indexOf(_fit) + 1) % modes.length];
+    setState(() => _fit = next);
+    _showCenterToast(_fitModes[next]?.$1 ?? '');
   }
 
   // خمسة أوضاع عرض بدل ثلاثة — شاشات الهواتف تختلف نسبتها (19.5:9، 20:9،
@@ -3771,44 +3814,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     BoxFit.fitHeight: ('ملء الارتفاع', 'يملأ ارتفاع الشاشة بالضبط، قد يقصّ من الجانبين', Icons.height),
     BoxFit.fill: ('تمديد', 'يملأ الشاشة بدون قص، مع تمدد بسيط للصورة', Icons.aspect_ratio),
   };
-
-  void _openFitModeSheet() {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppTheme.surface,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) {
-        return SafeArea(
-          child: Wrap(
-            children: [
-              const Padding(
-                padding: EdgeInsets.fromLTRB(16, 14, 16, 4),
-                child: Text('وضع عرض الفيديو',
-                    style: TextStyle(color: Colors.white70)),
-              ),
-              for (final entry in _fitModes.entries)
-                ListTile(
-                  leading: Icon(entry.value.$3, color: Colors.white),
-                  title: Text(entry.value.$1,
-                      style: const TextStyle(color: Colors.white)),
-                  subtitle: Text(entry.value.$2,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                  trailing: _fit == entry.key
-                      ? const Icon(Icons.check, color: Colors.greenAccent)
-                      : null,
-                  onTap: () {
-                    Navigator.pop(sheetContext);
-                    _setFit(entry.key);
-                  },
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
 
   void _jumpToLive() {
     final controller = _controller;
@@ -3922,49 +3927,63 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     });
   }
 
-  void _onHorizontalDragStart(DragStartDetails details) {
+  double _dragStartVolume = 0;
+
+  // بوابة إيماءات موحّدة (راجع تعليق الحقول أعلاه لسبب الدمج): تقديم/تأخير
+  // أفقياً، صوت رأسياً، تكبير/تصغير بإصبعين — كلها من نفس onScale*.
+  void _onScaleStart(ScaleStartDetails details) {
     if (_locked || _state != _LoadState.ready) return;
-    if (!_contentIsSeekable) return;
-    _swipeStart = details.globalPosition;
+    _swipeStart = details.focalPoint;
     _seekingFromSwipe = false;
+    _dragAxisLock = null;
+    _dragStartVolume = _muted ? 0 : _volume;
+    _zoomGestureBaseScale = _zoomScale;
   }
 
-  void _onHorizontalDragUpdate(DragUpdateDetails details) {
-    if (_swipeStart == null || _seekingFromSwipe) return;
-    final delta = details.globalPosition.dx - _swipeStart!.dx;
-    if (delta.abs() > _swipeThreshold) {
-      _seekingFromSwipe = true;
-      final seconds = (delta / _swipeThreshold).round() * 5;
-      _seekBy(Duration(seconds: seconds));
-      _seekFeedbackTimer?.cancel();
-      setState(() => _seekFeedback = delta > 0 ? 'right' : 'left');
-      _seekFeedbackTimer = Timer(const Duration(milliseconds: 600), () {
-        if (mounted) setState(() => _seekFeedback = null);
-      });
-      _swipeStart = details.globalPosition;
+  void _onScaleUpdate(ScaleUpdateDetails details) {
+    if (_swipeStart == null) return;
+    if (details.pointerCount >= 2) {
+      _dragAxisLock = 'zoom';
+      final next = (_zoomGestureBaseScale * details.scale).clamp(0.5, 3.0);
+      setState(() => _zoomScale = next);
+      _showCenterToast('${(next * 100).round()}%');
+      return;
+    }
+    if (_dragAxisLock == 'zoom') return; // انتهت لمسّة ثانية، هذه الحركة صارت ملك التكبير
+    if (_dragAxisLock == null) {
+      final total = details.focalPoint - _swipeStart!;
+      if (total.dx.abs() > 8 && total.dx.abs() > total.dy.abs()) {
+        _dragAxisLock = 'h';
+      } else if (total.dy.abs() > 8 && total.dy.abs() > total.dx.abs()) {
+        _dragAxisLock = 'v';
+      }
+    }
+    if (_dragAxisLock == 'h') {
+      if (!_contentIsSeekable || _seekingFromSwipe) return;
+      final delta = details.focalPoint.dx - _swipeStart!.dx;
+      if (delta.abs() > _swipeThreshold) {
+        _seekingFromSwipe = true;
+        final seconds = (delta / _swipeThreshold).round() * 5;
+        _seekBy(Duration(seconds: seconds));
+        _seekFeedbackTimer?.cancel();
+        setState(() => _seekFeedback = delta > 0 ? 'right' : 'left');
+        _seekFeedbackTimer = Timer(const Duration(milliseconds: 600), () {
+          if (mounted) setState(() => _seekFeedback = null);
+        });
+      }
+    } else if (_dragAxisLock == 'v') {
+      final height = MediaQuery.of(context).size.height;
+      final delta = (_swipeStart!.dy - details.focalPoint.dy) / height;
+      final newVolume = (_dragStartVolume + delta * 100).clamp(0.0, 100.0);
+      _setVolume(newVolume);
+      _scheduleHide();
     }
   }
 
-  void _onHorizontalDragEnd(DragEndDetails details) {
+  void _onScaleEnd(ScaleEndDetails details) {
     _swipeStart = null;
     _seekingFromSwipe = false;
-  }
-
-  double _dragStartVolume = 0;
-
-  void _onVerticalDragStart(DragStartDetails details) {
-    if (_locked || _state != _LoadState.ready) return;
-    _swipeStart = details.globalPosition;
-    _dragStartVolume = _muted ? 0 : _volume;
-  }
-
-  void _onVerticalDragUpdate(DragUpdateDetails details) {
-    if (_swipeStart == null) return;
-    final height = MediaQuery.of(context).size.height;
-    final delta = (_swipeStart!.dy - details.globalPosition.dy) / height;
-    final newVolume = (_dragStartVolume + delta * 100).clamp(0.0, 100.0);
-    _setVolume(newVolume);
-    _scheduleHide();
+    _dragAxisLock = null;
   }
 
   // ---------------------- sheets ----------------------
@@ -4102,6 +4121,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _hiddenSourceGraceTimer?.cancel();
     _loadingTickerTimer?.cancel();
     _seekFeedbackTimer?.cancel();
+    _centerToastTimer?.cancel();
     _slowConnectionTimer?.cancel();
     _bufferIndicatorTimer?.cancel();
     _stallNudgeTimer?.cancel();
@@ -4242,11 +4262,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // The outer playback gesture layer is only needed for native video.
       onTap: _isWebSource ? null : _toggleControls,
       onDoubleTapDown: _isWebSource ? null : _handleDoubleTapDown,
-      onHorizontalDragStart: _isWebSource ? null : _onHorizontalDragStart,
-      onHorizontalDragUpdate: _isWebSource ? null : _onHorizontalDragUpdate,
-      onHorizontalDragEnd: _isWebSource ? null : _onHorizontalDragEnd,
-      onVerticalDragStart: _isWebSource ? null : _onVerticalDragStart,
-      onVerticalDragUpdate: _isWebSource ? null : _onVerticalDragUpdate,
+      // onScale* subsumes single-finger pan (seek/volume) and two-finger
+      // pinch (zoom) on one recognizer — GestureDetector doesn't allow
+      // mixing onHorizontalDrag*/onVerticalDrag* with onScale* together.
+      onScaleStart: _isWebSource ? null : _onScaleStart,
+      onScaleUpdate: _isWebSource ? null : _onScaleUpdate,
+      onScaleEnd: _isWebSource ? null : _onScaleEnd,
       child: Stack(
             fit: StackFit.expand,
             children: [
@@ -4270,7 +4291,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ),
               if (_isHiddenWebSourceActive && _hiddenSourceGraceElapsed)
                 _buildHiddenWebSourceStatus(),
-              if (_state == _LoadState.ready && !_isWebSource) Center(child: _buildVideo()),
+              if (_state == _LoadState.ready && !_isWebSource)
+                Center(
+                  child: Transform.scale(scale: _zoomScale, child: _buildVideo()),
+                ),
               if (_isLoadingContent &&
                   _webSessionState != _WebSessionState.humanVerificationRequired)
                 _buildLoading(),
@@ -4329,6 +4353,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
+              if (_centerToast != null)
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      _centerToast!,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ),
               if (_state == _LoadState.ready && !_isWebSource && !_locked)
                 AnimatedOpacity(
                   opacity: _controlsVisible ? 1 : 0,
@@ -4367,7 +4409,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                       child: _circleIconButton(
                         icon: _fitModes[_fit]?.$3 ?? Icons.aspect_ratio,
                         tooltip: 'وضع عرض الفيديو (${_fitModes[_fit]?.$1 ?? ''})',
-                        onPressed: _openFitModeSheet,
+                        onPressed: _cycleFit,
                       ),
                     ),
                   ),
@@ -4838,7 +4880,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 ),
                 onTap: () {
                   Navigator.pop(sheetContext);
-                  _openFitModeSheet();
+                  _cycleFit();
                 },
               ),
               if (_session != null &&
