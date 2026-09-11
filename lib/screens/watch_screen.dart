@@ -1927,7 +1927,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     // "https://example.com//") تسرّب من فحص عام وتسبب بمحاولة تشغيل أصلي
     // فاشلة مضمونة بدل استبعاده من البداية.
     final uri = Uri.tryParse(url);
-    if (uri != null && (uri.path.isEmpty || uri.path == '/')) return true;
+    // "uri.path == '/'" فقط لا يكفي: رابط بشرطتين بعد الدومين مباشرة
+    // (مثال فعلي بسجل تشخيص: "https://miravid.club//") يُحلَّل بمساره
+    // كسلسلة "//" لا "/" المفردة، فيفلت من هذا الفحص ويستهلك محاولة
+    // تشغيل أصلي كاملة على رابط لا مسار حقيقي له إطلاقاً.
+    if (uri != null && uri.path.replaceAll('/', '').isEmpty) return true;
     return false;
   }
 
