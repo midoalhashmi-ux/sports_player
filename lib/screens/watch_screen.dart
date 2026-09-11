@@ -2718,6 +2718,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           return;
         }
         _webDetectorTimer?.cancel();
+        if (_tryNextWebServer('startup_timeout')) return;
         setState(() {
           _state = _LoadState.error;
           _isWebSource = false;
@@ -3185,8 +3186,37 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  Future<void> _openWebSource(String url) async {
+  // فشل نهائي بجلسة WebView (صفحة لم تفتح أصلاً، أو انتهت مهلة الاكتشاف
+  // بدون أي نتيجة) — لو للحلقة أكثر من سيرفر (استُوردت من أكثر من موقع،
+  // راجع sources[]/site-importer.js) يجرّب السيرفر التالي تلقائياً بدل
+  // عرض شاشة خطأ فوراً؛ فقط عند نفاد كل السيرفرات تُعرض الشاشة الحقيقية.
+  // "التالي" يُحسب من موضع _activeServer الحالي بقائمة السيرفرات نفسها،
+  // لا دائماً الأول، حتى لا تُعاد تجربة سيرفر فشل للتو لو تكرّر الفشل.
+  bool _tryNextWebServer(String reason) {
+    final session = _session;
+    if (session == null || session.kind != StreamKind.web || !session.hasMultipleServers) {
+      return false;
+    }
+    final servers = session.servers;
+    final currentIndex = _activeServer == null
+        ? -1
+        : servers.indexWhere((s) => identical(s, _activeServer));
+    if (currentIndex + 1 >= servers.length) return false;
+    final next = servers[currentIndex + 1];
+    _slog(
+      'WEB_SERVER_AUTO_FALLBACK',
+      'from=${_activeServer?.label} to=${next.label} reason=$reason',
+    );
+    unawaited(_openWebSource(next.qualities.first.url, server: next));
+    return true;
+  }
+
+  Future<void> _openWebSource(String url, {StreamServerOption? server}) async {
     _slog('OPEN_WEB_SOURCE', _safeLogUrl(url));
+    if (server != null) {
+      _activeServer = server;
+      _activeQuality = server.qualities.isNotEmpty ? server.qualities.first : null;
+    }
     _webDetectorTimer?.cancel();
     _webSessionGeneration++;
     _webSessionState = _WebSessionState.loadingPage;
@@ -3360,6 +3390,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               'code=${error.errorCode} desc=${error.description} mainFrame=${error.isForMainFrame} sessionState=$_webSessionState',
             );
             if (mounted && error.isForMainFrame == true && _webSessionState != _WebSessionState.candidateTrial && _webSessionState != _WebSessionState.nativePlaying) {
+              if (_tryNextWebServer('web_resource_error:${error.errorCode}')) return;
               setState(() {
                 _state = _LoadState.error;
                 _errorMessage = 'تعذر فتح صفحة البث. تحقق من الرابط والاتصال بالإنترنت ثم حاول مرة أخرى.';
@@ -3374,6 +3405,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       setState(() => _state = _LoadState.loading);
     } catch (_) {
       if (!mounted) return;
+      if (_tryNextWebServer('open_web_source_failed')) return;
       setState(() {
         _state = _LoadState.error;
         _errorMessage = 'تعذر فتح صفحة المصدر. تحقق من الرابط وحاول مرة أخرى.';
@@ -4012,7 +4044,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                           : null,
                       onTap: () {
                         Navigator.pop(context);
-                        _playServerQuality(server, server.qualities.first);
+                        // جلسة WebView (episodes.streamType='web') تحتاج
+                        // فتح صفحة السيرفر الجديد كاملة، لا تجربة تشغيل
+                        // أصلي مباشرة — quality.url هنا صفحة ويب وليست
+                        // رابط وسائط.
+                        if (session.kind == StreamKind.web) {
+                          _openWebSource(server.qualities.first.url, server: server);
+                        } else {
+                          _playServerQuality(server, server.qualities.first);
+                        }
                       },
                     )),
               ],
@@ -4243,7 +4283,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       'kind=${session.kind} url=${_safeLogUrl(session.servers.first.qualities.first.url)}',
     );
     if (session.kind == StreamKind.web) {
-      await _openWebSource(session.servers.first.qualities.first.url);
+      await _openWebSource(
+        session.servers.first.qualities.first.url,
+        server: session.servers.first,
+      );
       return;
     }
     await _playServerQuality(
