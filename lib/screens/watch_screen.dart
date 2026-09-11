@@ -899,6 +899,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   void _setWebSessionState(_WebSessionState next) {
     if (_webSessionState == next) return;
+    // nativePlaying يجب يبقى نهائياً بمجرد تحقّقه (راجع state-machine.md) —
+    // شوهد فعلياً بسجل تشخيص: بعد نجاح تشغيل أصلي (PLAY_SERVER_QUALITY_SUCCESS)
+    // وبينما WebView المخفي يستمر يتنقّل عبر سلسلة تحويلات إعلانية بالخلفية،
+    // onPageFinished يمرّ من حارسه الخاص وتُستدعى _autoDetectWebSource من
+    // جديد، اللي تكتب فوق هذه الحالة بلا شرط في أول سطر لها — فيُهدر آخر
+    // محاولة تشغيل أصلي على إعادة تشغيل مصدر شغّال فعلاً، ويُسمع المستخدم
+    // انقطاعاً/إعادة تشغيل للفيديو الشغّال. حماية مركزية هنا أوثق من ملاحقة
+    // كل موقع استدعاء على حدة. الجلسة الجديدة (_openWebSource) تتجاوز هذا
+    // الحارس عمداً بتعيين الحقل مباشرة لا عبر هذه الدالة.
+    if (_webSessionState == _WebSessionState.nativePlaying) return;
     _webSessionState = next;
   }
 
