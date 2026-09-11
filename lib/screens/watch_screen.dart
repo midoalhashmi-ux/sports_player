@@ -872,7 +872,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   String _normalizeCandidate(String url) {
     final uri = Uri.tryParse(url.trim());
     if (uri == null) return url.trim();
-    return uri.replace(fragment: '').toString();
+    // uri.replace(fragment: '') sets an *empty* fragment rather than
+    // clearing it, so toString() appends a stray trailing '#' to every
+    // candidate — even ones that never had one. Confirmed by direct test
+    // against the pinned Flutter 3.27.0 Dart SDK. removeFragment() clears
+    // it properly. This matters because the normalized string is used as
+    // an exact-match dedup/registry key (_webCandidateRegistry,
+    // _webFailedNativeSources, _webSeenSources) and as the literal URL
+    // handed to native trial — a spurious '#' can make the same logical
+    // source look like two different candidates depending on which code
+    // path last touched it.
+    return uri.removeFragment().toString();
   }
 
   bool _canTrialNative(String source) {
