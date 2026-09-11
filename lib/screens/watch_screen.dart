@@ -157,6 +157,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _slowConnectionTimer;
   Timer? _bufferIndicatorTimer;
   bool _slowConnectionHint = false;
+  // مراقب انقطاع طويل أثناء المشاهدة (وليس عند البدء — ذاك له منطق منفصل
+  // بالكامل بمسار الاكتشاف): تخزين مؤقت بدون تقدّم لفترة طويلة يعني الاتصال
+  // مات فعلياً غالباً، لا مجرد بطء عابر. بدون هذا كان المستخدم يبقى عالقاً
+  // على مؤشر تحميل للأبد بدون أي مخرج غير الخروج يدوياً من الشاشة.
+  Timer? _stallNudgeTimer;
+  Timer? _stallGiveUpTimer;
+  bool _stallNudgeAttempted = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double _volume = 100;
@@ -298,6 +305,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         }
       });
       _startSlowConnectionTimer();
+      _startStallWatchdog();
     } else if (!effectiveBuffering && wasBuffering) {
       _slog('NATIVE_BUFFERING_END', 'position=${value.position}');
       _bufferIndicatorTimer?.cancel();
@@ -306,6 +314,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         setState(() => _bufferIndicatorVisible = false);
       }
       _cancelSlowConnectionTimer();
+      _cancelStallWatchdog();
     }
   }
 
@@ -315,6 +324,42 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (mounted && _isBuffering) {
         setState(() => _slowConnectionHint = true);
       }
+    });
+  }
+
+  void _cancelStallWatchdog() {
+    _stallNudgeTimer?.cancel();
+    _stallNudgeTimer = null;
+    _stallGiveUpTimer?.cancel();
+    _stallGiveUpTimer = null;
+    _stallNudgeAttempted = false;
+  }
+
+  // مراقبة تخزين مؤقت طويل بدون تقدّم أثناء مشاهدة فعلية (بعد نجاح
+  // التشغيل، وليس فشل البدء الأولي — ذاك منفصل تماماً بمنطق الاكتشاف).
+  // محاولة إنعاش واحدة (seekTo لنفس الموضع يجبر إعادة طلب البيانات من
+  // الخادم — يحل مشاكل اتصال ماتت فعلياً دون أي علامة خطأ صريحة)، فإذا
+  // ما نفعت خلال مهلة إضافية، الانتقال لشاشة الخطأ الموجودة (بزر إعادة
+  // المحاولة المعروف) بدل ترك المستخدم عالقاً على مؤشر تحميل للأبد.
+  void _startStallWatchdog() {
+    _stallNudgeTimer?.cancel();
+    _stallNudgeTimer = Timer(const Duration(seconds: 20), () {
+      if (!mounted || !_isBuffering || _stallNudgeAttempted) return;
+      _stallNudgeAttempted = true;
+      final controller = _controller;
+      if (controller != null && controller.value.isInitialized) {
+        _slog('NATIVE_STALL_RECOVERY_NUDGE', 'position=${controller.value.position}');
+        controller.seekTo(controller.value.position);
+      }
+      _stallGiveUpTimer?.cancel();
+      _stallGiveUpTimer = Timer(const Duration(seconds: 20), () {
+        if (!mounted || !_isBuffering) return;
+        _slog('NATIVE_STALL_GIVE_UP', 'position=$_position');
+        setState(() {
+          _state = _LoadState.error;
+          _errorMessage = 'انقطع الاتصال أثناء التشغيل. جرّب مرة أخرى أو غيّر السيرفر.';
+        });
+      });
     });
   }
 
@@ -3712,15 +3757,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     setState(() => _fit = fit);
   }
 
-  // ثلاثة أوضاع عرض بدل التبديل بين وضعين فقط — شاشات الهواتف تختلف
-  // نسبتها (19.5:9، 20:9، 21:9...) عن نسبة الفيديو غالباً، فوضع واحد
-  // لا يناسب كل الأجهزة: "احتواء" يترك حوافاً سوداء لكن يعرض الفيديو
-  // كاملاً، و"تعبئة" تملأ الشاشة لكن قد تقصّ حواف الصورة (والترجمة
-  // المدمجة القريبة من الحافة)، و"تمديد" تملأ الشاشة بدون قص أي جزء
-  // (بديل عملي لمن يزعجه القص أكثر من التمدد الطفيف).
+  // خمسة أوضاع عرض بدل ثلاثة — شاشات الهواتف تختلف نسبتها (19.5:9، 20:9،
+  // 21:9...) عن نسبة الفيديو غالباً، فثلاثة أوضاع لا تكفي لتناسب كل جهاز/
+  // ذوق: "احتواء" يترك حوافاً سوداء لكن يعرض الفيديو كاملاً، "تعبئة الشاشة"
+  // تملأ الاثنين تلقائياً (تقصّ البُعد الأطول)، "ملء العرض"/"ملء الارتفاع"
+  // يعطيان تحكماً يدوياً صريحاً بأي بُعد يُملأ بالضبط (بديل لمن يفضّل قصّاً
+  // بجهة واحدة محددة بدل قرار "تعبئة" التلقائي)، و"تمديد" تملأ الشاشة بدون
+  // قص أي جزء إطلاقاً (بديل عملي لمن يزعجه القص أكثر من التمدد الطفيف).
   static const _fitModes = <BoxFit, (String, String, IconData)>{
     BoxFit.contain: ('احتواء', 'يعرض الفيديو كاملاً، قد تظهر حواف سوداء', Icons.fit_screen),
     BoxFit.cover: ('تعبئة الشاشة', 'يملأ الشاشة بالكامل، قد يقصّ حواف الصورة', Icons.crop_free),
+    BoxFit.fitWidth: ('ملء العرض', 'يملأ عرض الشاشة بالضبط، قد يقصّ من الأعلى والأسفل', Icons.swap_horiz),
+    BoxFit.fitHeight: ('ملء الارتفاع', 'يملأ ارتفاع الشاشة بالضبط، قد يقصّ من الجانبين', Icons.height),
     BoxFit.fill: ('تمديد', 'يملأ الشاشة بدون قص، مع تمدد بسيط للصورة', Icons.aspect_ratio),
   };
 
@@ -3977,27 +4025,66 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
 
   // ---------------------- lifecycle ----------------------
   bool _wasPlayingBeforeBackground = false;
+  bool _webWasPlayingBeforeBackground = false;
+
+  // إيقاف/استئناف فيديو الـWebView عند تعليق/استئناف التطبيق — بنفس منطق
+  // المشغّل الأصلي أدناه. بدون هذا، أي جلسة تشغّل عبر WebView (شائعة جداً:
+  // كل مواقع JWPlayer/Video.js المعروفة تُعرض عبر WebView مباشرة، وأيضاً
+  // الملاذ الأخير بوضع الإخفاء) تستمر بتشغيل صوت/فيديو خلفياً بصمت عند
+  // تصغير التطبيق — استهلاك بطارية/بيانات غير متوقع، واستمرار صفحة الموقع
+  // بالتنقل عبر سلاسل إعلانية بالخلفية (راجع تعليق PAGE_FINISHED).
+  Future<void> _pauseWebPlayback() async {
+    final controller = _webController;
+    if (controller == null) return;
+    try {
+      final result = await controller.runJavaScriptReturningResult(r'''(() => {
+        let wasPlaying = false;
+        document.querySelectorAll('video,audio').forEach((v) => {
+          try {
+            if (!v.paused) { wasPlaying = true; v.pause(); }
+          } catch (_) {}
+        });
+        return wasPlaying;
+      })();''');
+      _webWasPlayingBeforeBackground = result == true || result.toString() == 'true';
+    } catch (_) {}
+  }
+
+  Future<void> _resumeWebPlayback() async {
+    final controller = _webController;
+    if (controller == null || !_webWasPlayingBeforeBackground) return;
+    _webWasPlayingBeforeBackground = false;
+    try {
+      await controller.runJavaScript(r'''(() => {
+        document.querySelectorAll('video,audio').forEach((v) => {
+          try { if (v.paused && v.readyState >= 2) v.play().catch(() => {}); } catch (_) {}
+        });
+      })();''');
+    } catch (_) {}
+  }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+    final hasNative = controller != null && controller.value.isInitialized;
 
     switch (state) {
       case AppLifecycleState.paused:
       case AppLifecycleState.inactive:
       case AppLifecycleState.detached:
       case AppLifecycleState.hidden:
-        if (controller.value.isPlaying) {
+        if (hasNative && controller.value.isPlaying) {
           _wasPlayingBeforeBackground = true;
           controller.pause();
         }
+        if (_isWebSource) unawaited(_pauseWebPlayback());
         break;
       case AppLifecycleState.resumed:
-        if (_wasPlayingBeforeBackground) {
+        if (hasNative && _wasPlayingBeforeBackground) {
           _wasPlayingBeforeBackground = false;
           controller.play();
         }
+        if (_isWebSource) unawaited(_resumeWebPlayback());
         break;
     }
   }
@@ -4017,6 +4104,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _seekFeedbackTimer?.cancel();
     _slowConnectionTimer?.cancel();
     _bufferIndicatorTimer?.cancel();
+    _stallNudgeTimer?.cancel();
+    _stallGiveUpTimer?.cancel();
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
