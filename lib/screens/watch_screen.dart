@@ -3554,7 +3554,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final controller = _controller;
     if (controller == null) return;
     final target = _position + delta;
+    final wasPlaying = _isPlaying;
     controller.seekTo(target < Duration.zero ? Duration.zero : target);
+    // Seeking past the buffered window can drop ExoPlayer's playWhenReady on
+    // some sources/devices, leaving playback paused until the user manually
+    // taps play — unlike YouTube, which always resumes after a seek. Force
+    // resume here when playback was already in progress before the seek.
+    if (wasPlaying) controller.play();
     _cancelSlowConnectionTimer();
     if (_isBuffering) _startSlowConnectionTimer();
     _scheduleHide();
@@ -4614,8 +4620,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                               : _duration.inMilliseconds.toDouble(),
                           activeColor: Colors.redAccent,
                           inactiveColor: Colors.white30,
-                          onChanged: (value) => _controller
-                              ?.seekTo(Duration(milliseconds: value.toInt())),
+                          onChanged: (value) {
+                            final controller = _controller;
+                            if (controller == null) return;
+                            final wasPlaying = _isPlaying;
+                            controller.seekTo(
+                                Duration(milliseconds: value.toInt()));
+                            if (wasPlaying) controller.play();
+                          },
                         ),
                       ),
                     ),
