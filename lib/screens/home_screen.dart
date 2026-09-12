@@ -188,6 +188,7 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (_) => WatchScreen(
           externalUrl: link.url,
           externalUserAgent: link.userAgent,
+          title: link.title,
         ),
       ),
     );

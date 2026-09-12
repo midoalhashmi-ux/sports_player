@@ -33,6 +33,40 @@ class _ResolvedPublicUrl {
   const _ResolvedPublicUrl(this.url, this.headers);
 }
 
+/// انكماش خفيف عند الضغط ورجوع فوري عند الإفلات — نفس إحساس الاستجابة
+/// السريعة بأزرار يوتيوب. لا يستبدل onTap الأصلي للـchild (عادة InkWell
+/// يوفّر تأثير التموّج)، فقط يضيف حركة قياس فوقه.
+class _BouncyPress extends StatefulWidget {
+  final Widget child;
+  const _BouncyPress({required this.child});
+
+  @override
+  State<_BouncyPress> createState() => _BouncyPressState();
+}
+
+class _BouncyPressState extends State<_BouncyPress> {
+  double _scale = 1.0;
+
+  void _set(double value) {
+    if (mounted) setState(() => _scale = value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      onPointerDown: (_) => _set(0.86),
+      onPointerUp: (_) => _set(1.0),
+      onPointerCancel: (_) => _set(1.0),
+      child: AnimatedScale(
+        scale: _scale,
+        duration: const Duration(milliseconds: 100),
+        curve: Curves.easeOut,
+        child: widget.child,
+      ),
+    );
+  }
+}
+
 class _DecodedPayload {
   final String text;
   final String method;
@@ -124,12 +158,17 @@ class WatchScreen extends StatefulWidget {
   final String? channelId;
   final String? externalUrl;
   final String? externalUserAgent;
+  // اسم الحلقة/الفيلم المعروض بأعلى شاشة المشاهدة (مثل يوتيوب) — اختياري
+  // تماماً: مصدره إما رابط عميق من BinSheikh (title=...) أو رابط محفوظ
+  // يدوياً (SavedLink.title). غيابه لا يعطّل أي شيء، فقط لا يظهر الشريط.
+  final String? title;
 
   const WatchScreen({
     super.key,
     this.channelId,
     this.externalUrl,
     this.externalUserAgent,
+    this.title,
   });
 
   @override
@@ -192,7 +231,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _locked = false;
   BoxFit _fit = BoxFit.contain;
   String? _seekFeedback;
+  // مجموع الثواني المتراكمة بنفس الاتجاه خلال نافذة التغذية الراجعة —
+  // مثل يوتيوب: نقر مزدوج متكرر بسرعة بنفس الجهة يظهر "+20"، "+30"... بدل
+  // إعادة البدء من +10 كل مرة.
+  int _seekFeedbackAccumulated = 0;
   Timer? _seekFeedbackTimer;
+  // مثل يوتيوب: كرة شريط التقدّم تظهر فقط أثناء السحب الفعلي، غير ذلك
+  // خط نظيف بلا كرة دائمة الظهور.
+  bool _isScrubbingSlider = false;
 
   // شارة نصية مؤقتة وسط الشاشة (وضع العرض عند كل نقرة تبديل، ونسبة التكبير
   // أثناء التقريب/الإبعاد بإصبعين) — شكل عام واحد يُستخدم للاثنين.
@@ -4175,11 +4221,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (!_contentIsSeekable) return;
     final width = MediaQuery.of(context).size.width;
     final isRight = details.globalPosition.dx > width / 2;
+    final side = isRight ? 'right' : 'left';
     _seekBy(Duration(seconds: isRight ? 10 : -10));
     _seekFeedbackTimer?.cancel();
-    setState(() => _seekFeedback = isRight ? 'right' : 'left');
-    _seekFeedbackTimer = Timer(const Duration(milliseconds: 500), () {
-      if (mounted) setState(() => _seekFeedback = null);
+    setState(() {
+      // نقر متكرر بسرعة بنفس الجهة يراكم (+10 ← +20 ← +30...)؛ تغيير
+      // الجهة يبدأ من +10 من جديد — نفس سلوك يوتيوب بالنقر المزدوج.
+      _seekFeedbackAccumulated =
+          _seekFeedback == side ? _seekFeedbackAccumulated + 10 : 10;
+      _seekFeedback = side;
+    });
+    _seekFeedbackTimer = Timer(const Duration(milliseconds: 650), () {
+      if (mounted) {
+        setState(() {
+          _seekFeedback = null;
+          _seekFeedbackAccumulated = 0;
+        });
+      }
     });
   }
 
@@ -4222,9 +4280,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         final seconds = (delta / _swipeThreshold).round() * 5;
         _seekBy(Duration(seconds: seconds));
         _seekFeedbackTimer?.cancel();
-        setState(() => _seekFeedback = delta > 0 ? 'right' : 'left');
+        setState(() {
+          _seekFeedback = delta > 0 ? 'right' : 'left';
+          _seekFeedbackAccumulated = seconds.abs();
+        });
         _seekFeedbackTimer = Timer(const Duration(milliseconds: 600), () {
-          if (mounted) setState(() => _seekFeedback = null);
+          if (mounted) {
+            setState(() {
+              _seekFeedback = null;
+              _seekFeedbackAccumulated = 0;
+            });
+          }
         });
       }
     } else if (_dragAxisLock == 'v') {
@@ -4623,21 +4689,60 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
+              // تأثير مستوحى من يوتيوب (بدون نسخ حرفي): لوحة نصف-دائرية
+              // تلتصق بحافة الشاشة المناسبة وتنبض عند كل نقرة إضافية سريعة
+              // بنفس الجهة، مع تراكم الثواني ("+20"، "+30"...) بدل أيقونة
+              // ثابتة لا تتحرك.
               if (_seekFeedback != null)
                 Align(
-                  alignment: Alignment(_seekFeedback == 'right' ? 0.78 : -0.78, 0),
-                  child: Container(
-                    padding: const EdgeInsets.all(14),
-                    decoration: const BoxDecoration(
-                      color: Colors.black45,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      _seekFeedback == 'right'
-                          ? Icons.forward_10
-                          : Icons.replay_10,
-                      color: Colors.white,
-                      size: 36,
+                  alignment: _seekFeedback == 'right'
+                      ? Alignment.centerRight
+                      : Alignment.centerLeft,
+                  child: FractionallySizedBox(
+                    widthFactor: 0.36,
+                    heightFactor: 0.6,
+                    child: TweenAnimationBuilder<double>(
+                      key: ValueKey(_seekFeedbackAccumulated),
+                      tween: Tween(begin: 0.86, end: 1.0),
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOutBack,
+                      builder: (context, scale, child) =>
+                          Transform.scale(scale: scale, child: child),
+                      child: Container(
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.black45,
+                          borderRadius: BorderRadius.horizontal(
+                            left: _seekFeedback == 'right'
+                                ? const Radius.circular(120)
+                                : Radius.zero,
+                            right: _seekFeedback == 'left'
+                                ? const Radius.circular(120)
+                                : Radius.zero,
+                          ),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _seekFeedback == 'right'
+                                  ? Icons.keyboard_double_arrow_right
+                                  : Icons.keyboard_double_arrow_left,
+                              color: Colors.white,
+                              size: 38,
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              '$_seekFeedbackAccumulated ثانية',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -4925,13 +5030,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     double size = 48,
     double iconSize = 24,
     Widget? child,
+    bool bounce = false,
   }) {
-    return Padding(
+    // خلفية أخف بكثير من قبل — التدرّج الأسود خلف شريط التحكم بأكمله
+    // (راجع _buildControls) يكفي وحده لوضوح الأيقونات فوق أي فيديو، فلا
+    // حاجة لخلفية دائرية داكنة إضافية خلف كل أيقونة (شكل يوتيوب النظيف).
+    final button = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Tooltip(
         message: tooltip,
         child: Material(
-          color: Colors.black.withValues(alpha: 0.35),
+          color: Colors.black.withValues(alpha: 0.15),
           shape: const CircleBorder(),
           child: InkWell(
             customBorder: const CircleBorder(),
@@ -4948,6 +5057,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         ),
       ),
     );
+    return bounce ? _BouncyPress(child: button) : button;
   }
 
   Widget _buildControls() {
@@ -4975,7 +5085,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   // build()) عند top:8,right:8 لأنه كان يتشارك نفس منطقة
                   // الشاشة فعلياً مع زري القفل/وضع العرض (top:8,left:8/62)
                   // ويظهر خلفهما (مؤكَّد من المستخدم عبر لقطة شاشة حقيقية).
-                  if (isLive && !canSeek && !compactControls)
+                  // نفس هذا الفراغ يحجز مساحة زر الرجوع العائم فلا يتراكب
+                  // مع اسم الحلقة/الفيلم أدناه.
+                  const SizedBox(width: 56),
+                  if (isLive && !canSeek && !compactControls) ...[
                     Container(
                       padding: const EdgeInsets.symmetric(
                           horizontal: 9, vertical: 4),
@@ -4996,7 +5109,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         ],
                       ),
                     ),
-                  const Spacer(),
+                    const SizedBox(width: 10),
+                  ],
+                  // اسم الحلقة/الفيلم — مثل يوتيوب، بجانب زر الرجوع. اختياري
+                  // تماماً (راجع WatchScreen.title): يعتمد على تمرير الاسم
+                  // فعلياً من الشاشة التي تفتح المشغّل (BinSheikh أو رابط
+                  // محفوظ يدوياً) — غيابه لا يعطّل أي شيء، الصف يتصرّف
+                  // بالضبط كما كان بالسابق (Spacer فقط).
+                  if (widget.title != null && widget.title!.trim().isNotEmpty)
+                    Expanded(
+                      child: Text(
+                        widget.title!.trim(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    )
+                  else
+                    const Spacer(),
                   if (isLive && !canSeek)
                     _circleIconButton(
                       icon: Icons.live_tv,
@@ -5028,25 +5162,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     _circleIconButton(
                       icon: Icons.replay_10,
                       tooltip: 'تراجع 10 ثواني',
-                      size: 58,
-                      iconSize: 30,
+                      size: 52,
+                      iconSize: 28,
                       onPressed: () => _seekBy(const Duration(seconds: -10)),
                     ),
-                  const SizedBox(width: 22),
+                  const SizedBox(width: 12),
                   _circleIconButton(
                     icon: _isPlaying ? Icons.pause : Icons.play_arrow,
                     tooltip: _isPlaying ? 'إيقاف مؤقت' : 'تشغيل',
                     size: 84,
                     iconSize: 46,
+                    bounce: true,
                     onPressed: _togglePlay,
                   ),
-                  const SizedBox(width: 22),
+                  const SizedBox(width: 12),
                   if (canSeek)
                     _circleIconButton(
                       icon: Icons.forward_10,
                       tooltip: 'تقديم 10 ثواني',
-                      size: 58,
-                      iconSize: 30,
+                      size: 52,
+                      iconSize: 28,
                       onPressed: () => _seekBy(const Duration(seconds: 10)),
                     ),
                 ],
@@ -5062,10 +5197,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                             color: Colors.white70, fontSize: 12)),
                     Expanded(
                       child: SliderTheme(
+                        // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر الكرة
+                        // وتظهر فقط أثناء السحب الفعلي (راجع _isScrubbingSlider) —
+                        // غير ذلك خط نظيف بلا كرة ثابتة الظهور.
                         data: SliderTheme.of(context).copyWith(
-                          trackHeight: 3,
-                          thumbShape: const RoundSliderThumbShape(
-                              enabledThumbRadius: 6),
+                          trackHeight: _isScrubbingSlider ? 3.5 : 2,
+                          thumbShape: RoundSliderThumbShape(
+                              enabledThumbRadius: _isScrubbingSlider ? 7 : 0),
                           overlayShape: const RoundSliderOverlayShape(
                               overlayRadius: 14),
                         ),
@@ -5083,8 +5221,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                               : _duration.inMilliseconds.toDouble(),
                           activeColor: Colors.redAccent,
                           inactiveColor: Colors.white30,
+                          onChangeStart: (_) =>
+                              setState(() => _isScrubbingSlider = true),
                           onChanged: (value) => _controller
                               ?.seekTo(Duration(milliseconds: value.toInt())),
+                          onChangeEnd: (_) =>
+                              setState(() => _isScrubbingSlider = false),
                         ),
                       ),
                     ),
