@@ -43,6 +43,19 @@ class HlsCacheProxy {
   final Set<String> _prefetching = <String>{};
   static const int _prefetchAhead = 4;
 
+  /// هامش أمان خلف الحافة الحقيقية للبث المباشر (بالشرائح) — نفس مبدأ
+  /// تأخير البث المباشر المتعمَّد المستخدَم فعلياً بمشغّلات احترافية
+  /// (يوتيوب/تويتش) بدل اللحاق بآخر شريحة صدرت من المصدر لحظياً: نخفي عن
+  /// ExoPlayer آخر `_liveEdgeMarginSegments` شرائح من قائمة التشغيل، ونجلبها
+  /// نحن بالخلفية بالتوازي (`_prefetchNearLiveEdge`) قبل ما تظهر له أصلاً
+  /// بتحديث لاحق للقائمة — فبحلول وقت ما ExoPlayer يطلبها فعلياً تكون جاهزة
+  /// بالكاش مسبقاً، بدل ما ينتظرها لحظة الطلب (وهذا بالضبط سبب التقطيع
+  /// بالبث المباشر: أي شريحة جديدة تحتاج جلبها لحظياً من مصدر قد يكون بطيئاً
+  /// أو غير مستقر). لا يُطبَّق على قوائم VOD (فيها #EXT-X-ENDLIST) ولا على
+  /// قوائم الجودات الرئيسية (master playlist) — فقط قوائم الشرائح الفعلية
+  /// لبث لا يزال مستمراً.
+  static const int _liveEdgeMarginSegments = 2;
+
   void _log(String tag, String detail) {
     try {
       onLog?.call(tag, detail);
@@ -201,9 +214,16 @@ class HlsCacheProxy {
     await request.response.close();
   }
 
+  /// يعيد كتابة قائمة التشغيل مع تطبيق هامش أمان خلف حافة البث المباشر
+  /// (راجع `_liveEdgeMarginSegments` أعلاه). يجمع الأسطر بمجموعات لكل
+  /// شريحة (وسوم `#EXTINF`/`#EXT-X-DISCONTINUITY`/... التي تسبقها مباشرة +
+  /// سطر رابطها) حتى نقدر نحذف آخر مجموعات بأمان دون كسر بنية القائمة —
+  /// خلاف قوائم الجودات الرئيسية (master playlist، روابطها قوائم فرعية لا
+  /// شرائح) وقوائم VOD المكتملة (فيها `#EXT-X-ENDLIST`)، واللي تبقى بلا أي
+  /// حذف إطلاقاً.
   String _rewritePlaylist(String text, Uri baseUri, int port) {
+    final hasEndlist = text.contains('#EXT-X-ENDLIST');
     final lines = text.split('\n');
-    final out = StringBuffer();
     final newSequence = <String>[];
     final uriAttrPattern = RegExp(r'URI="([^"]+)"');
 
@@ -214,10 +234,16 @@ class HlsCacheProxy {
       return 'http://127.0.0.1:$port/${isPlaylist ? 'pl' : 'seg'}?u=$encoded';
     }
 
+    // كل مجموعة: وسوم سبقت رابطاً + سطر الرابط نفسه (مُعاد كتابته مسبقاً).
+    final blocks = <List<String>>[];
+    var pending = <String>[];
+    var sawSegmentUri = false;
+    var sawPlaylistUri = false;
+
     for (final rawLine in lines) {
       final line = rawLine.replaceAll('\r', '');
       if (line.trim().isEmpty) {
-        out.writeln();
+        pending.add('');
         continue;
       }
       if (line.startsWith('#')) {
@@ -230,18 +256,45 @@ class HlsCacheProxy {
               return m.group(0)!;
             }
           });
-          out.writeln(replaced);
+          pending.add(replaced);
         } else {
-          out.writeln(line);
+          pending.add(line);
         }
       } else {
         try {
           final resolved = baseUri.resolve(line.trim());
-          out.writeln(proxify(resolved));
+          final isPlaylist = _looksLikePlaylistUri(resolved);
+          if (isPlaylist) {
+            sawPlaylistUri = true;
+          } else {
+            sawSegmentUri = true;
+          }
+          pending.add(proxify(resolved));
+          blocks.add(pending);
+          pending = <String>[];
         } catch (_) {
-          out.writeln(line);
+          pending.add(line);
+          blocks.add(pending);
+          pending = <String>[];
         }
       }
+    }
+    final trailing = pending; // وسوم بلا رابط تالٍ (نادر بقائمة بث مباشر)
+
+    final isLiveMediaPlaylist = sawSegmentUri && !sawPlaylistUri && !hasEndlist;
+    final effectiveBlocks =
+        (isLiveMediaPlaylist && blocks.length > _liveEdgeMarginSegments + 2)
+            ? blocks.sublist(0, blocks.length - _liveEdgeMarginSegments)
+            : blocks;
+
+    final out = StringBuffer();
+    for (final block in effectiveBlocks) {
+      for (final l in block) {
+        out.writeln(l);
+      }
+    }
+    for (final l in trailing) {
+      out.writeln(l);
     }
 
     if (newSequence.isNotEmpty) {
@@ -251,8 +304,36 @@ class HlsCacheProxy {
       if (_segmentSequence.length > 500) {
         _segmentSequence.removeRange(0, _segmentSequence.length - 500);
       }
+      if (isLiveMediaPlaylist) {
+        // نجلب أحدث الشرائح بالخلفية فوراً — بما فيها المخفية عن ExoPlayer
+        // بهامش الأمان أعلاه — حتى تكون جاهزة بالكاش قبل ما تُكشَف له
+        // بتحديث لاحق للقائمة، بدل ما ينتظرها لحظة الطلب.
+        _prefetchNearLiveEdge(newSequence);
+      }
     }
     return out.toString();
+  }
+
+  void _prefetchNearLiveEdge(List<String> sequence) {
+    final startIndex =
+        (sequence.length - (_prefetchAhead + _liveEdgeMarginSegments))
+            .clamp(0, sequence.length);
+    for (var i = startIndex; i < sequence.length; i++) {
+      _prefetchUrl(sequence[i]);
+    }
+  }
+
+  void _prefetchUrl(String url) {
+    if (_segmentCache.containsKey(url) || _prefetching.contains(url)) return;
+    _prefetching.add(url);
+    unawaited(() async {
+      try {
+        final bytes = await _fetchSegmentWithRetry(url);
+        if (bytes != null) _cacheSegment(url, bytes);
+      } finally {
+        _prefetching.remove(url);
+      }
+    }());
   }
 
   Future<void> _handleSegment(HttpRequest request, String originalUrl) async {
@@ -334,17 +415,7 @@ class HlsCacheProxy {
     final index = _segmentSequence.indexOf(justRequestedUrl);
     if (index < 0) return;
     for (var i = index + 1; i <= index + _prefetchAhead && i < _segmentSequence.length; i++) {
-      final url = _segmentSequence[i];
-      if (_segmentCache.containsKey(url) || _prefetching.contains(url)) continue;
-      _prefetching.add(url);
-      unawaited(() async {
-        try {
-          final bytes = await _fetchSegmentWithRetry(url);
-          if (bytes != null) _cacheSegment(url, bytes);
-        } finally {
-          _prefetching.remove(url);
-        }
-      }());
+      _prefetchUrl(_segmentSequence[i]);
     }
   }
 }
