@@ -23,6 +23,7 @@ import '../services/api_source_resolver.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
 import '../services/preferred_server_service.dart';
+import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
 import '../theme/app_theme.dart';
 
@@ -805,6 +806,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _webDetectionInFlight = false;
   int _webNativeAttempts = 0;
   static const int _webMaxNativeAttempts = 2;
+  static const int _nativeInitializeTimeoutSeconds = 12;
   DateTime? _webLastNativeTrialAt;
   final Set<String> _webSeenSources = <String>{};
   final Set<String> _webFailedNativeSources = <String>{};
@@ -815,6 +817,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // بدل انتظاره خلف مرشحين آخرين لم يسبق أن نجحوا. راجع PreferredServerService.
   String? _preferredServerHost;
   bool _preferredServerHostLoaded = false;
+  // اتصال HTTP واحد يُعاد استخدامه لكل نداءات فحص/تحقق المرشحين طوال
+  // الجلسة بدل فتح اتصال جديد بكل نداء. راجع StreamNetworkClient.
+  final StreamNetworkClient _streamNetworkClient = StreamNetworkClient();
   Map<String, String>? _webContextHeaders;
   bool _webDrmDetected = false;
   String? _webDrmSystem;
@@ -2010,7 +2015,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         ...?requestHeaders,
       };
       if (_looksLikeHls(url)) {
-        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        final response = await _streamNetworkClient.get(uri,
+            headers: headers, timeout: const Duration(seconds: 8));
         if (response.statusCode < 200 || response.statusCode >= 300) return false;
         final body = response.body;
         return RegExp(r'#EXTM3U', caseSensitive: false).hasMatch(body) ||
@@ -2018,7 +2024,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
       if (_looksLikeProgressiveVideo(url)) {
         try {
-          final response = await http.head(uri, headers: headers).timeout(const Duration(seconds: 6));
+          final response = await _streamNetworkClient.head(uri,
+              headers: headers, timeout: const Duration(seconds: 6));
           if (response.statusCode >= 200 && response.statusCode < 400) {
             final type = (response.headers['content-type'] ?? '').toLowerCase();
             if (type.isEmpty || type.startsWith('video/') || type.contains('octet-stream')) return true;
@@ -2027,7 +2034,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // Some CDNs reject HEAD (405) while allowing normal media requests.
         try {
           final rangeHeaders = <String, String>{...headers, 'range': 'bytes=0-1023'};
-          final response = await http.get(uri, headers: rangeHeaders).timeout(const Duration(seconds: 8));
+          final response = await _streamNetworkClient.get(uri,
+              headers: rangeHeaders, timeout: const Duration(seconds: 8));
           if (response.statusCode >= 200 && response.statusCode < 400) {
             final type = (response.headers['content-type'] ?? '').toLowerCase();
             return type.isEmpty || type.startsWith('video/') || type.contains('octet-stream') ||
@@ -2039,7 +2047,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // Frameworks sometimes expose signed media URLs without a file extension.
       // Probe the response headers/body rather than requiring .m3u8/.mp4 in the URL.
       try {
-        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        final response = await _streamNetworkClient.get(uri,
+            headers: headers, timeout: const Duration(seconds: 8));
         if (response.statusCode >= 200 && response.statusCode < 400) {
           final type = (response.headers['content-type'] ?? '').toLowerCase();
           if (type.contains('mpegurl') || type.contains('dash+xml') || type.startsWith('video/')) return true;
@@ -2849,6 +2858,24 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           ));
         }
 
+        // Strongest candidate first: with only _webMaxNativeAttempts trials
+        // budgeted per session, wasting one on a low-score candidate that
+        // happened to appear first in `sources` (an unordered Set) costs
+        // real chances at a working candidate. Stable by construction (ties
+        // broken by original index) since List.sort is not guaranteed
+        // stable and candidates found in the same scan can tie on score.
+        if (probes.length > 1) {
+          final indexed = List<MapEntry<int, _CandidateProbe>>.generate(
+              probes.length, (i) => MapEntry(i, probes[i]));
+          indexed.sort((a, b) {
+            final scoreCompare = b.value.score.compareTo(a.value.score);
+            return scoreCompare != 0 ? scoreCompare : a.key.compareTo(b.key);
+          });
+          probes
+            ..clear()
+            ..addAll(indexed.map((e) => e.value));
+        }
+
         // A candidate on the host that already succeeded for this channel
         // before jumps to the front (relative order within each group is
         // otherwise unchanged — List.sort is not stable, so this partitions
@@ -3423,7 +3450,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _isPlaying = false;
       newController.addListener(_videoListener);
       if (fallbackToWeb) await _muteWebForNativeTrial(true);
-      await newController.initialize();
+      // بدون هذا الحد، انقطاع شبكي صامت (لا نجاح ولا خطأ صريح من ExoPlayer)
+      // يُعلّق initialize() للأبد — المحاولة التالية (أو الرجوع لـ WebView)
+      // ما توصل إطلاقاً. أي خطأ هنا يسقط بنفس مسار الفشل الموجود أصلاً
+      // (catch أسفل)، و_describePlaybackError يترجم TimeoutException تلقائياً
+      // لرسالة "انتهت مهلة الاتصال" الموجودة مسبقاً.
+      await newController.initialize().timeout(
+        const Duration(seconds: _nativeInitializeTimeoutSeconds),
+      );
       if (resumeFrom != null) {
         try {
           await newController.seekTo(resumeFrom);
@@ -4049,6 +4083,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
+    _streamNetworkClient.close();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
