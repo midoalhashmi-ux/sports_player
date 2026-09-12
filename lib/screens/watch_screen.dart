@@ -22,6 +22,7 @@ import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
+import '../services/preferred_server_service.dart';
 import '../services/session_log_service.dart';
 import '../theme/app_theme.dart';
 
@@ -95,6 +96,29 @@ class _WebNetworkCandidate {
     this.validated = false,
     this.failed = false,
     this.quarantined = false,
+  });
+}
+
+/// مرشّح واحد أثناء مرحلة الفحص المتوازي في _autoDetectWebSource — يحمل
+/// نتيجة الفحص الشبكي (حين يُنفَّذ) ليُقرأ بعد اكتمال كل المرشحين معاً
+/// بدل انتظار كل واحد على حدة.
+class _CandidateProbe {
+  final String source;
+  final _WebNetworkCandidate? registered;
+  final int score;
+  final int evidence;
+  final bool strongHls;
+  final bool strongFramework;
+  Map<String, String> headers = const {};
+  bool validated = false;
+
+  _CandidateProbe({
+    required this.source,
+    required this.registered,
+    required this.score,
+    required this.evidence,
+    required this.strongHls,
+    required this.strongFramework,
   });
 }
 
@@ -786,6 +810,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   final Set<String> _webFailedNativeSources = <String>{};
   final Map<String, int> _webCandidateEvidence = <String, int>{};
   final Map<String, String> _webCandidateLastReason = <String, String>{};
+  // مضيف السيرفر اللي نجح آخر مرة لنفس القناة (يُحمَّل مرة واحدة بداية
+  // جلسة الاكتشاف) — يُستخدم لتقديم أي مرشح جديد على نفس المضيف أولاً
+  // بدل انتظاره خلف مرشحين آخرين لم يسبق أن نجحوا. راجع PreferredServerService.
+  String? _preferredServerHost;
+  bool _preferredServerHostLoaded = false;
   Map<String, String>? _webContextHeaders;
   bool _webDrmDetected = false;
   String? _webDrmSystem;
@@ -2607,6 +2636,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _slog('AUTO_DETECT_START', 'generation=$generation');
     _setWebSessionState(_WebSessionState.discovering);
 
+    if (!_preferredServerHostLoaded) {
+      _preferredServerHostLoaded = true;
+      final channelId = widget.channelId;
+      if (channelId != null) {
+        _preferredServerHost = await PreferredServerService.loadHost(channelId);
+        if (_preferredServerHost != null) {
+          _slog('PREFERRED_SERVER_LOADED', 'host=$_preferredServerHost');
+        }
+      }
+      if (!_webSessionIsActive(generation)) return;
+    }
+
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
       if (!_webSessionIsActive(generation)) {
         timer.cancel();
@@ -2759,6 +2800,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
+        // Phase 1: cheap synchronous filtering only (no network) — builds the
+        // list of candidates worth an actual network validation call.
+        final probes = <_CandidateProbe>[];
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
           if (_isNonMediaAsset(source)) continue;
@@ -2795,40 +2839,92 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=web_playback_not_proven_yet');
             continue;
           }
+          probes.add(_CandidateProbe(
+            source: source,
+            registered: registered,
+            score: score,
+            evidence: evidence,
+            strongHls: strongHls,
+            strongFramework: strongFramework,
+          ));
+        }
 
+        // A candidate on the host that already succeeded for this channel
+        // before jumps to the front (relative order within each group is
+        // otherwise unchanged — List.sort is not stable, so this partitions
+        // manually instead of sorting).
+        final preferredHost = _preferredServerHost;
+        if (preferredHost != null && probes.length > 1) {
+          final preferred = <_CandidateProbe>[];
+          final rest = <_CandidateProbe>[];
+          for (final probe in probes) {
+            if (Uri.tryParse(probe.source)?.host == preferredHost) {
+              preferred.add(probe);
+            } else {
+              rest.add(probe);
+            }
+          }
+          if (preferred.isNotEmpty) {
+            probes
+              ..clear()
+              ..addAll(preferred)
+              ..addAll(rest);
+          }
+        }
+
+        // Phase 2: validate every remaining candidate concurrently instead of
+        // one await per candidate in sequence — each candidate's network
+        // round trip (headers lookup + HLS/progressive probe, each with its
+        // own timeout) runs in parallel, so the wall-clock cost of this
+        // phase drops from the sum of all candidates' latencies to roughly
+        // the slowest single one. Selection order/priority and every skip
+        // reason below are unchanged from the previous sequential version.
+        if (probes.isNotEmpty) {
           _setWebSessionState(_WebSessionState.validating);
-          final candidateHeaders = await _headersForCandidate(source, registered);
-          bool validated;
-          if (strongHls || strongFramework) {
-            // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
-            // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
-            // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
-            // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
-            // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
-            // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
-            // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
-            // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
-            validated = true;
-            _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(source)} reason=strong_evidence score=$score');
-          } else {
+          await Future.wait(probes.map((probe) async {
+            probe.headers = await _headersForCandidate(probe.source, probe.registered);
+            if (probe.strongHls || probe.strongFramework) {
+              // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
+              // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
+              // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
+              // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
+              // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
+              // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
+              // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
+              // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
+              probe.validated = true;
+              _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=strong_evidence score=${probe.score}');
+              return;
+            }
             // Best-effort validation. A negative validation is not fatal when
             // the browser has already supplied strong evidence (for example a
             // stream requiring Referer/Origin/cookies).
-            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
-            validated = await _validatePublicMediaSource(
-              source,
-              requestHeaders: candidateHeaders,
+            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(probe.source)} evidence=${probe.evidence} score=${probe.score} headers=${probe.headers.keys.toList()}');
+            final validated = await _validatePublicMediaSource(
+              probe.source,
+              requestHeaders: probe.headers,
             );
-            if (registered != null) registered.validated = validated;
+            probe.validated = validated;
+            probe.registered?.validated = validated;
             _smartLog(
               'HLS',
-              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
+              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(probe.source)}',
             );
-            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(source)} validated=$validated');
-          }
-          if (!validated && evidence < 3 && !strongHls && !strongFramework) {
-            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=failed_validation');
-            _setWebSessionState(_WebSessionState.discovering);
+            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(probe.source)} validated=$validated');
+          }));
+          if (!_webSessionIsActive(generation)) return;
+        }
+
+        // Phase 3: pick the first candidate (in original discovery-priority
+        // order) that passed, exactly as the sequential version did — only
+        // one native trial is ever started here, so the single-controller
+        // playback architecture is untouched.
+        for (final probe in probes) {
+          if (!probe.validated &&
+              probe.evidence < 3 &&
+              !probe.strongHls &&
+              !probe.strongFramework) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=failed_validation');
             continue;
           }
 
@@ -2836,21 +2932,25 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _webNativeAttempts++;
           _webLastNativeTrialAt = DateTime.now();
           _extendWebStartupDeadline(const Duration(seconds: 12));
-          _webSeenSources.add(source);
-          _webCandidateLastReason[source] = 'validated candidate, evidence=$evidence, score=$score';
-          _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
+          _webSeenSources.add(probe.source);
+          _webCandidateLastReason[probe.source] =
+              'validated candidate, evidence=${probe.evidence}, score=${probe.score}';
+          _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(probe.source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
           timer.cancel();
 
-          final quality = StreamQuality(label: 'المصدر المكتشف تلقائياً', url: source);
+          final quality = StreamQuality(label: 'المصدر المكتشف تلقائياً', url: probe.source);
           await _playServerQuality(
             StreamServerOption(label: 'المصدر المكتشف تلقائياً', qualities: [quality]),
             quality,
             fallbackToWeb: true,
-            playbackHeaders: candidateHeaders,
+            playbackHeaders: probe.headers,
             formatHintOverride:
-                registered?.type == 'hls' ? VideoFormat.hls : null,
+                probe.registered?.type == 'hls' ? VideoFormat.hls : null,
           );
           return;
+        }
+        if (probes.isNotEmpty) {
+          _setWebSessionState(_WebSessionState.discovering);
         }
 
         // Browser playback is already proven, but no safe native candidate
@@ -3357,6 +3457,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _state = _LoadState.ready;
         if (fallbackToWeb) _isWebSource = false;
       });
+      // نجاح تشغيل أصلي حقيقي قادم من اكتشاف WebView — نحفظ مضيف هذا
+      // الرابط لنفس القناة حتى تُقدَّم مرشحات نفس المضيف أولاً في الزيارة
+      // القادمة (راجع _preferredServerHost في _autoDetectWebSource).
+      if (fallbackToWeb) {
+        final channelId = widget.channelId;
+        final host = Uri.tryParse(quality.url)?.host;
+        if (channelId != null && host != null && host.isNotEmpty) {
+          unawaited(PreferredServerService.rememberHost(channelId, host));
+        }
+      }
     } catch (error) {
       if (!mounted) return;
       if (fallbackToWeb) {
