@@ -435,14 +435,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       return;
     }
     _nativeAutoReconnectAttempts++;
-    final delaySeconds = _nativeAutoReconnectAttempts.clamp(1, 5);
+    // تأخير شبه فوري بدل ثوانٍ كاملة — أول محاولة بعد 200ms فقط، يزيد
+    // تدريجياً كل محاولة فاشلة (حتى لا يضرب خادماً ميتاً فعلياً بحلقة
+    // ضيقة)، بحد أقصى 2 ثانية فقط حتى بأبعد محاولة.
+    final delayMs = (200 * _nativeAutoReconnectAttempts).clamp(200, 2000);
     _slog(
       'NATIVE_AUTO_RECONNECT',
-      'attempt=$_nativeAutoReconnectAttempts/$_nativeMaxAutoReconnectAttempts delay=${delaySeconds}s position=$_position',
+      'attempt=$_nativeAutoReconnectAttempts/$_nativeMaxAutoReconnectAttempts delay=${delayMs}ms position=$_position',
     );
     if (!_isBuffering) setState(() => _isBuffering = true);
     _nativeReconnectTimer?.cancel();
-    _nativeReconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+    _nativeReconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (!mounted || _userPausedPlayback) return;
       unawaited(_playServerQuality(server, quality));
     });
@@ -3833,11 +3836,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _scheduleHide();
   }
 
-  void _toggleMute() {
-    setState(() => _muted = !_muted);
-    _controller?.setVolume(_muted ? 0 : _volume / 100);
-  }
-
   void _setVolume(double value) {
     setState(() {
       _volume = value;
@@ -4090,6 +4088,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final delta = (_swipeStart!.dy - details.focalPoint.dy) / height;
       final newVolume = (_dragStartVolume + delta * 100).clamp(0.0, 100.0);
       _setVolume(newVolume);
+      // شارة مؤقتة وسط الشاشة بدل زر/شريط صوت دائم بشريط التحكم — نفس
+      // أسلوب المشغلات الكبرى (MX Player وغيره): تظهر أثناء السحب فقط
+      // وتختفي تلقائياً بعده (_showCenterToast يلغي المؤقّت السابق ويعيده
+      // بكل نداء، فتبقى ظاهرة طوال السحب المستمر).
+      _showCenterToast('${newVolume <= 0 ? '🔇' : '🔊'} ${newVolume.round()}%');
       _scheduleHide();
     }
   }
@@ -4870,31 +4873,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                       tooltip: 'القفز للبث المباشر',
                       onPressed: _jumpToLive,
                     ),
-                  _circleIconButton(
-                    icon: _muted ? Icons.volume_off : Icons.volume_up,
-                    tooltip: _muted ? 'إلغاء كتم الصوت' : 'كتم الصوت',
-                    onPressed: _toggleMute,
-                  ),
-                  SizedBox(
-                    width: compactControls ? 54 : 104,
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 3.5,
-                        thumbShape: const RoundSliderThumbShape(
-                            enabledThumbRadius: 7),
-                        overlayShape:
-                            const RoundSliderOverlayShape(overlayRadius: 16),
-                      ),
-                      child: Slider(
-                        value: _muted ? 0 : _volume,
-                        min: 0,
-                        max: 100,
-                        activeColor: Colors.white,
-                        inactiveColor: Colors.white30,
-                        onChanged: _setVolume,
-                      ),
-                    ),
-                  ),
                   _circleIconButton(
                     icon: _isLandscape
                         ? Icons.screen_lock_rotation
