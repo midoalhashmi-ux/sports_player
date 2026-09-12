@@ -16,12 +16,15 @@ import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/ad_service.dart';
+import '../services/candidate_scoring.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/hls_cache_proxy.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
+import '../services/preferred_server_service.dart';
+import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
 import '../theme/app_theme.dart';
 
@@ -126,6 +129,29 @@ class _WebNetworkCandidate {
     required this.referer,
     required this.mime,
     this.evidenceScore = 0,
+  });
+}
+
+/// مرشّح واحد أثناء مرحلة الفحص المتوازي في _autoDetectWebSource — يحمل
+/// نتيجة الفحص الشبكي (حين يُنفَّذ) ليُقرأ بعد اكتمال كل المرشحين معاً
+/// بدل انتظار كل واحد على حدة.
+class _CandidateProbe {
+  final String source;
+  final _WebNetworkCandidate? registered;
+  final int score;
+  final int evidence;
+  final bool strongHls;
+  final bool strongFramework;
+  Map<String, String> headers = const {};
+  bool validated = false;
+
+  _CandidateProbe({
+    required this.source,
+    required this.registered,
+    required this.score,
+    required this.evidence,
+    required this.strongHls,
+    required this.strongFramework,
   });
 }
 
@@ -239,6 +265,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // مثل يوتيوب: كرة شريط التقدّم تظهر فقط أثناء السحب الفعلي، غير ذلك
   // خط نظيف بلا كرة دائمة الظهور.
   bool _isScrubbingSlider = false;
+  bool _wasPlayingBeforeScrub = false;
 
   // شارة نصية مؤقتة وسط الشاشة (وضع العرض عند كل نقرة تبديل، ونسبة التكبير
   // أثناء التقريب/الإبعاد بإصبعين) — شكل عام واحد يُستخدم للاثنين.
@@ -828,11 +855,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         lower.contains('<video') || lower.contains('<iframe');
   }
 
-  bool _containsMediaMarker(String text) {
-    final lower = text.toLowerCase();
-    return lower.contains('#extm3u') || lower.contains('.m3u8') || lower.contains('.m3u') ||
-        lower.contains('.mpd') || lower.contains('<video');
-  }
+  bool _containsMediaMarker(String text) => CandidateScoring.containsMediaMarker(text);
 
   String? _extractBestUrl(String text, String baseUrl) {
     dynamic parsed;
@@ -894,18 +917,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   /// التحقق من أن الرابط قابل للتشغيل مباشرة.
-  bool _isDirectPlayable(String url) {
-    final lower = url.toLowerCase();
-    return lower.contains('.m3u8') || lower.contains('.m3u') || lower.contains('.mpd') ||
-        lower.contains('.mp4') || lower.contains('.webm') ||
-        lower.contains('.m4v') || lower.contains('.mov');
-  }
+  bool _isDirectPlayable(String url) => CandidateScoring.isDirectPlayable(url);
 
-  bool _looksLikeJson(String text) {
-    final trimmed = text.trim();
-    return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-        (trimmed.startsWith('[') && trimmed.endsWith(']'));
-  }
+  bool _looksLikeJson(String text) => CandidateScoring.looksLikeJson(text);
 
   // ---------------------- web source (بقيت كما هي) ----------------------
   String? _webSourceOrigin;
@@ -920,6 +934,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   final Set<String> _webFailedNativeSources = <String>{};
   final Map<String, int> _webCandidateEvidence = <String, int>{};
   final Map<String, String> _webCandidateLastReason = <String, String>{};
+  // مضيف السيرفر اللي نجح آخر مرة لنفس القناة (يُحمَّل مرة واحدة بداية
+  // جلسة الاكتشاف) — يُستخدم لتقديم أي مرشح جديد على نفس المضيف أولاً
+  // بدل انتظاره خلف مرشحين آخرين لم يسبق أن نجحوا. راجع PreferredServerService.
+  String? _preferredServerHost;
+  bool _preferredServerHostLoaded = false;
+  // اتصال HTTP واحد يُعاد استخدامه لكل نداءات فحص/تحقق المرشحين طوال
+  // الجلسة بدل فتح اتصال جديد بكل نداء. راجع StreamNetworkClient.
+  final StreamNetworkClient _streamNetworkClient = StreamNetworkClient();
   Map<String, String>? _webContextHeaders;
   bool _webDrmDetected = false;
   int _webInteractionAttempts = 0;
@@ -1052,31 +1074,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // وأحياناً يعيد محاولة تشغيل أصلي ثانية فيهدم النسخة الشغّالة فعلياً.
       _webSessionState != _WebSessionState.nativePlaying;
 
-  String _normalizeCandidate(String url) {
-    final uri = Uri.tryParse(url.trim());
-    if (uri == null) return url.trim();
-    // uri.replace(fragment: '') sets an *empty* fragment rather than
-    // clearing it, so toString() appends a stray trailing '#' to every
-    // candidate — even ones that never had one. Confirmed by direct test
-    // against the pinned Flutter 3.27.0 Dart SDK. removeFragment() clears
-    // it properly. This matters because the normalized string is used as
-    // an exact-match dedup/registry key (_webCandidateRegistry,
-    // _webFailedNativeSources, _webSeenSources) and as the literal URL
-    // handed to native trial — a spurious '#' can make the same logical
-    // source look like two different candidates depending on which code
-    // path last touched it.
-    var normalized = uri.removeFragment().toString();
-    // بعض المواقع تسجّل رابط الـmanifest بإعداد المشغّل الخاص بها بشرطة
-    // مائلة زائدة بعد الامتداد مباشرة (grzcdn.com — مؤكَّد بسجل تشخيص
-    // فعلي: NATIVE_TRIAL_DIAGNOSTIC أرجع 400 Bad Request من nginx لهذا
-    // الشكل حرفياً، بينما نفس الرابط بلا الشرطة يعمل). هذي الشرطة لا معنى
-    // لها بعد امتداد ملف manifest فعلي، فحذفها هنا يوحّد أيضاً مفتاح
-    // التسجيل بالـregistry (بدل معاملة النسختين كمصدرين مختلفين).
-    if (RegExp(r'\.m3u8?/$', caseSensitive: false).hasMatch(normalized)) {
-      normalized = normalized.substring(0, normalized.length - 1);
-    }
-    return normalized;
-  }
+  String _normalizeCandidate(String url) => CandidateScoring.normalizeCandidate(url);
 
   bool _canTrialNative(String source) {
     if (_webDrmDetected) return false;
@@ -1956,31 +1954,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  int _scoreDetectedSource(String url) {
-    final lower = url.toLowerCase();
-    var score = 0;
-    if (_looksLikeHls(url)) {
-      score += 100;
-    } else if (lower.contains('.mpd')) {
-      score += 85;
-    } else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) {
-      score += 55;
-    }
-    if (lower.contains('live')) score += 35;
-    if (lower.contains('stream')) score += 25;
-    if (lower.contains('channel')) score += 20;
-    if (lower.contains('master')) score += 15;
-    if (lower.contains('playlist')) score += 10;
-    if (lower.contains('segment') || lower.contains('.ts')) score -= 100;
-    if (lower.contains('ads') || lower.contains('advert') || lower.contains('vast') || lower.contains('doubleclick')) score -= 100;
-    return score;
-  }
+  int _scoreDetectedSource(String url) => CandidateScoring.scoreDetectedSource(url);
 
-  bool _looksLikeHls(String url) => RegExp(
-        r'(?:\.m3u8?(?:$|[?#])|/(?:hls|m3)/|(?:master|playlist|manifest)(?:[./?#&]|$))',
-        caseSensitive: false,
-      ).hasMatch(url);
-  bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
+  bool _looksLikeHls(String url) => CandidateScoring.looksLikeHls(url);
+  bool _looksLikeProgressiveVideo(String url) => CandidateScoring.looksLikeProgressiveVideo(url);
 
   /// يطلب من WebView نفسه (بجلسته وكوكيزه الحقيقية) يجيب محتوى رابط نصياً
   /// عبر fetch()، ويرجعه لنا هنا. ضروري لأن evaluateJavascript لا ينتظر
@@ -2112,25 +2089,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // فحص إعدادات المشغلات (JWPlayer/Video.js تحتوي غالباً حقل "image" بجانب
   // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
-  bool _isNonMediaAsset(String url) {
-    if (RegExp(
-      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
-      caseSensitive: false,
-    ).hasMatch(url)) {
-      return true;
-    }
-    // رابط بلا مسار حقيقي (نطاق مجرّد، أو "/" فقط) لا يمكن أبداً يكون رابط
-    // بث فعلي — شوهد فعلياً مرشحاً كاذباً بسجل تشخيص (مثل
-    // "https://example.com//") تسرّب من فحص عام وتسبب بمحاولة تشغيل أصلي
-    // فاشلة مضمونة بدل استبعاده من البداية.
-    final uri = Uri.tryParse(url);
-    // "uri.path == '/'" فقط لا يكفي: رابط بشرطتين بعد الدومين مباشرة
-    // (مثال فعلي بسجل تشخيص: "https://miravid.club//") يُحلَّل بمساره
-    // كسلسلة "//" لا "/" المفردة، فيفلت من هذا الفحص ويستهلك محاولة
-    // تشغيل أصلي كاملة على رابط لا مسار حقيقي له إطلاقاً.
-    if (uri != null && uri.path.replaceAll('/', '').isEmpty) return true;
-    return false;
-  }
+  bool _isNonMediaAsset(String url) => CandidateScoring.isNonMediaAsset(url);
 
   Future<Map<String, String>> _headersForCandidate(
       String source, _WebNetworkCandidate? candidate) async {
@@ -2232,7 +2191,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         ...?requestHeaders,
       };
       if (_looksLikeHls(url)) {
-        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        final response = await _streamNetworkClient.get(uri,
+            headers: headers, timeout: const Duration(seconds: 8));
         if (response.statusCode < 200 || response.statusCode >= 300) return false;
         final body = response.body;
         return RegExp(r'#EXTM3U', caseSensitive: false).hasMatch(body) ||
@@ -2240,7 +2200,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
       if (_looksLikeProgressiveVideo(url)) {
         try {
-          final response = await http.head(uri, headers: headers).timeout(const Duration(seconds: 6));
+          final response = await _streamNetworkClient.head(uri,
+              headers: headers, timeout: const Duration(seconds: 6));
           if (response.statusCode >= 200 && response.statusCode < 400) {
             final type = (response.headers['content-type'] ?? '').toLowerCase();
             if (type.isEmpty || type.startsWith('video/') || type.contains('octet-stream')) return true;
@@ -2249,7 +2210,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // Some CDNs reject HEAD (405) while allowing normal media requests.
         try {
           final rangeHeaders = <String, String>{...headers, 'range': 'bytes=0-1023'};
-          final response = await http.get(uri, headers: rangeHeaders).timeout(const Duration(seconds: 8));
+          final response = await _streamNetworkClient.get(uri,
+              headers: rangeHeaders, timeout: const Duration(seconds: 8));
           if (response.statusCode >= 200 && response.statusCode < 400) {
             final type = (response.headers['content-type'] ?? '').toLowerCase();
             return type.isEmpty || type.startsWith('video/') || type.contains('octet-stream') ||
@@ -2261,7 +2223,8 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // Frameworks sometimes expose signed media URLs without a file extension.
       // Probe the response headers/body rather than requiring .m3u8/.mp4 in the URL.
       try {
-        final response = await http.get(uri, headers: headers).timeout(const Duration(seconds: 8));
+        final response = await _streamNetworkClient.get(uri,
+            headers: headers, timeout: const Duration(seconds: 8));
         if (response.statusCode >= 200 && response.statusCode < 400) {
           final type = (response.headers['content-type'] ?? '').toLowerCase();
           if (type.contains('mpegurl') || type.contains('dash+xml') || type.startsWith('video/')) return true;
@@ -2842,6 +2805,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _slog('AUTO_DETECT_START', 'generation=$generation');
     _setWebSessionState(_WebSessionState.discovering);
 
+    if (!_preferredServerHostLoaded) {
+      _preferredServerHostLoaded = true;
+      final channelId = widget.channelId;
+      if (channelId != null) {
+        _preferredServerHost = await PreferredServerService.loadHost(channelId);
+        if (_preferredServerHost != null) {
+          _slog('PREFERRED_SERVER_LOADED', 'host=$_preferredServerHost');
+        }
+      }
+      if (!_webSessionIsActive(generation)) return;
+    }
+
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
       if (!_webSessionIsActive(generation)) {
         timer.cancel();
@@ -3008,6 +2983,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
+        // Phase 1: cheap synchronous filtering only (no network) — builds the
+        // list of candidates worth an actual network validation call.
+        final probes = <_CandidateProbe>[];
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
           if (_isNonMediaAsset(source)) continue;
@@ -3044,40 +3022,110 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=web_playback_not_proven_yet');
             continue;
           }
+          probes.add(_CandidateProbe(
+            source: source,
+            registered: registered,
+            score: score,
+            evidence: evidence,
+            strongHls: strongHls,
+            strongFramework: strongFramework,
+          ));
+        }
 
+        // Strongest candidate first: with only _webMaxNativeAttempts trials
+        // budgeted per session, wasting one on a low-score candidate that
+        // happened to appear first in `sources` (an unordered Set) costs
+        // real chances at a working candidate. Stable by construction (ties
+        // broken by original index) since List.sort is not guaranteed
+        // stable and candidates found in the same scan can tie on score.
+        if (probes.length > 1) {
+          final indexed = List<MapEntry<int, _CandidateProbe>>.generate(
+              probes.length, (i) => MapEntry(i, probes[i]));
+          indexed.sort((a, b) {
+            final scoreCompare = b.value.score.compareTo(a.value.score);
+            return scoreCompare != 0 ? scoreCompare : a.key.compareTo(b.key);
+          });
+          probes
+            ..clear()
+            ..addAll(indexed.map((e) => e.value));
+        }
+
+        // A candidate on the host that already succeeded for this channel
+        // before jumps to the front (relative order within each group is
+        // otherwise unchanged — List.sort is not stable, so this partitions
+        // manually instead of sorting).
+        final preferredHost = _preferredServerHost;
+        if (preferredHost != null && probes.length > 1) {
+          final preferred = <_CandidateProbe>[];
+          final rest = <_CandidateProbe>[];
+          for (final probe in probes) {
+            if (Uri.tryParse(probe.source)?.host == preferredHost) {
+              preferred.add(probe);
+            } else {
+              rest.add(probe);
+            }
+          }
+          if (preferred.isNotEmpty) {
+            probes
+              ..clear()
+              ..addAll(preferred)
+              ..addAll(rest);
+          }
+        }
+
+        // Phase 2: validate every remaining candidate concurrently instead of
+        // one await per candidate in sequence — each candidate's network
+        // round trip (headers lookup + HLS/progressive probe, each with its
+        // own timeout) runs in parallel, so the wall-clock cost of this
+        // phase drops from the sum of all candidates' latencies to roughly
+        // the slowest single one. Selection order/priority and every skip
+        // reason below are unchanged from the previous sequential version.
+        if (probes.isNotEmpty) {
           _setWebSessionState(_WebSessionState.validating);
-          final candidateHeaders = await _headersForCandidate(source, registered);
-          bool validated;
-          if (strongHls || strongFramework) {
-            // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
-            // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
-            // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
-            // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
-            // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
-            // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
-            // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
-            // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
-            validated = true;
-            _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(source)} reason=strong_evidence score=$score');
-          } else {
+          await Future.wait(probes.map((probe) async {
+            probe.headers = await _headersForCandidate(probe.source, probe.registered);
+            if (probe.strongHls || probe.strongFramework) {
+              // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
+              // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
+              // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
+              // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
+              // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
+              // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
+              // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
+              // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
+              probe.validated = true;
+              _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=strong_evidence score=${probe.score}');
+              return;
+            }
             // Best-effort validation. A negative validation is not fatal when
             // the browser has already supplied strong evidence (for example a
             // stream requiring Referer/Origin/cookies).
-            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(source)} evidence=$evidence score=$score headers=${candidateHeaders.keys.toList()}');
-            validated = await _validatePublicMediaSource(
-              source,
-              requestHeaders: candidateHeaders,
+            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(probe.source)} evidence=${probe.evidence} score=${probe.score} headers=${probe.headers.keys.toList()}');
+            final validated = await _validatePublicMediaSource(
+              probe.source,
+              requestHeaders: probe.headers,
             );
-            if (registered != null) registered.validated = validated;
+            probe.validated = validated;
+            probe.registered?.validated = validated;
             _smartLog(
               'HLS',
-              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(source)}',
+              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(probe.source)}',
             );
-            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(source)} validated=$validated');
-          }
-          if (!validated && evidence < 3 && !strongHls && !strongFramework) {
-            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(source)} reason=failed_validation');
-            _setWebSessionState(_WebSessionState.discovering);
+            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(probe.source)} validated=$validated');
+          }));
+          if (!_webSessionIsActive(generation)) return;
+        }
+
+        // Phase 3: pick the first candidate (in original discovery-priority
+        // order) that passed, exactly as the sequential version did — only
+        // one native trial is ever started here, so the single-controller
+        // playback architecture is untouched.
+        for (final probe in probes) {
+          if (!probe.validated &&
+              probe.evidence < 3 &&
+              !probe.strongHls &&
+              !probe.strongFramework) {
+            _slog('SOURCE_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=failed_validation');
             continue;
           }
 
@@ -3085,17 +3133,18 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _webNativeAttempts++;
           _webLastNativeTrialAt = DateTime.now();
           _extendWebStartupDeadline(const Duration(seconds: 12));
-          _webSeenSources.add(source);
-          _webCandidateLastReason[source] = 'validated candidate, evidence=$evidence, score=$score';
-          _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
+          _webSeenSources.add(probe.source);
+          _webCandidateLastReason[probe.source] =
+              'validated candidate, evidence=${probe.evidence}, score=${probe.score}';
+          _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(probe.source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
           timer.cancel();
 
-          final quality = StreamQuality(label: _autoDiscoveredServerLabel, url: source);
+          final quality = StreamQuality(label: _autoDiscoveredServerLabel, url: probe.source);
           await _playServerQuality(
             StreamServerOption(label: _autoDiscoveredServerLabel, qualities: [quality]),
             quality,
             fallbackToWeb: true,
-            playbackHeaders: candidateHeaders,
+            playbackHeaders: probe.headers,
             // registered?.type == 'hls' alone missed real cases: a candidate
             // can be confirmed HLS by strongHls (URL pattern, e.g. a '/hls/'
             // path segment) above without ever having a matching registry
@@ -3107,10 +3156,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             // "Source error" for content that is genuinely playable HLS.
             // strongHls already carries this exact judgement (also used
             // just above to skip redundant validation); reuse it here too.
-            formatHintOverride:
-                (registered?.type == 'hls' || strongHls) ? VideoFormat.hls : null,
+            formatHintOverride: (probe.registered?.type == 'hls' || probe.strongHls)
+                ? VideoFormat.hls
+                : null,
           );
           return;
+        }
+        if (probes.isNotEmpty) {
+          _setWebSessionState(_WebSessionState.discovering);
         }
 
         // Browser playback is already proven, but no safe native candidate
@@ -3810,6 +3863,16 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           playbackHeaders ?? _effectiveStreamHeaders(),
         ));
       }
+      // نجاح تشغيل أصلي حقيقي قادم من اكتشاف WebView — نحفظ مضيف هذا
+      // الرابط لنفس القناة حتى تُقدَّم مرشحات نفس المضيف أولاً في الزيارة
+      // القادمة (راجع _preferredServerHost في _autoDetectWebSource).
+      if (fallbackToWeb) {
+        final channelId = widget.channelId;
+        final host = Uri.tryParse(quality.url)?.host;
+        if (channelId != null && host != null && host.isNotEmpty) {
+          unawaited(PreferredServerService.rememberHost(channelId, host));
+        }
+      }
     } catch (error) {
       if (!mounted) return;
       if (fallbackToWeb) {
@@ -4020,7 +4083,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final controller = _controller;
     if (controller == null) return;
     final target = _position + delta;
+    final wasPlaying = _isPlaying;
     controller.seekTo(target < Duration.zero ? Duration.zero : target);
+    // Seeking past the buffered window can drop ExoPlayer's playWhenReady on
+    // some sources/devices, leaving playback paused until the user manually
+    // taps play — unlike YouTube, which always resumes after a seek. Force
+    // resume here when playback was already in progress before the seek.
+    if (wasPlaying) controller.play();
     _cancelSlowConnectionTimer();
     if (_isBuffering) _startSlowConnectionTimer();
     _scheduleHide();
@@ -4480,6 +4549,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     WakelockPlus.disable();
     _controller?.dispose();
     unawaited(_hlsCacheProxy.stop());
+    _streamNetworkClient.close();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
@@ -5221,12 +5291,20 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                               : _duration.inMilliseconds.toDouble(),
                           activeColor: Colors.redAccent,
                           inactiveColor: Colors.white30,
-                          onChangeStart: (_) =>
-                              setState(() => _isScrubbingSlider = true),
+                          onChangeStart: (_) {
+                            _wasPlayingBeforeScrub = _isPlaying;
+                            setState(() => _isScrubbingSlider = true);
+                          },
                           onChanged: (value) => _controller
                               ?.seekTo(Duration(milliseconds: value.toInt())),
-                          onChangeEnd: (_) =>
-                              setState(() => _isScrubbingSlider = false),
+                          onChangeEnd: (_) {
+                            setState(() => _isScrubbingSlider = false);
+                            // ExoPlayer can drop playWhenReady after a seek
+                            // past the buffered window on some sources —
+                            // without this, dragging the slider silently
+                            // pauses playback until the user taps play again.
+                            if (_wasPlayingBeforeScrub) _controller?.play();
+                          },
                         ),
                       ),
                     ),
