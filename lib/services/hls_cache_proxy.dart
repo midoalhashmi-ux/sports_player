@@ -41,7 +41,21 @@ class HlsCacheProxy {
 
   final List<String> _segmentSequence = <String>[];
   final Set<String> _prefetching = <String>{};
-  static const int _prefetchAhead = 4;
+
+  /// المصدر معلوماته الحقيقية تُكتشَف فقط بعد أول قائمة تشغيل تُجلب فعلياً
+  /// (`_rewritePlaylist` تحدّثها). القيمة الافتراضية `false` قبل ذلك تعني
+  /// "نتعامل معه كبث مباشر مؤقتاً" — الأكثر أماناً حتى نتأكد فعلياً.
+  bool _sourceHasKnownEnd = false;
+
+  /// مقدار الجلب المسبق (بعدد الشرائح) يختلف فعلياً حسب نوع المصدر — هذا
+  /// جوهر طلب "يفرّق المشغّل لو أعطاه نهاية للفيديو": فيديو منتهٍ فعلياً
+  /// (`#EXT-X-ENDLIST` موجود) كامل ومعروف الحجم مسبقاً، فلا خطر من التخزين
+  /// المسبق الجريء (نفس مبدأ يوتيوب: يخزّن للأمام لدقائق أحياناً)، عكس بث
+  /// حي فعلي حيث الشرائح البعيدة غير موجودة أصلاً بعد على الخادم.
+  static const int _prefetchAheadLive = 4;
+  static const int _prefetchAheadVod = 12;
+  int get _prefetchAhead =>
+      _sourceHasKnownEnd ? _prefetchAheadVod : _prefetchAheadLive;
 
   /// هامش أمان خلف الحافة الحقيقية للبث المباشر (بالشرائح) — نفس مبدأ
   /// تأخير البث المباشر المتعمَّد المستخدَم فعلياً بمشغّلات احترافية
@@ -135,6 +149,7 @@ class HlsCacheProxy {
     _segmentCacheBytes = 0;
     _segmentSequence.clear();
     _prefetching.clear();
+    _sourceHasKnownEnd = false;
     if (server != null) {
       try {
         await server.close(force: true);
@@ -282,6 +297,16 @@ class HlsCacheProxy {
     final trailing = pending; // وسوم بلا رابط تالٍ (نادر بقائمة بث مباشر)
 
     final isLiveMediaPlaylist = sawSegmentUri && !sawPlaylistUri && !hasEndlist;
+    // جوهر التفريق المطلوب: قائمة شرائح فعلية (لا قائمة جودات رئيسية) هي
+    // المصدر الوحيد اللي يقدر "يعطي نهاية" فعلية — إن وُجد #EXT-X-ENDLIST
+    // بها فالمصدر منتهٍ فعلياً ومعروف الحجم بالكامل (نفس فيديو يوتيوب عادي)
+    // فنخزّن مسبقاً أبعد وأجرأ (_prefetchAheadVod)، عكس بث مباشر فعلي حيث
+    // لا نعرف حتى متى ينتهي أصلاً.
+    if (sawSegmentUri && !sawPlaylistUri) {
+      _sourceHasKnownEnd = hasEndlist;
+      _log('HLS_SOURCE_CLASSIFIED',
+          'hasEndlist=$hasEndlist prefetchAhead=${hasEndlist ? _prefetchAheadVod : _prefetchAheadLive}');
+    }
     final effectiveBlocks =
         (isLiveMediaPlaylist && blocks.length > _liveEdgeMarginSegments + 2)
             ? blocks.sublist(0, blocks.length - _liveEdgeMarginSegments)
