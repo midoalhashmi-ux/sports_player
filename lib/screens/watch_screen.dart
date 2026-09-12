@@ -3473,7 +3473,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb',
     );
     setState(() {
-      _state = _LoadState.loading;
+      // A background candidate trial fired *after* the WebView's own
+      // playback was already proven and shown (_webPlaybackReady) must stay
+      // invisible to the user — confirmed via a real debug log: the
+      // periodic candidate-discovery timer keeps running even once the
+      // video is already playing, so an opportunistic native trial (which
+      // usually fails — NATIVE_TRIAL_FAILED, "staying on WebView") was
+      // yanking the full-screen loading spinner over top of the actively
+      // playing WebView for its whole duration, reading to the user as a
+      // spurious "playback failed" flash that "fixes itself" a few seconds
+      // later when the next auto-detect cycle re-proves the WebView.
+      if (!(fallbackToWeb && _webPlaybackReady)) {
+        _state = _LoadState.loading;
+      }
       // During a WebView-originated Native trial the browser is the
       // authoritative fallback and must stay mounted/visible until Native
       // playback has been proven.
@@ -3647,7 +3659,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _setWebSessionState(_WebSessionState.nativeFailed);
         setState(() {
           _isWebSource = true;
-          _state = _LoadState.loading;
+          // Same guard as the trial-start setState above: a trial that
+          // failed after the WebView was already proven playing must not
+          // yank the loading spinner over it either — leave _state alone
+          // (already ready) so the visible video is never interrupted.
+          if (!_webPlaybackReady) _state = _LoadState.loading;
           _errorMessage = '';
         });
         final web = _webController;
