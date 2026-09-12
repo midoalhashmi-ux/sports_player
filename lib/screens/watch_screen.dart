@@ -19,6 +19,7 @@ import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
+import '../services/hls_cache_proxy.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
 import '../services/session_log_service.dart';
@@ -144,6 +145,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   static const String _autoDiscoveredServerLabel = 'المصدر المكتشف تلقائياً';
 
   VideoPlayerController? _controller;
+  late final HlsCacheProxy _hlsCacheProxy;
   WebViewController? _webController;
   bool _isWebSource = false;
   final GlobalKey _videoBoundaryKey = GlobalKey();
@@ -256,6 +258,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _hlsCacheProxy = HlsCacheProxy(onLog: _slog);
     SessionLogService.instance.startSession(
       'channelId=${widget.channelId} externalUrl=${widget.externalUrl}',
     );
@@ -3661,6 +3664,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
+      await _hlsCacheProxy.stop();
 
       // Explicit formatHint so ExoPlayer picks its DASH/HLS extractor
       // directly instead of guessing from the URL — needed for DASH sources
@@ -3675,10 +3679,28 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   ? VideoFormat.hls
                   : null);
 
+      // وكيل تخزين مؤقت محلي لمصادر HLS فقط (راجع hls_cache_proxy.dart
+      // لماذا وكيف اختلفت هذي المحاولة عن الأولى الفاشلة) — اختبار ذاتي
+      // داخل start() نفسها يمنع تسليم رابط غير مستجيب لـExoPlayer أصلاً؛
+      // أي فشل يرجع للرابط الأصلي المباشر دون أي أثر على السلوك القديم.
+      final effectiveHeaders = playbackHeaders ?? _effectiveStreamHeaders();
+      var playbackUri = Uri.parse(quality.url);
+      var controllerHeaders = effectiveHeaders;
+      if (formatHint == VideoFormat.hls) {
+        final proxied = await _hlsCacheProxy.start(
+          sourceUrl: quality.url,
+          headers: effectiveHeaders,
+        );
+        if (proxied != null) {
+          playbackUri = proxied;
+          controllerHeaders = const {};
+        }
+      }
+
       final newController = VideoPlayerController.networkUrl(
-        Uri.parse(quality.url),
+        playbackUri,
         formatHint: formatHint,
-        httpHeaders: playbackHeaders ?? _effectiveStreamHeaders(),
+        httpHeaders: controllerHeaders,
       );
       _controller = newController;
       _position = resumeFrom ?? Duration.zero;
@@ -3686,7 +3708,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _isPlaying = false;
       newController.addListener(_videoListener);
       if (fallbackToWeb) await _muteWebForNativeTrial(true);
-      await newController.initialize();
+      // شبكة أمان عامة: مؤكَّد بسجل تشخيص فعلي أن initialize() قد يعلق
+      // بلا نجاح ولا فشل مسجَّل لأكثر من 40 ثانية (بلا هذا الحد). أي تعليق
+      // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال 15 ثانية كحد أقصى، فيدخل
+      // بمسار المعالجة/إعادة الاتصال الموجود بدل تعليق صامت غير مشخَّص.
+      await newController.initialize().timeout(
+        const Duration(seconds: 15),
+        onTimeout: () => throw TimeoutException(
+            'native initialize() timed out after 15s — url=${_safeLogUrl(quality.url)}'),
+      );
       if (resumeFrom != null) {
         try {
           await newController.seekTo(resumeFrom);
@@ -3742,6 +3772,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         try {
           await failedController?.dispose();
         } catch (_) {}
+        unawaited(_hlsCacheProxy.stop());
         await _muteWebForNativeTrial(false);
         final failedUrl = _normalizeCandidate(quality.url);
         _webFailedNativeSources.add(failedUrl);
@@ -3867,6 +3898,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         return;
       }
       _slog('PLAY_SERVER_QUALITY_FAILED', 'url=${_safeLogUrl(quality.url)} error=${_describePlaybackError(error)} rawError=$error');
+      unawaited(_hlsCacheProxy.stop());
       setState(() {
         _state = _LoadState.error;
         _errorMessage = _describePlaybackError(error);
@@ -4381,6 +4413,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
+    unawaited(_hlsCacheProxy.stop());
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
