@@ -4156,7 +4156,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                           : null,
                       onTap: () {
                         Navigator.pop(context);
-                        _playServerQuality(_activeServer!, quality);
+                        // نفس ثغرة تبديل السيرفر المُصلَحة سابقاً (488ce33)
+                        // لكن هنا لتبديل الجودة: جلسة WebView تحتاج فتح
+                        // صفحة الجودة الجديدة كاملة، لا تجربة تشغيل أصلي
+                        // مباشرة على رابط صفحة ويب.
+                        if (session.kind == StreamKind.web) {
+                          _openWebSource(quality.url, server: _activeServer);
+                        } else {
+                          _playServerQuality(_activeServer!, quality);
+                        }
                       },
                     )),
               ],
