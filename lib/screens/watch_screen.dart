@@ -1010,7 +1010,17 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     // handed to native trial — a spurious '#' can make the same logical
     // source look like two different candidates depending on which code
     // path last touched it.
-    return uri.removeFragment().toString();
+    var normalized = uri.removeFragment().toString();
+    // بعض المواقع تسجّل رابط الـmanifest بإعداد المشغّل الخاص بها بشرطة
+    // مائلة زائدة بعد الامتداد مباشرة (grzcdn.com — مؤكَّد بسجل تشخيص
+    // فعلي: NATIVE_TRIAL_DIAGNOSTIC أرجع 400 Bad Request من nginx لهذا
+    // الشكل حرفياً، بينما نفس الرابط بلا الشرطة يعمل). هذي الشرطة لا معنى
+    // لها بعد امتداد ملف manifest فعلي، فحذفها هنا يوحّد أيضاً مفتاح
+    // التسجيل بالـregistry (بدل معاملة النسختين كمصدرين مختلفين).
+    if (RegExp(r'\.m3u8?/$', caseSensitive: false).hasMatch(normalized)) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
   }
 
   bool _canTrialNative(String source) {
