@@ -19,6 +19,7 @@ import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 import '../services/ad_service.dart';
 import '../services/candidate_scoring.dart';
 import '../services/channel_source_resolver.dart';
+import '../services/hls_relay_proxy.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/native_cookie_service.dart';
@@ -841,6 +842,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // الرابط لو فشل الإنقاذ نفسه.
   final Map<String, Completer<String?>> _pendingManifestFetches = {};
   final Set<String> _webManifestRelayAttemptedUrls = <String>{};
+  final Set<String> _webProxyRelayAttemptedUrls = <String>{};
+  // بروكسي محلي حي (HlsRelayProxy) — ملاذ أخير يبدأ فقط لو فشل التشغيل
+  // الأصلي حتى على ملف مانفست مُنقَذ برؤوس ثابتة. يبقى شغّالاً طوال
+  // التشغيل الناجح عبره؛ يُوقَف عند الفشل، أو بداية جلسة جديدة، أو dispose.
+  HlsRelayProxy? _activeHlsProxy;
   // Set once the channel's own page has finished loading successfully. Any
   // *main-frame* navigation to a different host after that point is not
   // normal player behaviour (players resolve their stream via background
@@ -3135,6 +3141,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webCandidateLastReason.clear();
     _webCandidateRegistry.clear();
     _webManifestRelayAttemptedUrls.clear();
+    _webProxyRelayAttemptedUrls.clear();
+    unawaited(_activeHlsProxy?.stop());
+    _activeHlsProxy = null;
     setState(() {
       _state = _LoadState.loading;
       _isWebSource = true;
@@ -3343,6 +3352,11 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         bool fallbackToWeb = false,
         Map<String, String>? playbackHeaders,
         VideoFormat? formatHintOverride,
+        // مُمرَّر فقط لما quality.url ملف محلي ناتج من إنقاذ مانفست
+        // (_relayManifestViaWebView) — رابط المانفست الأصلي الحقيقي قبل
+        // الإنقاذ، ليُستخدم لاحقاً كملاذ أخير (بروكسي محلي حي) لو حتى
+        // الملف المحلي فشل بالتشغيل الأصلي. null لأي مسار عادي.
+        String? originalManifestUrl,
       }) async {
     if (fallbackToWeb) {
       _setWebSessionState(_WebSessionState.nativeTrial);
@@ -3444,7 +3458,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       if (fallbackToWeb) {
         final channelId = widget.channelId;
         final host = Uri.tryParse(quality.url)?.host;
-        if (channelId != null && host != null && host.isNotEmpty) {
+        // '127.0.0.1' يعني هذا النجاح كان عبر HlsRelayProxy المحلي، لا
+        // عبر مضيف CDN حقيقي — لا فائدة من تذكّره كـ"سيرفر مفضّل" لأنه لن
+        // يطابق أي مرشح مكتشَف بزيارة قادمة أبداً.
+        if (channelId != null && host != null && host.isNotEmpty && host != '127.0.0.1') {
           unawaited(PreferredServerService.rememberHost(channelId, host));
         }
       }
@@ -3482,7 +3499,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         // نفس هذا المرشّح لا معنى لإعادة "جلبه عبر WebView" من جديد.
         final failedUri = Uri.tryParse(failedUrl);
         final failedUrlIsHttp = failedUri != null &&
-            (failedUri.scheme == 'http' || failedUri.scheme == 'https');
+            (failedUri.scheme == 'http' || failedUri.scheme == 'https') &&
+            // لا معنى "لإنقاذ" رابط بروكسينا المحلي نفسه عبر WebView —
+            // فقط سبب فشل حقيقي من الشبكة الخارجية يستاهل هذا المسار.
+            failedUri.host != '127.0.0.1';
         if (!_webManifestRelayAttemptedUrls.contains(failedUrl) &&
             failedUrlIsHttp &&
             _looksLikeHls(failedUrl) &&
@@ -3508,6 +3528,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 fallbackToWeb: true,
                 playbackHeaders: playbackHeaders,
                 formatHintOverride: VideoFormat.hls,
+                originalManifestUrl: failedUrl,
               );
               return;
             }
@@ -3538,6 +3559,55 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _slog('MANIFEST_RELAY_FAILED', 'url=${_safeLogUrl(failedUrl)}');
           if (!mounted) return;
         }
+
+        // ملاذ أخير: هذا الفشل لملف محلي ناتج من إنقاذ مانفست سابق
+        // (originalManifestUrl محفوظ من نداء الإنقاذ أعلاه) — يعني حتى
+        // الرؤوس الثابتة فشلت. نجرّب بروكسي محلي حي يعيد جلب كل سيجمنت
+        // لحظة طلبه فعلياً برؤوس/كوكيز طازجة (راجع HlsRelayProxy) بدل
+        // رؤوس أُخذت مرة واحدة بداية الجلسة. مرة واحدة فقط لكل رابط
+        // مانفست أصلي — لا تُحتسب من ميزانية محاولات التشغيل الأصلي
+        // العادية، نفس منطق إنقاذ المانفست فوق تماماً.
+        final rescueManifestUrl = originalManifestUrl;
+        if (rescueManifestUrl != null &&
+            !_webProxyRelayAttemptedUrls.contains(rescueManifestUrl) &&
+            _webController != null &&
+            mounted) {
+          _webProxyRelayAttemptedUrls.add(rescueManifestUrl);
+          final manifestUri = Uri.tryParse(rescueManifestUrl);
+          if (manifestUri != null) {
+            final proxy = HlsRelayProxy();
+            try {
+              final localUrl = await proxy.start(manifestUri, () async {
+                return _headersForCandidate(
+                  rescueManifestUrl,
+                  _webCandidateRegistry[rescueManifestUrl],
+                );
+              });
+              _activeHlsProxy = proxy;
+              _slog('HLS_PROXY_STARTED',
+                  'url=${_safeLogUrl(rescueManifestUrl)} local=$localUrl');
+              await _playServerQuality(
+                StreamServerOption(label: server.label, qualities: [
+                  StreamQuality(label: quality.label, url: localUrl.toString())
+                ]),
+                StreamQuality(label: quality.label, url: localUrl.toString()),
+                fallbackToWeb: true,
+                formatHintOverride: VideoFormat.hls,
+              );
+              return;
+            } catch (e) {
+              _slog('HLS_PROXY_START_FAILED',
+                  'url=${_safeLogUrl(rescueManifestUrl)} error=$e');
+              await proxy.stop();
+              if (identical(_activeHlsProxy, proxy)) _activeHlsProxy = null;
+            }
+          }
+        }
+
+        // فشل نهائي (بما فيه محاولة البروكسي إن جرت) — لا داعي لإبقاء
+        // بروكسي محلي شغّالاً بلا فائدة.
+        await _activeHlsProxy?.stop();
+        _activeHlsProxy = null;
 
         _extendWebStartupDeadline(const Duration(seconds: 8));
         _setWebSessionState(_WebSessionState.nativeFailed);
@@ -4031,6 +4101,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     WakelockPlus.disable();
     _controller?.dispose();
     _streamNetworkClient.close();
+    _activeHlsProxy?.stop();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
