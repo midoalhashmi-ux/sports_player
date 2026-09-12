@@ -2724,23 +2724,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     return 'جاري تشغيل المحتوى…';
   }
 
-  Future<void> _revealWebPageForInteraction() async {
-    final controller = _webController;
-    if (controller == null || !mounted) return;
-    try {
-      await controller.runJavaScript(r'''(() => {
-        try {
-          document.querySelectorAll('[data-sports-player-focus-hidden="1"]').forEach((el) => {
-            el.style.removeProperty('visibility');
-            el.removeAttribute('data-sports-player-focus-hidden');
-          });
-        } catch (_) {}
-      })();''');
-    } catch (_) {}
-    if (!mounted) return;
-    setState(() => _webPageRevealedByUser = true);
-  }
-
   Future<void> _showWebPlaybackReady(WebViewController controller) async {
     if (!mounted || _webPlaybackReady) return;
     _webPlaybackReady = true;
@@ -4686,32 +4669,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     );
   }
 
+  // طلب صريح من المستخدم: سواد كامل بلا أي نص/أيقونة/زر — لا إشعار
+  // إطلاقاً. صفحة المصدر تبقى مخفية وممنوعة من اللمس (نفس منطق
+  // _shouldShowWebPage/IgnorePointer بالـbuild أعلاه)، فقط بلا أي مؤشر
+  // مرئي فوقها.
   Widget _buildHiddenWebSourceStatus() {
-    return Positioned.fill(
-      child: Container(
-        color: Colors.black,
-        alignment: Alignment.center,
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.play_circle_outline,
-                color: Colors.white70, size: 52),
-            const SizedBox(height: 14),
-            const Text(
-              'صفحة المصدر مخفية حسب إعدادات المشغل. يمكنك إظهارها عند الحاجة للتفاعل مع المشغل.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.white70, height: 1.4),
-            ),
-            const SizedBox(height: 18),
-            OutlinedButton.icon(
-              onPressed: _revealWebPageForInteraction,
-              icon: const Icon(Icons.visibility),
-              label: const Text('إظهار صفحة المصدر'),
-            ),
-          ],
-        ),
-      ),
+    return const Positioned.fill(
+      child: ColoredBox(color: Colors.black),
     );
   }
 
