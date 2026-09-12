@@ -136,6 +136,13 @@ class WatchScreen extends StatefulWidget {
 }
 
 class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
+  // نفس التسمية المستخدمة عند إنشاء سيرفر لمرشّح مُكتشَف تلقائياً من
+  // WebView (_autoDetectWebSource) — تُستخدم كعلامة موثوقة لتمييز هذا
+  // النوع من السيرفرات (روابطها دائماً وسائط حقيقية مُثبَتة، لا صفحات
+  // ويب) عن سيرفرات CMS متعددة المصادر (channels.sources[]، روابطها
+  // غالباً صفحات ويب كاملة تحتاج فتحاً لا تشغيلاً مباشراً).
+  static const String _autoDiscoveredServerLabel = 'المصدر المكتشف تلقائياً';
+
   VideoPlayerController? _controller;
   WebViewController? _webController;
   bool _isWebSource = false;
@@ -3034,9 +3041,9 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
           timer.cancel();
 
-          final quality = StreamQuality(label: 'المصدر المكتشف تلقائياً', url: source);
+          final quality = StreamQuality(label: _autoDiscoveredServerLabel, url: source);
           await _playServerQuality(
-            StreamServerOption(label: 'المصدر المكتشف تلقائياً', qualities: [quality]),
+            StreamServerOption(label: _autoDiscoveredServerLabel, qualities: [quality]),
             quality,
             fallbackToWeb: true,
             playbackHeaders: candidateHeaders,
@@ -3482,6 +3489,105 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     };
   }
 
+  /// يحلّل نص playlist رئيسي (master) بحثاً عن أسطر `#EXT-X-STREAM-INF`
+  /// (جودات/معدلات نقل بديلة لنفس المحتوى) ويبني منها قائمة جودات
+  /// حقيقية قابلة للاختيار — بدل الاعتماد فقط على رابط واحد. يعمل مع أي
+  /// مصدر HLS (لا يخص موقعاً معيّناً)؛ يرجع قائمة فارغة لو النص ليس
+  /// playlist رئيسياً (أي مصدر بجودة واحدة فقط، سلوك سابق دون تغيير).
+  List<StreamQuality> _parseHlsVariantQualities(String manifestText, Uri baseUri) {
+    final lines = manifestText.split('\n');
+    final variants = <StreamQuality>[];
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i].trim();
+      if (!line.startsWith('#EXT-X-STREAM-INF')) continue;
+      // أول سطر غير فارغ وغير تعليق بعد #EXT-X-STREAM-INF هو رابط الجودة.
+      String? uriLine;
+      for (var j = i + 1; j < lines.length; j++) {
+        final candidate = lines[j].trim();
+        if (candidate.isEmpty || candidate.startsWith('#')) continue;
+        uriLine = candidate;
+        break;
+      }
+      if (uriLine == null) continue;
+      Uri resolved;
+      try {
+        resolved = baseUri.resolve(uriLine);
+      } catch (_) {
+        continue;
+      }
+      final resMatch = RegExp(r'RESOLUTION=\d+x(\d+)').firstMatch(line);
+      final bwMatch = RegExp(r'BANDWIDTH=(\d+)').firstMatch(line);
+      final height = resMatch != null ? int.tryParse(resMatch.group(1)!) : null;
+      final bandwidth = bwMatch != null ? int.tryParse(bwMatch.group(1)!) : null;
+      final label = height != null
+          ? '${height}p'
+          : (bandwidth != null
+              ? '${(bandwidth / 1000).round()} كيلوبت/ث'
+              : 'جودة ${variants.length + 1}');
+      variants.add(StreamQuality(label: label, url: resolved.toString()));
+      // رتبة الفرز مطلوبة بالأعلى فقط لو تعدّد الجودات — نخزّن الترتيب
+      // عبر إعادة البناء أدناه بدل إبقاء متغيّر مساعد هنا.
+    }
+    if (variants.length < 2) return const [];
+    // الأعلى دقة/معدل نقل أولاً — يطابق تعارف قوائم الجودة بكل المشغلات.
+    final withScore = variants.map((q) {
+      final h = RegExp(r'^(\d+)p$').firstMatch(q.label);
+      final score = h != null ? int.parse(h.group(1)!) : 0;
+      return MapEntry(score, q);
+    }).toList()
+      ..sort((a, b) => b.key.compareTo(a.key));
+    // "تلقائي" أولاً يعيد استخدام الرابط الرئيسي نفسه (تكيّفي — ExoPlayer
+    // يختار بنفسه حسب سرعة الشبكة، وهذا فعلياً ما يعمل الآن افتراضياً)،
+    // يليه كل جودة مُجبَرة صراحة.
+    return [
+      StreamQuality(label: 'تلقائي', url: baseUri.toString()),
+      ...withScore.map((e) => e.value),
+    ];
+  }
+
+  /// يجلب playlist المصدر المكتشَف تلقائياً بالخلفية (بعد نجاح التشغيل
+  /// فعلياً، فلا يؤخّر أول محاولة تشغيل إطلاقاً) ويستبدل قائمة جوداته
+  /// الوهمية (خيار واحد فقط) بجودات حقيقية لو كان playlist رئيسياً متعدد
+  /// الجودات. أي فشل هنا صامت تماماً — تحسين اختياري، لا يؤثر على
+  /// التشغيل الجاري بأي شكل.
+  Future<void> _populateHlsQualitiesInBackground(
+    StreamServerOption server,
+    String masterUrl,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final baseUri = Uri.parse(masterUrl);
+      final response = await http
+          .get(baseUri, headers: headers)
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode < 200 || response.statusCode >= 300) return;
+      final qualities = _parseHlsVariantQualities(response.body, baseUri);
+      if (qualities.isEmpty || !mounted) return;
+      final updatedServer = StreamServerOption(label: server.label, qualities: qualities);
+      // مزامنة قائمة session.servers أفضل جهد فقط — السيرفر المُكتشَف
+      // تلقائياً غالباً لا يُدرَج أصلاً بهذه القائمة (يُمرَّر مباشرة كوسيط
+      // إلى _playServerQuality بدون إضافته لـ_session.servers)، فتحديث
+      // _activeServer أدناه هو ما يُظهر الجودات فعلياً بقائمة الاختيار —
+      // لا يجب أن يمنعه فشل هذه المزامنة.
+      final session = _session;
+      if (session != null) {
+        final index = session.servers.indexWhere((s) => identical(s, server));
+        if (index >= 0) session.servers[index] = updatedServer;
+      }
+      setState(() {
+        if (identical(_activeServer, server)) {
+          _activeServer = updatedServer;
+          // أول عنصر بالقائمة الجديدة دائماً "تلقائي" (نفس رابط
+          // التشغيل الحالي فعلياً) — يعكس الواقع أن التشغيل الجاري
+          // تكيّفي، لا جودة مُجبَرة، فتظهر علامة الاختيار الصحيحة فوراً.
+          _activeQuality = updatedServer.qualities.first;
+        }
+      });
+    } catch (_) {
+      // تحسين اختياري فقط — أي خطأ (شبكة/تحليل) يُتجاهل بصمت.
+    }
+  }
+
   Future<void> _muteWebForNativeTrial(bool mute) async {
     final web = _webController;
     if (web == null) return;
@@ -3615,6 +3721,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _state = _LoadState.ready;
         if (fallbackToWeb) _isWebSource = false;
       });
+      // إثراء قائمة الجودات بالخلفية بعد نجاح التشغيل فعلياً — لا يؤخّر
+      // أول محاولة تشغيل إطلاقاً (راجع تعليقات الدالة). فقط للسيرفرات
+      // المُكتشَفة تلقائياً (رابطها الوحيد وسائط مُثبَتة، لا صفحة ويب)
+      // وبصيغة HLS، ولو كان لا يزال بجودة وهمية واحدة فقط.
+      if (formatHint == VideoFormat.hls &&
+          server.label == _autoDiscoveredServerLabel &&
+          server.qualities.length <= 1) {
+        unawaited(_populateHlsQualitiesInBackground(
+          server,
+          quality.url,
+          playbackHeaders ?? _effectiveStreamHeaders(),
+        ));
+      }
     } catch (error) {
       if (!mounted) return;
       if (fallbackToWeb) {
@@ -4152,8 +4271,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                         // نفس ثغرة تبديل السيرفر المُصلَحة سابقاً (488ce33)
                         // لكن هنا لتبديل الجودة: جلسة WebView تحتاج فتح
                         // صفحة الجودة الجديدة كاملة، لا تجربة تشغيل أصلي
-                        // مباشرة على رابط صفحة ويب.
-                        if (session.kind == StreamKind.web) {
+                        // مباشرة على رابط صفحة ويب. الاستثناء: سيرفر
+                        // مُكتشَف تلقائياً (راجع _autoDiscoveredServerLabel)
+                        // — جوداته مبنية من تحليل playlist رئيسي حقيقي
+                        // (_populateHlsQualitiesInBackground)، فروابطها
+                        // دائماً وسائط مُثبَتة لا صفحات ويب، بغض النظر عن
+                        // session.kind.
+                        if (session.kind == StreamKind.web &&
+                            _activeServer?.label != _autoDiscoveredServerLabel) {
                           _openWebSource(quality.url, server: _activeServer);
                         } else {
                           _playServerQuality(_activeServer!, quality);
