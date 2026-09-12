@@ -1,0 +1,12 @@
+# انسخ هذا الملف باسم key.properties (بنفس هذا المجلد android/) وعدّل
+# القيم — لا تُرفع هذه النسخة (key.properties) لـ GitHub أبداً، محمية
+# بـ.gitignore عمداً لأنها تحتوي كلمات مرور حقيقية.
+#
+# طريقة إنشاء الكيستور مرة واحدة فقط (PowerShell، من مجلد android/):
+#   keytool -genkeypair -v -keystore local-release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias localrelease -storepass "CHANGE_ME" -keypass "CHANGE_ME" -dname "CN=Local Dev, OU=Dev, O=BinSheikh, L=City, S=State, C=SA"
+# (غيّر "CHANGE_ME" بكلمة مرور من اختيارك، واستخدم نفسها بالحقلين تحت)
+
+storeFile=local-release-key.jks
+storePassword=CHANGE_ME
+keyAlias=localrelease
+keyPassword=CHANGE_ME
