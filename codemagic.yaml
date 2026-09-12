@@ -10,6 +10,12 @@ workflows:
       - name: جلب الحزم
         script: flutter pub get
       - name: بناء APK (للاختبار والتثبيت المباشر)
-        script: flutter build apk --release
+        # --split-per-abi: ملف منفصل أصغر لكل معمارية بدل APK واحد "شامل"
+        # يحتوي الاثنتين معاً (كان يضخّم الحجم بلا داعٍ). --target-platform
+        # يقتصر على المعماريتين الحقيقيتين لأجهزة أندرويد فقط (بلا x86_64،
+        # يخص المحاكيات فقط) — يطابق تماماً ما كان مضبوطاً سابقاً بـ
+        # android/app/build.gradle عبر ndk.abiFilters، لكن بالطريقة الصحيحة
+        # المتوافقة مع --split-per-abi (الطريقتان تتعارضان لو استُخدمتا معاً).
+        script: flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64
     artifacts:
       - build/**/outputs/**/*.apk
