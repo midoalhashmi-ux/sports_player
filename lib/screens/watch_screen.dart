@@ -164,6 +164,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _stallNudgeTimer;
   Timer? _stallGiveUpTimer;
   bool _stallNudgeAttempted = false;
+  // شبكة ضعيفة تجعل ExoPlayer يرمي خطأ فعلياً (لا مجرد تخزين مؤقت بلا تقدّم،
+  // ذاك مغطّى بمراقب الانقطاع أعلاه) — كان يظهر شاشة خطأ كاملة فوراً تحتاج
+  // ضغطة "إعادة المحاولة" يدوياً حتى لو كانت الشبكة تعافت خلال ثوانٍ. الآن
+  // نعيد الاتصال تلقائياً بصمت (نفس السيرفر/الموضع) عدة مرات بتأخير متزايد،
+  // ولا نعرض شاشة الخطأ إلا بعد استنفاد المحاولات أو ضغط المستخدم للإيقاف
+  // بنفسه (_userPausedPlayback) — عندها لا نزاحمه بمحاولات تلقائية إطلاقاً.
+  Timer? _nativeReconnectTimer;
+  int _nativeAutoReconnectAttempts = 0;
+  bool _userPausedPlayback = false;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double _volume = 100;
@@ -288,10 +297,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     final value = controller.value;
     if (value.hasError) {
       _slog('NATIVE_PLAYBACK_ERROR', 'position=${value.position} error=${value.errorDescription}');
-      setState(() {
-        _state = _LoadState.error;
-        _errorMessage = 'تعذر تشغيل رابط البث. جرّب مرة أخرى أو غيّر السيرفر.';
-      });
+      _handleNativePlaybackError();
       return;
     }
     final wasBuffering = _isBuffering;
@@ -395,6 +401,51 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _slowConnectionTimer?.cancel();
     _slowConnectionTimer = null;
     if (_slowConnectionHint) setState(() => _slowConnectionHint = false);
+  }
+
+  void _cancelNativeReconnect() {
+    _nativeReconnectTimer?.cancel();
+    _nativeReconnectTimer = null;
+    _nativeAutoReconnectAttempts = 0;
+  }
+
+  // شبكة ضعيفة تجعل ExoPlayer يرمي خطأ فعلياً (value.hasError) بدل مجرد
+  // التخزين المؤقت — كان هذا يُظهر شاشة الخطأ الكاملة فوراً ويحتاج ضغطة
+  // "إعادة المحاولة" يدوياً حتى لو تعافت الشبكة خلال ثوانٍ. نعيد المحاولة
+  // تلقائياً بصمت (نفس السيرفر والجودة، تكمل من آخر موضع عبر resumeFrom
+  // بـ_playServerQuality) بتأخير متزايد، ونتوقف فوراً لو ضغط المستخدم زر
+  // الإيقاف بنفسه (_userPausedPlayback) — لا نزاحمه بمحاولات تلقائية. بعد
+  // عدد كافٍ من المحاولات الفاشلة (شبكة ميتة فعلياً، لا مجرد بطء) نستسلم
+  // لشاشة الخطأ المعروفة (بزر إعادة المحاولة وتغيير السيرفر).
+  static const int _nativeMaxAutoReconnectAttempts = 8;
+
+  void _handleNativePlaybackError() {
+    if (!mounted) return;
+    final server = _activeServer;
+    final quality = _activeQuality;
+    if (_userPausedPlayback ||
+        server == null ||
+        quality == null ||
+        _nativeAutoReconnectAttempts >= _nativeMaxAutoReconnectAttempts) {
+      _cancelNativeReconnect();
+      setState(() {
+        _state = _LoadState.error;
+        _errorMessage = 'تعذر تشغيل رابط البث. جرّب مرة أخرى أو غيّر السيرفر.';
+      });
+      return;
+    }
+    _nativeAutoReconnectAttempts++;
+    final delaySeconds = _nativeAutoReconnectAttempts.clamp(1, 5);
+    _slog(
+      'NATIVE_AUTO_RECONNECT',
+      'attempt=$_nativeAutoReconnectAttempts/$_nativeMaxAutoReconnectAttempts delay=${delaySeconds}s position=$_position',
+    );
+    if (!_isBuffering) setState(() => _isBuffering = true);
+    _nativeReconnectTimer?.cancel();
+    _nativeReconnectTimer = Timer(Duration(seconds: delaySeconds), () {
+      if (!mounted || _userPausedPlayback) return;
+      unawaited(_playServerQuality(server, quality));
+    });
   }
 
   // ---------------------- دوال المعالجة المتسلسلة (المضافة حديثاً) ----------------------
@@ -3468,6 +3519,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       _setWebSessionState(_WebSessionState.nativeTrial);
       _smartLog('NATIVE', 'trial started');
     }
+    // أي محاولة تشغيل جديدة (يدوية أو تلقائية) تعني نية تشغيل واضحة — تُلغي
+    // أي إيقاف سابق طلبه المستخدم بنفسه حتى لا يتعارض مع منطق إعادة
+    // الاتصال التلقائي بـ_handleNativePlaybackError.
+    _userPausedPlayback = false;
     _slog(
       'PLAY_SERVER_QUALITY_START',
       'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb',
@@ -3559,6 +3614,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         'PLAY_SERVER_QUALITY_SUCCESS',
         'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb — final state: ${fallbackToWeb ? 'NATIVE (switched from WebView)' : 'NATIVE (direct)'}',
       );
+      _cancelNativeReconnect();
       setState(() {
         _state = _LoadState.ready;
         if (fallbackToWeb) _isWebSource = false;
@@ -3757,7 +3813,13 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   void _togglePlay() {
     final controller = _controller;
     if (controller == null) return;
-    _isPlaying ? controller.pause() : controller.play();
+    if (_isPlaying) {
+      _userPausedPlayback = true;
+      controller.pause();
+    } else {
+      _userPausedPlayback = false;
+      controller.play();
+    }
     _scheduleHide();
   }
 
@@ -3855,10 +3917,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // يعطيان تحكماً يدوياً صريحاً بأي بُعد يُملأ بالضبط (بديل لمن يفضّل قصّاً
   // بجهة واحدة محددة بدل قرار "تعبئة" التلقائي)، و"تمديد" تملأ الشاشة بدون
   // قص أي جزء إطلاقاً (بديل عملي لمن يزعجه القص أكثر من التمدد الطفيف).
+  // خُفِّضت من 5 إلى 4 أوضاع بناءً على طلب صريح — إزالة "ملء العرض"
+  // (fitWidth) تحديداً لأنه يقصّ من الأعلى والأسفل، وهو بالضبط المكان
+  // اللي تظهر فيه الترجمة المحروقة بأغلب المصادر؛ الأوضاع الأربعة الباقية
+  // إما بلا قصّ إطلاقاً (احتواء/تمديد) أو تقصّ من الجانبين فقط
+  // (تعبئة الشاشة/ملء الارتفاع)، فلا تلمس الترجمة أبداً.
   static const _fitModes = <BoxFit, (String, String, IconData)>{
     BoxFit.contain: ('احتواء', 'يعرض الفيديو كاملاً، قد تظهر حواف سوداء', Icons.fit_screen),
-    BoxFit.cover: ('تعبئة الشاشة', 'يملأ الشاشة بالكامل، قد يقصّ حواف الصورة', Icons.crop_free),
-    BoxFit.fitWidth: ('ملء العرض', 'يملأ عرض الشاشة بالضبط، قد يقصّ من الأعلى والأسفل', Icons.swap_horiz),
+    BoxFit.cover: ('تعبئة الشاشة', 'يملأ الشاشة بالكامل، قد يقصّ من الجانبين', Icons.crop_free),
     BoxFit.fitHeight: ('ملء الارتفاع', 'يملأ ارتفاع الشاشة بالضبط، قد يقصّ من الجانبين', Icons.height),
     BoxFit.fill: ('تمديد', 'يملأ الشاشة بدون قص، مع تمدد بسيط للصورة', Icons.aspect_ratio),
   };
@@ -4182,6 +4248,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _bufferIndicatorTimer?.cancel();
     _stallNudgeTimer?.cancel();
     _stallGiveUpTimer?.cancel();
+    _nativeReconnectTimer?.cancel();
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
@@ -4473,6 +4540,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                     ),
                   ),
                 ),
+              // منقول من صف التحكم العلوي (Row داخل _buildControls) — كان
+              // يتشارك نفس المساحة فعلياً مع زري القفل/وضع العرض أعلاه
+              // فيظهر خلفهما. زاوية مستقلة (يمين الشاشة) تحل التصادم نهائياً.
+              if (_state == _LoadState.ready && !_isWebSource && !_locked)
+                Positioned(
+                  top: 8,
+                  right: 8,
+                  child: AnimatedOpacity(
+                    opacity: _controlsVisible ? 1 : 0,
+                    duration: const Duration(milliseconds: 200),
+                    child: IgnorePointer(
+                      ignoring: !_controlsVisible,
+                      child: _circleIconButton(
+                        icon: Icons.arrow_back,
+                        tooltip: 'رجوع',
+                        onPressed: _exit,
+                      ),
+                    ),
+                  ),
+                ),
               // Web players own their internal controls, so keep the
               // orientation action available as a Flutter overlay as well.
               if (_state == _LoadState.ready && _isWebSource)
@@ -4751,13 +4838,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
               child: Row(
                 children: [
-                  const SizedBox(width: 48),
-                  _circleIconButton(
-                    icon: Icons.arrow_back,
-                    tooltip: 'رجوع',
-                    onPressed: _exit,
-                  ),
-                  const SizedBox(width: 6),
+                  // زر الرجوع لم يعد هنا — انتقل لـPositioned مستقلة (راجع
+                  // build()) عند top:8,right:8 لأنه كان يتشارك نفس منطقة
+                  // الشاشة فعلياً مع زري القفل/وضع العرض (top:8,left:8/62)
+                  // ويظهر خلفهما (مؤكَّد من المستخدم عبر لقطة شاشة حقيقية).
                   if (isLive && !canSeek && !compactControls)
                     Container(
                       padding: const EdgeInsets.symmetric(
