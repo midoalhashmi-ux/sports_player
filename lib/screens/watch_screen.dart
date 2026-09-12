@@ -1105,6 +1105,16 @@ class _WatchScreenState extends State<WatchScreen>
       'PLAY_SERVER_QUALITY_START',
       'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb',
     );
+    // نفس مشكلة "تُومض شاشة التحميل" الموثّقة أدناه للحالة العكسية: إعادة
+    // اتصال تلقائي بعد خطأ شبكي عابر (CDN يقطع الاتصال لحظياً أثناء تشغيل
+    // ناجح فعلاً — مؤكَّد بسجل تشخيص فعلي) كانت تهدم عرض الفيديو بالكامل
+    // وتستبدله بشاشة تحميل سوداء كاملة (مؤشر + نص) في كل محاولة من الثماني
+    // المسموحة بـ_handleNativePlaybackError، فيظهر للمستخدم كأن التطبيق
+    // "يفتح ويقفل" الملف بشكل متكرر رغم إن الفيديو نفسه لم يتوقف فعلياً عن
+    // العمل (نفس تبديل جودة/سيرفر يدوي أثناء تشغيل فعلي أيضاً يستفيد من هذا
+    // — resumeFrom أصلاً يكمل من نفس النقطة، فلا داعي لشاشة تحميل كاملة).
+    final wasAlreadyPlayingNative =
+        !fallbackToWeb && _state == _LoadState.ready && !_isWebSource;
     setState(() {
       // A background candidate trial fired *after* the WebView's own
       // playback was already proven and shown (_webPlaybackReady) must stay
@@ -1116,7 +1126,7 @@ class _WatchScreenState extends State<WatchScreen>
       // playing WebView for its whole duration, reading to the user as a
       // spurious "playback failed" flash that "fixes itself" a few seconds
       // later when the next auto-detect cycle re-proves the WebView.
-      if (!(fallbackToWeb && _webPlaybackReady)) {
+      if (!(fallbackToWeb && _webPlaybackReady) && !wasAlreadyPlayingNative) {
         _state = _LoadState.loading;
       }
       // During a WebView-originated Native trial the browser is the
@@ -1159,7 +1169,13 @@ class _WatchScreenState extends State<WatchScreen>
       final effectiveHeaders = playbackHeaders ?? _effectiveStreamHeaders();
       var playbackUri = Uri.parse(quality.url);
       var controllerHeaders = effectiveHeaders;
-      if (formatHint == VideoFormat.hls) {
+      // ملف محلي (file://) ناتج من إنقاذ WebView (_relayManifestViaWebView)
+      // مسبَق الكتابة بالكامل وروابط سيجمنته مطلقة أصلاً — تمرير رابط
+      // file:// لـ_hlsCacheProxy.start() مؤكَّد فشله دائماً (سجل تشخيص
+      // فعلي: "Invalid argument(s): No host specified in URI file://..."
+      // لأن http.Client لا يدعم جلب file:// أساساً) فيهدر جولة كاملة قبل
+      // الرجوع للرابط المباشر — نتخطّى الوكيل من الأساس لهذي الحالة.
+      if (formatHint == VideoFormat.hls && playbackUri.scheme != 'file') {
         final proxied = await _hlsCacheProxy.start(
           sourceUrl: quality.url,
           headers: effectiveHeaders,
@@ -1183,12 +1199,18 @@ class _WatchScreenState extends State<WatchScreen>
       if (fallbackToWeb) await _muteWebForNativeTrial(true);
       // شبكة أمان عامة: مؤكَّد بسجل تشخيص فعلي أن initialize() قد يعلق
       // بلا نجاح ولا فشل مسجَّل لأكثر من 40 ثانية (بلا هذا الحد). أي تعليق
-      // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال 15 ثانية كحد أقصى، فيدخل
-      // بمسار المعالجة/إعادة الاتصال الموجود بدل تعليق صامت غير مشخَّص.
+      // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال مهلة محدودة، فيدخل بمسار
+      // المعالجة/إعادة الاتصال الموجود بدل تعليق صامت غير مشخَّص.
+      // خُفِّضت من 15 إلى 9 ثوانٍ: سجلات تشخيص فعلية متعددة تُظهر أن أي
+      // تشغيل ناجح فعلياً يكتمل خلال 3-5 ثوانٍ كحد أقصى (مهما كان المصدر)،
+      // بينما مرشّح ميت فعلياً (اتصال CDN منقطع) كان يُهدر المهلة الكاملة
+      // 15 ثانية قبل الانتقال للمرشّح التالي — مع وجود مرشّحين محتملين أو
+      // أكثر بجلسة واحدة هذا يعني حتى 30 ثانية انتظار قبل ما يبدأ المسلسل،
+      // رغم إن كلا المرشّحين ميّتان فعلياً من ثوانيهما الأولى.
       await newController.initialize().timeout(
-        const Duration(seconds: 15),
+        const Duration(seconds: 9),
         onTimeout: () => throw TimeoutException(
-            'native initialize() timed out after 15s — url=${_safeLogUrl(quality.url)}'),
+            'native initialize() timed out after 9s — url=${_safeLogUrl(quality.url)}'),
       );
       if (resumeFrom != null) {
         try {
@@ -2381,18 +2403,40 @@ class _WatchScreenState extends State<WatchScreen>
   // نص أو زر — حتى يطمئن المستخدم أن التطبيق لسّه يجهّز الرابط ولم يتجمّد،
   // بدل شاشة سوداء صامتة تماماً. صفحة المصدر تبقى مخفية وممنوعة من اللمس
   // (نفس منطق _shouldShowWebPage/IgnorePointer بالـbuild أعلاه).
+  // تعديل ثانٍ: أُضيف نص (_loadingMessage نفسه المستخدَم بـ_buildLoading،
+  // يتغيّر تلقائياً مع الوقت) — المؤشر الدائري وحده لم يكن كافياً ليشعر
+  // المستخدم أن التشغيل على وشك البدء فعلاً.
   Widget _buildHiddenWebSourceStatus() {
-    return const Positioned.fill(
+    return Positioned.fill(
       child: ColoredBox(
         color: Colors.black,
         child: Center(
-          child: SizedBox(
-            width: 34,
-            height: 34,
-            child: CircularProgressIndicator(
-              strokeWidth: 3.2,
-              color: AppTheme.accent,
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                width: 34,
+                height: 34,
+                child: CircularProgressIndicator(
+                  strokeWidth: 3.2,
+                  color: AppTheme.accent,
+                ),
+              ),
+              const SizedBox(height: 14),
+              Text(
+                _loadingMessage,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  shadows: [
+                    Shadow(color: Colors.black, blurRadius: 6, offset: Offset(0, 2)),
+                    Shadow(color: Colors.black87, blurRadius: 12, offset: Offset(0, 1)),
+                  ],
+                ),
+              ),
+            ],
           ),
         ),
       ),
