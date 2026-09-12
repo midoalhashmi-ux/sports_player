@@ -3073,54 +3073,66 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
           }
         }
 
-        // Phase 2: validate every remaining candidate concurrently instead of
-        // one await per candidate in sequence — each candidate's network
-        // round trip (headers lookup + HLS/progressive probe, each with its
-        // own timeout) runs in parallel, so the wall-clock cost of this
-        // phase drops from the sum of all candidates' latencies to roughly
-        // the slowest single one. Selection order/priority and every skip
-        // reason below are unchanged from the previous sequential version.
+        // Phase 2: start every remaining candidate's validation concurrently
+        // (fire immediately, don't await here) instead of one await per
+        // candidate in sequence. Phase 3 below then awaits each candidate's
+        // OWN future in priority order — since every one of them already
+        // started here, that wait is bounded by that candidate's own
+        // latency alone, never by a slower/lower-priority candidate further
+        // down the list. Awaiting the whole batch together (an earlier
+        // version of this did) has the same total network cost but forces
+        // the winning candidate — often already resolved instantly via the
+        // strong-evidence skip below — to sit idle behind a slow candidate
+        // it was never going to need, wasting real seconds before every
+        // native trial starts. Confirmed on a real diagnostic log: an 8s
+        // validation timeout on a losing low-priority candidate delayed the
+        // winning strong-evidence candidate's native trial by the same 8s.
         if (probes.isNotEmpty) {
           _setWebSessionState(_WebSessionState.validating);
-          await Future.wait(probes.map((probe) async {
-            probe.headers = await _headersForCandidate(probe.source, probe.registered);
-            if (probe.strongHls || probe.strongFramework) {
-              // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
-              // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
-              // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
-              // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
-              // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
-              // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
-              // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
-              // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
-              probe.validated = true;
-              _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=strong_evidence score=${probe.score}');
-              return;
-            }
-            // Best-effort validation. A negative validation is not fatal when
-            // the browser has already supplied strong evidence (for example a
-            // stream requiring Referer/Origin/cookies).
-            _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(probe.source)} evidence=${probe.evidence} score=${probe.score} headers=${probe.headers.keys.toList()}');
-            final validated = await _validatePublicMediaSource(
-              probe.source,
-              requestHeaders: probe.headers,
-            );
-            probe.validated = validated;
-            probe.registered?.validated = validated;
-            _smartLog(
-              'HLS',
-              'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(probe.source)}',
-            );
-            _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(probe.source)} validated=$validated');
-          }));
-          if (!_webSessionIsActive(generation)) return;
         }
+        final validationFutures = <Future<void>>[
+          for (final probe in probes)
+            () async {
+              probe.headers = await _headersForCandidate(probe.source, probe.registered);
+              if (probe.strongHls || probe.strongFramework) {
+                // أدلة قوية أصلاً (HLS مؤكد أو إطار تشغيل معروف بنتيجة عالية) —
+                // نتيجة فحص الشبكة هنا لن تُغيّر القرار مهما كانت (الشرط أسفل
+                // مستثنيها أصلاً عبر strongHls/strongFramework)، فتخطّيه يوفّر
+                // ثواني حرجة قبل تجربة التشغيل الأصلي الفعلية. شوهد فعلياً بسجل
+                // تشخيص: رابط بث موقّت (توكن قصير الأجل على الأغلب) يعمل بنجاح
+                // مستمر داخل WebView لكن يفشل بالتشغيل الأصلي — الفارق الزمني
+                // بين لحظة اكتشاف الرابط ولحظة تجربته فعلياً هو المشتبه الأول،
+                // وهذا الفحص كان يضيف زمناً إضافياً بلا أي فائدة لهذه الحالة.
+                probe.validated = true;
+                _slog('SOURCE_VALIDATION_SKIPPED', 'url=${_safeLogUrl(probe.source)} reason=strong_evidence score=${probe.score}');
+                return;
+              }
+              // Best-effort validation. A negative validation is not fatal when
+              // the browser has already supplied strong evidence (for example a
+              // stream requiring Referer/Origin/cookies).
+              _slog('SOURCE_VALIDATING', 'url=${_safeLogUrl(probe.source)} evidence=${probe.evidence} score=${probe.score} headers=${probe.headers.keys.toList()}');
+              final validated = await _validatePublicMediaSource(
+                probe.source,
+                requestHeaders: probe.headers,
+              );
+              probe.validated = validated;
+              probe.registered?.validated = validated;
+              _smartLog(
+                'HLS',
+                'candidate ${validated ? 'validated' : 'rejected'}: ${_safeLogUrl(probe.source)}',
+              );
+              _slog('SOURCE_VALIDATED', 'url=${_safeLogUrl(probe.source)} validated=$validated');
+            }(),
+        ];
 
         // Phase 3: pick the first candidate (in original discovery-priority
         // order) that passed, exactly as the sequential version did — only
         // one native trial is ever started here, so the single-controller
         // playback architecture is untouched.
-        for (final probe in probes) {
+        for (var probeIndex = 0; probeIndex < probes.length; probeIndex++) {
+          final probe = probes[probeIndex];
+          await validationFutures[probeIndex];
+          if (!_webSessionIsActive(generation)) return;
           if (!probe.validated &&
               probe.evidence < 3 &&
               !probe.strongHls &&
@@ -5002,13 +5014,26 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     );
   }
 
-  // طلب صريح من المستخدم: سواد كامل بلا أي نص/أيقونة/زر — لا إشعار
-  // إطلاقاً. صفحة المصدر تبقى مخفية وممنوعة من اللمس (نفس منطق
-  // _shouldShowWebPage/IgnorePointer بالـbuild أعلاه)، فقط بلا أي مؤشر
-  // مرئي فوقها.
+  // طلب سابق: سواد كامل بلا نص. تعديل لاحق: نفس السواد، لكن مع نفس مؤشر
+  // التحميل الدائري (AppTheme.accent) المستخدَم بـ_buildLoading() — بدون
+  // نص أو زر — حتى يطمئن المستخدم أن التطبيق لسّه يجهّز الرابط ولم يتجمّد،
+  // بدل شاشة سوداء صامتة تماماً. صفحة المصدر تبقى مخفية وممنوعة من اللمس
+  // (نفس منطق _shouldShowWebPage/IgnorePointer بالـbuild أعلاه).
   Widget _buildHiddenWebSourceStatus() {
     return const Positioned.fill(
-      child: ColoredBox(color: Colors.black),
+      child: ColoredBox(
+        color: Colors.black,
+        child: Center(
+          child: SizedBox(
+            width: 34,
+            height: 34,
+            child: CircularProgressIndicator(
+              strokeWidth: 3.2,
+              color: AppTheme.accent,
+            ),
+          ),
+        ),
+      ),
     );
   }
 
