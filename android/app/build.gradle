@@ -62,7 +62,15 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            // signingConfigs.release أعلاه فارغ تماماً محلياً (بلا CI) — لا
+            // يملأ storeFile/storePassword/إلخ إلا Codemagic. بناء محلي
+            // (Android Studio/سطر أوامر على جهاز المطوّر) كان يفشل بالكامل
+            // بمرحلة التغليف الأخيرة بسبب هذا («SigningConfig "release" is
+            // missing required property "storeFile"» — مؤكَّد ببناء فعلي).
+            // نوقّع محلياً بمفتاح debug المؤقت بدلاً من ذلك — يكفي تماماً
+            // للتثبيت والتجربة المباشرة على الهاتف؛ بناء Codemagic الحقيقي
+            // (CI=true) يبقى موقّعاً بالمفتاح الحقيقي تماماً كما كان.
+            signingConfig System.getenv()["CI"] ? signingConfigs.release : signingConfigs.debug
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')
