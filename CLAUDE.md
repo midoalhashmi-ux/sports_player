@@ -74,10 +74,26 @@ git pull
 | `does not have a primitive operator '=='` بملف `google_fonts_variant.dart` | إصدار 6.3.0 فيه خطأ Dart compile حقيقي بكودها | `pubspec.yaml`: `google_fonts: ^8.2.1` |
 | `SigningConfig "release" is missing required property "storeFile"` عند `:app:packageRelease` | `signingConfigs.release` بـ`build.gradle` يُملأ فقط لما `CI=true` (Codemagic فقط) | `signingConfig System.getenv()["CI"] ? signingConfigs.release : signingConfigs.debug` — بناء محلي يوقَّع بمفتاح debug (كافٍ للتجربة، لا يصلح لرفعه على Play Console) |
 | `Conflicting configuration ... in ndk abiFilters ... cannot be present when splits abi filters are set` | `ndk.abiFilters` اليدوي بـ`build.gradle` يتعارض مع `--split-per-abi` | أُزيل `ndk.abiFilters`، استُبدل بـ`--target-platform android-arm,android-arm64` على سطر الأوامر (و`codemagic.yaml`) |
+| MIUI/HyperOS: "لا يتوافق هذا التطبيق مع أحدث إصدار من أندرويد" عند التثبيت — استمرت حتى بعد حذف التطبيق بالكامل وإعادة التثبيت | مفتاح debug العشوائي (يختلف بين كل تثبيت Flutter) — ليس تعارض توقيع مع نسخة قديمة كما افتُرض أولاً | كيستور محلي حقيقي ثابت اختياري (`android/key.properties`، راجع القسم أدناه) بدل الاعتماد على debug |
 
 كل هذي الإصلاحات مدفوعة فعلياً لفرع `claude/greeting-a1f5q5` — تأكد أن
 `git log --oneline -1` يطابق أو يتقدّم على `e48cdb7` قبل ما تشخّص أي خطأ
 من هذي القائمة من جديد.
+
+## كيستور محلي حقيقي (يحل تحذير MIUI "غير متوافق" نهائياً)
+
+لمرة واحدة فقط، من مجلد `android/`:
+```powershell
+cd C:\Users\DELL\Downloads\sports_player\android
+keytool -genkeypair -v -keystore local-release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias localrelease -storepass "اختر-كلمة-مرور" -keypass "نفس-كلمة-المرور" -dname "CN=Local Dev, OU=Dev, O=BinSheikh, L=City, S=State, C=SA"
+copy key.properties.example key.properties
+notepad key.properties
+```
+بـ`key.properties` غيّر `CHANGE_ME` بنفس كلمة المرور المستخدَمة بأمر
+`keytool` أعلاه (بكلا الحقلين `storePassword`/`keyPassword`)، واحفظ.
+بعدها أي `flutter build apk --release` محلي يوقَّع تلقائياً بهذا الكيستور
+الثابت بدل debug العشوائي — لا حاجة لتكرار هذا مرة أخرى، الملف يبقى على
+الجهاز (لا يُرفع لـ GitHub عمداً، `.gitignore`).
 
 ## ⚠️ التطبيق منشور فعلياً على Google Play Console
 
