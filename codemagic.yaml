@@ -19,3 +19,21 @@ workflows:
         script: flutter build apk --release --split-per-abi --target-platform android-arm,android-arm64
     artifacts:
       - build/**/outputs/**/*.apk
+
+  release-bundle:
+    name: BinSheikh player - Play Console (AAB)
+    max_build_duration: 90
+    environment:
+      flutter: 3.27.0
+      android_signing:
+        - sports_player_release
+    scripts:
+      - name: جلب الحزم
+        script: flutter pub get
+      - name: بناء App Bundle (الصيغة المطلوبة لرفع تحديث على Play Console)
+        # Google Play يرفض ملفات APK لأي رفع جديد على تطبيق منشور أصلاً —
+        # يتطلب .aab حصراً. هذا الـworkflow منفصل عمداً عن android-workflow
+        # (APK) أعلاه المخصَّص فقط للتجربة المباشرة على الهاتف.
+        script: flutter build appbundle --release
+    artifacts:
+      - build/**/outputs/**/*.aab
