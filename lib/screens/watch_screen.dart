@@ -19,7 +19,6 @@ import '../services/ad_service.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
-import '../services/hls_cache_proxy.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_visibility_service.dart';
 import '../services/session_log_service.dart';
@@ -138,7 +137,6 @@ class WatchScreen extends StatefulWidget {
 
 class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   VideoPlayerController? _controller;
-  final HlsCacheProxy _hlsCacheProxy = HlsCacheProxy();
   WebViewController? _webController;
   bool _isWebSource = false;
   final GlobalKey _videoBoundaryKey = GlobalKey();
@@ -917,13 +915,14 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   bool _webVerificationCheckInFlight = false;
   // Kept backward-compatible with existing Firestore documents: absence of
   // settings/player.showSourcePage means visible.
-  // _showSourcePage يبقى يُستخدَم داخلياً فقط الآن (حيلة التركيز التلقائي،
-  // كتم الصوت أثناء التحضير الصامت، وقوة الدليل المطلوبة لإثبات التشغيل —
-  // راجع كل مواضع استخدامه أدناه) — لم يعد يتحكم بعرض الصفحة نفسها للمستخدم
-  // إطلاقاً؛ شاشة "تم تشغيل المصدر في الخلفية" حُذفت بطلب صريح، الصفحة
-  // تُعرض دائماً بمجرد الجاهزية بدل أي حاجز بديل.
   bool _showSourcePage = true;
   bool _webPageRevealedByUser = false;
+  // شاشة "تم تشغيل المصدر في الخلفية" غالباً مرحلة عابرة (بضع ثوانٍ) قبل
+  // ما يتحول التشغيل للمشغل الأصلي — إظهارها فوراً يسبب وميضاً مزعجاً.
+  // نؤجّل ظهورها بمهلة قصيرة؛ لو انتهت الحالة العابرة قبل انقضائها (الحالة
+  // الشائعة) لا تظهر إطلاقاً، وتبقى مؤشر التحميل العادي كافياً.
+  bool _hiddenSourceGraceElapsed = false;
+  Timer? _hiddenSourceGraceTimer;
   // رسالة الانتظار تتغيّر مع الوقت لتطمئن المستخدم إن المشغل ما زال
   // شغّالاً (لا يبدو متجمّداً) بدل نص ثابت واحد قد يدفعه يرجع للخلف
   // ظناً منه إن التشغيل تعطّل.
@@ -2671,15 +2670,32 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     } catch (_) {}
   }
 
-  // يبقى يتحكم بحيل الثقة الداخلية فقط (تركيز/كتم صوت تلقائي، قوة الدليل
-  // المطلوبة — راجع كل مواضع استخدامه) — الصفحة نفسها تُعرض للمستخدم
-  // دائماً بمجرد الجاهزية (راجع build()) بغض النظر عن قيمته.
   bool get _shouldShowWebPage =>
       _showSourcePage ||
       _webPageRevealedByUser ||
       _webSessionState == _WebSessionState.humanVerificationRequired;
 
-  bool get _isLoadingContent => _state == _LoadState.loading;
+  bool get _isHiddenWebSourceActive =>
+      _isWebSource && !_shouldShowWebPage && _state == _LoadState.ready;
+
+  /// يبدأ (مرة واحدة) مؤقّت المهلة القصيرة قبل إظهار شاشة "تم تشغيل
+  /// المصدر بالخلفية"، ويلغيه لو خرجنا من هذه الحالة قبل انقضائه (تحوّل
+  /// التشغيل بسرعة للمشغل الأصلي، الحالة الشائعة — فلا تظهر الشاشة إطلاقاً).
+  void _syncHiddenSourceGraceTimer() {
+    if (_isHiddenWebSourceActive) {
+      _hiddenSourceGraceTimer ??= Timer(const Duration(seconds: 2), () {
+        if (mounted) setState(() => _hiddenSourceGraceElapsed = true);
+      });
+    } else if (_hiddenSourceGraceTimer != null) {
+      _hiddenSourceGraceTimer!.cancel();
+      _hiddenSourceGraceTimer = null;
+      _hiddenSourceGraceElapsed = false;
+    }
+  }
+
+  bool get _isLoadingContent =>
+      _state == _LoadState.loading ||
+      (_isHiddenWebSourceActive && !_hiddenSourceGraceElapsed);
 
   /// يشغّل مؤقّتاً دوريّاً أثناء التحميل فقط، حتى تتغيّر رسالة الانتظار
   /// تلقائياً مع مرور الوقت (راجع _loadingMessageFor).
@@ -2706,6 +2722,23 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       return 'يرجى الانتظار قليلاً حتى يتم تجهيز المحتوى…';
     }
     return 'جاري تشغيل المحتوى…';
+  }
+
+  Future<void> _revealWebPageForInteraction() async {
+    final controller = _webController;
+    if (controller == null || !mounted) return;
+    try {
+      await controller.runJavaScript(r'''(() => {
+        try {
+          document.querySelectorAll('[data-sports-player-focus-hidden="1"]').forEach((el) => {
+            el.style.removeProperty('visibility');
+            el.removeAttribute('data-sports-player-focus-hidden');
+          });
+        } catch (_) {}
+      })();''');
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _webPageRevealedByUser = true);
   }
 
   Future<void> _showWebPlaybackReady(WebViewController controller) async {
@@ -3539,7 +3572,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
-      await _hlsCacheProxy.stop();
 
       // Explicit formatHint so ExoPlayer picks its DASH/HLS extractor
       // directly instead of guessing from the URL — needed for DASH sources
@@ -3554,30 +3586,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                   ? VideoFormat.hls
                   : null);
 
-      // وكيل تخزين مؤقت محلي (127.0.0.1) لمصادر HLS فقط: يجلب الشرائح
-      // القادمة مسبقاً ويعيد محاولة الفاشلة منها بتأخير قصير قبل أن
-      // يطلبها ExoPlayer أصلاً — package video_player لا يعرض أي طريقة
-      // عامة لضبط تخزينه المؤقت الأمامي، فهذا يعوّض ذلك من دون تعديل
-      // الحزمة نفسها. أي فشل بتشغيله يرجع للرابط الأصلي دون أي أثر
-      // (راجع services/hls_cache_proxy.dart).
-      final effectiveHeaders = playbackHeaders ?? _effectiveStreamHeaders();
-      var playbackUri = Uri.parse(quality.url);
-      var controllerHeaders = effectiveHeaders;
-      if (formatHint == VideoFormat.hls) {
-        final proxied = await _hlsCacheProxy.start(
-          sourceUrl: quality.url,
-          headers: effectiveHeaders,
-        );
-        if (proxied != null) {
-          playbackUri = proxied;
-          controllerHeaders = const {};
-        }
-      }
-
       final newController = VideoPlayerController.networkUrl(
-        playbackUri,
+        Uri.parse(quality.url),
         formatHint: formatHint,
-        httpHeaders: controllerHeaders,
+        httpHeaders: playbackHeaders ?? _effectiveStreamHeaders(),
       );
       _controller = newController;
       _position = resumeFrom ?? Duration.zero;
@@ -3628,7 +3640,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         try {
           await failedController?.dispose();
         } catch (_) {}
-        unawaited(_hlsCacheProxy.stop());
         await _muteWebForNativeTrial(false);
         final failedUrl = _normalizeCandidate(quality.url);
         _webFailedNativeSources.add(failedUrl);
@@ -3754,7 +3765,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         return;
       }
       _slog('PLAY_SERVER_QUALITY_FAILED', 'url=${_safeLogUrl(quality.url)} error=${_describePlaybackError(error)} rawError=$error');
-      unawaited(_hlsCacheProxy.stop());
       setState(() {
         _state = _LoadState.error;
         _errorMessage = _describePlaybackError(error);
@@ -4251,6 +4261,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     if (identical(_activeInstance, this)) _activeInstance = null;
     WidgetsBinding.instance.removeObserver(this);
     _hideTimer?.cancel();
+    _hiddenSourceGraceTimer?.cancel();
     _loadingTickerTimer?.cancel();
     _seekFeedbackTimer?.cancel();
     _centerToastTimer?.cancel();
@@ -4262,7 +4273,6 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();
-    unawaited(_hlsCacheProxy.stop());
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setPreferredOrientations(DeviceOrientation.values);
     super.dispose();
@@ -4392,6 +4402,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // ---------------------- build ----------------------
   @override
   Widget build(BuildContext context) {
+    _syncHiddenSourceGraceTimer();
     _syncLoadingTicker();
     final content = GestureDetector(
       // Let platform WebView gestures go directly to the page/player.
@@ -4408,21 +4419,25 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             fit: StackFit.expand,
             children: [
               if (_isWebSource && _webController != null)
-                // تُعرض دائماً بمجرد الجاهزية — شاشة "تم تشغيل المصدر
-                // بالخلفية" حُذفت بطلب صريح (كانت تظهر بدلاً من الصفحة
-                // لما يكون settings/player.showSourcePage مطفأً). _showSourcePage
-                // يبقى يتحكم بحيل الثقة الداخلية فقط (راجع تعليقاته أعلاه).
-                IgnorePointer(
-                  // نمنع لمسات المستخدم أثناء الاكتشاف الصامت بالخلفية
-                  // (المصدر لم "يجهز" بعد) — أي نقرة عشوائية هناك قد
-                  // تضغط إعلاناً أو تنقّل الصفحة وتكسر منطق الاكتشاف.
-                  // نسمح باللمس فقط لو: المصدر جاهز فعلاً، أو مطلوب
-                  // تحقق بشري (captcha) يحتاج تفاعل المستخدم.
-                  ignoring: _state != _LoadState.ready &&
-                      _webSessionState !=
-                          _WebSessionState.humanVerificationRequired,
-                  child: WebViewWidget(controller: _webController!),
+                Opacity(
+                  opacity: _shouldShowWebPage ? 1 : 0,
+                  child: IgnorePointer(
+                    // نمنع لمسات المستخدم أثناء الاكتشاف الصامت بالخلفية
+                    // (المصدر لم "يجهز" بعد) — أي نقرة عشوائية هناك قد
+                    // تضغط إعلاناً أو تنقّل الصفحة وتكسر منطق الاكتشاف.
+                    // نسمح باللمس فقط لو: المصدر جاهز فعلاً، أو مطلوب
+                    // تحقق بشري (captcha) يحتاج تفاعل المستخدم، أو المستخدم
+                    // كشف الصفحة يدوياً بنفسه (زر "إظهار صفحة المصدر").
+                    ignoring: !_shouldShowWebPage ||
+                        (_state != _LoadState.ready &&
+                            _webSessionState !=
+                                _WebSessionState.humanVerificationRequired &&
+                            !_webPageRevealedByUser),
+                    child: WebViewWidget(controller: _webController!),
+                  ),
                 ),
+              if (_isHiddenWebSourceActive && _hiddenSourceGraceElapsed)
+                _buildHiddenWebSourceStatus(),
               if (_state == _LoadState.ready && !_isWebSource)
                 Center(
                   child: Transform.scale(scale: _zoomScale, child: _buildVideo()),
@@ -4667,6 +4682,35 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildHiddenWebSourceStatus() {
+    return Positioned.fill(
+      child: Container(
+        color: Colors.black,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.play_circle_outline,
+                color: Colors.white70, size: 52),
+            const SizedBox(height: 14),
+            const Text(
+              'صفحة المصدر مخفية حسب إعدادات المشغل. يمكنك إظهارها عند الحاجة للتفاعل مع المشغل.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, height: 1.4),
+            ),
+            const SizedBox(height: 18),
+            OutlinedButton.icon(
+              onPressed: _revealWebPageForInteraction,
+              icon: const Icon(Icons.visibility),
+              label: const Text('إظهار صفحة المصدر'),
+            ),
+          ],
+        ),
       ),
     );
   }
