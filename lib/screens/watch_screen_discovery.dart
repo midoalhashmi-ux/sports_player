@@ -33,25 +33,25 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   set _state(_LoadState value);
   bool get _isWebSource;
   set _isWebSource(bool value);
-  String get _errorMessage;
+  // _errorMessage: تُكتب هنا فقط، ما تُقرأ (تُعرض لاحقاً بواجهة الشاشة
+  // بـwatch_screen.dart) — setter فقط، بدون getter غير مستخدَم هنا.
   set _errorMessage(String value);
+  // _session: تُقرأ هنا فقط، ما تُكتب — getter فقط.
   StreamSession? get _session;
-  set _session(StreamSession? value);
   StreamServerOption? get _activeServer;
   set _activeServer(StreamServerOption? value);
-  StreamQuality? get _activeQuality;
+  // _activeQuality: تُكتب هنا فقط، ما تُقرأ — setter فقط.
   set _activeQuality(StreamQuality? value);
   WebViewController? get _webController;
   set _webController(WebViewController? value);
   Map<String, String>? get _headers;
+  // _resolvedStreamHeaders: تُقرأ هنا فقط، ما تُكتب — getter فقط.
   Map<String, String>? get _resolvedStreamHeaders;
-  set _resolvedStreamHeaders(Map<String, String>? value);
   String get _autoDiscoveredServerLabel;
 
   Map<String, String> _effectiveStreamHeaders();
   String _resolveRelativeUrl(String url, String baseUrl);
   Future<void> _muteWebForNativeTrial(bool mute);
-  Future<void> _startSession();
   Future<void> _playServerQuality(
     StreamServerOption server,
     StreamQuality quality, {
@@ -68,7 +68,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   int _webSessionGeneration = 0;
   bool _webDetectionInFlight = false;
   int _webNativeAttempts = 0;
-  static const int _webMaxNativeAttempts = 2;
+  // كانت static const — تحوّلت لـgetter عادي (نفس القيمة) لأن static
+  // members لا يصل لها كود يبقى بـwatch_screen.dart إلا بتأهيل صريح
+  // (_StreamDiscoveryMixin.xxx)، بخلاف الأعضاء العادية اللي يدمجها الـmixin
+  // تلقائياً. راجع flutter analyze: unqualified_reference_to_non_local_static_member.
+  int get _webMaxNativeAttempts => 2;
   DateTime? _webLastNativeTrialAt;
   final Set<String> _webSeenSources = <String>{};
   final Set<String> _webFailedNativeSources = <String>{};
@@ -85,7 +89,8 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   Map<String, String>? _webContextHeaders;
   bool _webDrmDetected = false;
   int _webInteractionAttempts = 0;
-  static const int _webMaxInteractionAttempts = 3;
+  // نفس سبب تحويل _webMaxNativeAttempts أعلاه.
+  int get _webMaxInteractionAttempts => 3;
   DateTime? _webLastInteractionAt;
   DateTime? _webLastPrimeAt;
   Timer? _webStartupTimeoutTimer;

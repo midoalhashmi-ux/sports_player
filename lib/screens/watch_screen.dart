@@ -220,16 +220,25 @@ class _WatchScreenState extends State<WatchScreen>
 
   VideoPlayerController? _controller;
   late final HlsCacheProxy _hlsCacheProxy;
+  @override
   WebViewController? _webController;
+  @override
   bool _isWebSource = false;
   final GlobalKey _videoBoundaryKey = GlobalKey();
 
+  @override
   _LoadState _state = _LoadState.loading;
+  @override
   String _errorMessage = '';
+  @override
   StreamSession? _session;
+  @override
   StreamServerOption? _activeServer;
+  @override
   StreamQuality? _activeQuality;
+  @override
   Map<String, String>? _headers;
+  @override
   Map<String, String>? _resolvedStreamHeaders;
 
   bool _controlsVisible = true;
@@ -917,6 +926,7 @@ class _WatchScreenState extends State<WatchScreen>
   }
 
   /// تحويل الرابط النسبي إلى مطلق.
+  @override
   String _resolveRelativeUrl(String url, String baseUrl) {
     final uri = Uri.tryParse(url);
     if (uri == null) return url;
@@ -944,6 +954,7 @@ class _WatchScreenState extends State<WatchScreen>
     }
   }
 
+  @override
   Map<String, String> _effectiveStreamHeaders() {
     return {
       ..._headers ?? {},
@@ -1051,6 +1062,7 @@ class _WatchScreenState extends State<WatchScreen>
     }
   }
 
+  @override
   Future<void> _muteWebForNativeTrial(bool mute) async {
     final web = _webController;
     if (web == null) return;
@@ -1073,6 +1085,7 @@ class _WatchScreenState extends State<WatchScreen>
     } catch (_) {}
   }
 
+  @override
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality,
       {
