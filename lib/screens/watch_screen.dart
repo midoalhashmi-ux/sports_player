@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:image_gallery_saver_plus/image_gallery_saver_plus.dart';
 
 import '../services/ad_service.dart';
+import '../services/candidate_scoring.dart';
 import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
@@ -668,11 +669,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         lower.contains('<video') || lower.contains('<iframe');
   }
 
-  bool _containsMediaMarker(String text) {
-    final lower = text.toLowerCase();
-    return lower.contains('#extm3u') || lower.contains('.m3u8') || lower.contains('.m3u') ||
-        lower.contains('.mpd') || lower.contains('<video');
-  }
+  bool _containsMediaMarker(String text) => CandidateScoring.containsMediaMarker(text);
 
   String? _extractBestUrl(String text, String baseUrl) {
     dynamic parsed;
@@ -776,27 +773,12 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   }
 
   /// التحقق من أن الرابط قابل للتشغيل مباشرة.
-  bool _isDirectPlayable(String url) {
-    final lower = url.toLowerCase();
-    return lower.contains('.m3u8') || lower.contains('.m3u') || lower.contains('.mpd') ||
-        lower.contains('.mp4') || lower.contains('.webm') ||
-        lower.contains('.m4v') || lower.contains('.mov');
-  }
+  bool _isDirectPlayable(String url) => CandidateScoring.isDirectPlayable(url);
 
   /// محاولة تحليل JSON مع تجاهل الأخطاء.
-  dynamic _tryParseJson(String text) {
-    try {
-      return jsonDecode(text);
-    } catch (_) {
-      return null;
-    }
-  }
+  dynamic _tryParseJson(String text) => CandidateScoring.tryParseJson(text);
 
-  bool _looksLikeJson(String text) {
-    final trimmed = text.trim();
-    return (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
-        (trimmed.startsWith('[') && trimmed.endsWith(']'));
-  }
+  bool _looksLikeJson(String text) => CandidateScoring.looksLikeJson(text);
 
   // ---------------------- web source (بقيت كما هي) ----------------------
   String? _webSourceOrigin;
@@ -944,11 +926,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       // وأحياناً يعيد محاولة تشغيل أصلي ثانية فيهدم النسخة الشغّالة فعلياً.
       _webSessionState != _WebSessionState.nativePlaying;
 
-  String _normalizeCandidate(String url) {
-    final uri = Uri.tryParse(url.trim());
-    if (uri == null) return url.trim();
-    return uri.replace(fragment: '').toString();
-  }
+  String _normalizeCandidate(String url) => CandidateScoring.normalizeCandidate(url);
 
   bool _canTrialNative(String source) {
     if (_webDrmDetected) return false;
@@ -1799,27 +1777,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     }
   }
 
-  int _scoreDetectedSource(String url) {
-    final lower = url.toLowerCase();
-    var score = 0;
-    if (_looksLikeHls(url)) score += 100;
-    else if (lower.contains('.mpd')) score += 85;
-    else if (lower.contains('.mp4') || lower.contains('.m4v') || lower.contains('.webm') || lower.contains('.mov')) score += 55;
-    if (lower.contains('live')) score += 35;
-    if (lower.contains('stream')) score += 25;
-    if (lower.contains('channel')) score += 20;
-    if (lower.contains('master')) score += 15;
-    if (lower.contains('playlist')) score += 10;
-    if (lower.contains('segment') || lower.contains('.ts')) score -= 100;
-    if (lower.contains('ads') || lower.contains('advert') || lower.contains('vast') || lower.contains('doubleclick')) score -= 100;
-    return score;
-  }
+  int _scoreDetectedSource(String url) => CandidateScoring.scoreDetectedSource(url);
 
-  bool _looksLikeHls(String url) => RegExp(
-        r'(?:\.m3u8?(?:$|[?#])|/(?:hls|m3)/|(?:master|playlist|manifest)(?:[./?#&]|$))',
-        caseSensitive: false,
-      ).hasMatch(url);
-  bool _looksLikeProgressiveVideo(String url) => RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])', caseSensitive: false).hasMatch(url);
+  bool _looksLikeHls(String url) => CandidateScoring.looksLikeHls(url);
+  bool _looksLikeProgressiveVideo(String url) => CandidateScoring.looksLikeProgressiveVideo(url);
 
   /// يطلب من WebView نفسه (بجلسته وكوكيزه الحقيقية) يجيب محتوى رابط نصياً
   /// عبر fetch()، ويرجعه لنا هنا. ضروري لأن evaluateJavascript لا ينتظر
@@ -1949,21 +1910,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   // فحص إعدادات المشغلات (JWPlayer/Video.js تحتوي غالباً حقل "image" بجانب
   // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
-  bool _isNonMediaAsset(String url) {
-    if (RegExp(
-      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
-      caseSensitive: false,
-    ).hasMatch(url)) {
-      return true;
-    }
-    // رابط بلا مسار حقيقي (نطاق مجرّد، أو "/" فقط) لا يمكن أبداً يكون رابط
-    // بث فعلي — شوهد فعلياً مرشحاً كاذباً بسجل تشخيص (مثل
-    // "https://example.com//") تسرّب من فحص عام وتسبب بمحاولة تشغيل أصلي
-    // فاشلة مضمونة بدل استبعاده من البداية.
-    final uri = Uri.tryParse(url);
-    if (uri != null && (uri.path.isEmpty || uri.path == '/')) return true;
-    return false;
-  }
+  bool _isNonMediaAsset(String url) => CandidateScoring.isNonMediaAsset(url);
 
   Future<Map<String, String>> _headersForCandidate(
       String source, _WebNetworkCandidate? candidate) async {
