@@ -104,6 +104,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   Timer? _webPromotionFallbackTimer;
   bool _webIframePromotionInFlight = false;
   bool _webPromotedPlayerMode = false;
+  // يصير true أول ما نشوف دليل تشغيل حقيقي (web_playback: playing=true)
+  // ويبقى true لبقية الجلسة — يمنع حارس التنقّل من السماح بأي تحويل
+  // لدومين مختلف بعد بدء التشغيل الفعلي، حتى بوضع "مشغّل مُرقّى" اللي
+  // يسمح عادة بتحويلات عابرة للنطاق كمصدر/CDN شرعي. فيديو يشتغل فعلاً ما
+  // له سبب شرعي يستبدل الصفحة كاملة — رُصد فعلياً بسجل تشخيص حقيقي: سلسلة
+  // إعلانات "تثبيت VPN" وهمية خطفت الإطار الرئيسي ~7 ثوانٍ منتصف تشغيل ناجح.
+  bool _webRealPlaybackConfirmed = false;
   // Vidmoly is a real embedded HLS.js player surface. Keep it visible so a
   // user tap can reach the player when Android blocks autoplay.
   bool _webVidmolyPlayerMode = false;
@@ -462,6 +469,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       final ready = decoded['ready'] == true;
       final currentTime = (decoded['time'] as num?)?.toDouble() ?? 0;
       if (playing || (ready && currentTime > 0.15)) {
+        if (playing) _webRealPlaybackConfirmed = true;
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
         _extendWebStartupDeadline(const Duration(seconds: 8));
@@ -2653,6 +2661,14 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
+        // يضبط هوية محرّك WebView نفسه (مو بس هيدر الطلب الأول) — بعض
+        // المواقع خلف حماية WAF تميّز/تحظر WebView المدمج بنظام أندرويد عن
+        // متصفح حقيقي حتى مع نفس نص الـ User-Agent بالهيدر، لأن هوية
+        // المحرّك الفعلية تُستخدم لأي طلب فرعي (جافاسكريبت، XHR، تنقّل...)
+        // بغض النظر عن هيدرز أول تحميل. راجع مناقشة net::ERR_CONNECTION_RESET
+        // بسجل تشخيص حقيقي لموقع رفض WebView تحديداً بينما فتح عادي بمتصفح حقيقي.
+        ..setUserAgent(widget.externalUserAgent ??
+            'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.119 Mobile Safari/537.36')
         ..addJavaScriptChannel(
           'SportsPlayerSource',
           onMessageReceived: (message) {
