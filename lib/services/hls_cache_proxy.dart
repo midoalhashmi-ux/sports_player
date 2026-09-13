@@ -244,14 +244,15 @@ class HlsCacheProxy {
         _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=0 error=$e (local file)');
       }
     } else {
-      final client = _client;
-      if (client == null) {
-        request.response.statusCode = HttpStatus.serviceUnavailable;
-        await request.response.close();
-        return;
-      }
+      // نفس إصلاح `_fetchSegmentWithRetry`: نتحقق من الجيل ونُعيد قراءة
+      // `_client` طازجاً بكل محاولة بدل التقاطه مرة واحدة — نفس فئة الخلل
+      // (تبديل المرشّح بين محاولتي إعادة الجلب يُغلق الـclient من تحتها).
+      final generation = _proxyGeneration;
       for (var attempt = 0; attempt < 2 && body == null; attempt++) {
         if (attempt > 0) await Future.delayed(const Duration(milliseconds: 300));
+        if (generation != _proxyGeneration) break;
+        final client = _client;
+        if (client == null) break;
         try {
           final resp = await client
               .get(baseUri, headers: _upstreamHeaders)
@@ -488,12 +489,26 @@ class HlsCacheProxy {
   }
 
   Future<List<int>?> _fetchSegmentWithRetry(String url) async {
-    final client = _client;
-    if (client == null) return null;
+    // ملتقَط الجيل *وليس* الـclient نفسه: قبل الإصلاح كان `client` يُلتقَط
+    // مرة واحدة بأول السطر ويُعاد استخدامه بكل محاولات إعادة الجلب الثلاث
+    // — لو `stop()` استُدعيت بينهما (تبديل المرشّح لرابط بث آخر أثناء نفس
+    // الجلسة، يحصل فعلياً بكل تشغيل تقريباً) كانت المحاولات المتبقية تفشل
+    // حتماً بخطأ "Client is already closed" رغم إنه لا علاقة له بالشبكة
+    // إطلاقاً — سجل تشخيص فعلي أظهر هذا النمط بالضبط 3 مرات متتالية (محاولة
+    // 0 فشل اتصال حقيقي، محاولتا 1 و2 "already closed") مع كل بورت وكيل
+    // جديد، فيضيع أي فرصة نجاح فعلية للشريحة ويُعلَّق المشغّل بلا نهاية.
+    // الحل: نتحقق من الجيل ونُعيد قراءة `_client` طازجاً *قبل كل محاولة*،
+    // ونتوقف فوراً لو تغيّر الجيل بدل تضييع وقت بمحاولات فاشلة حتماً — هذا
+    // فعلياً يُسرّع تحرّر فتحات الجلب المتوازي (`_maxConcurrentPrefetch`)
+    // لصالح الجلسة الجديدة بدل حجزها بمحاولات ميتة.
+    final generation = _proxyGeneration;
     for (var attempt = 0; attempt < 3; attempt++) {
       if (attempt > 0) {
         await Future.delayed(Duration(milliseconds: 200 * attempt * attempt));
       }
+      if (generation != _proxyGeneration) return null;
+      final client = _client;
+      if (client == null) return null;
       try {
         final resp = await client
             .get(Uri.parse(url), headers: _upstreamHeaders)
