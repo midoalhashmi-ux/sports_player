@@ -209,28 +209,48 @@ class HlsCacheProxy {
   }
 
   Future<void> _handlePlaylist(HttpRequest request, String originalUrl) async {
-    final client = _client;
-    if (client == null) {
-      request.response.statusCode = HttpStatus.serviceUnavailable;
-      await request.response.close();
-      return;
-    }
     final baseUri = Uri.parse(originalUrl);
     String? body;
-    for (var attempt = 0; attempt < 2 && body == null; attempt++) {
-      if (attempt > 0) await Future.delayed(const Duration(milliseconds: 300));
+
+    // منقذ WebView (_relayManifestViaWebView بـwatch_screen.dart) أحياناً
+    // يكتب القائمة الرئيسية محلياً كملف (file://) بدل جلبها مباشرة —
+    // http.Client لا يدعم file:// إطلاقاً (خطأ "No host specified in URI"
+    // مؤكَّد بسجل تشخيص فعلي سابق). قبل هذا الإصلاح كنا نتخطّى الوكيل
+    // بالكامل لهذي الحالة، فيفقد الفيديو أي تخزين مؤقت/إعادة محاولة
+    // للشرائح البعيدة اللي القائمة نفسها تشير لها — سجل تشخيص فعلي لاحق
+    // أظهر تقطيعاً شديداً بالضبط بهذا المسار (لا مؤشر HLS_PROXY_* إطلاقاً
+    // أثناء التشغيل، يعني ExoPlayer يجلب كل شريحة مباشرة بلا أي حماية).
+    // الحل: نقرأ الملف المحلي مباشرة بدل جلبه عبر HTTP — بقية الوكيل
+    // (تخزين/جلب مسبق/إعادة محاولة للشرائح البعيدة الفعلية داخل القائمة)
+    // يشتغل بعدها بالضبط كأي مصدر HTTP عادي.
+    if (baseUri.scheme == 'file') {
       try {
-        final resp = await client
-            .get(baseUri, headers: _upstreamHeaders)
-            .timeout(const Duration(seconds: 12));
-        if (resp.statusCode >= 200 && resp.statusCode < 300) {
-          body = resp.body;
-        } else {
-          _log('HLS_PROXY_PLAYLIST_HTTP_ERROR',
-              'attempt=$attempt status=${resp.statusCode}');
-        }
+        body = await File(baseUri.toFilePath()).readAsString();
       } catch (e) {
-        _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=$attempt error=$e');
+        _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=0 error=$e (local file)');
+      }
+    } else {
+      final client = _client;
+      if (client == null) {
+        request.response.statusCode = HttpStatus.serviceUnavailable;
+        await request.response.close();
+        return;
+      }
+      for (var attempt = 0; attempt < 2 && body == null; attempt++) {
+        if (attempt > 0) await Future.delayed(const Duration(milliseconds: 300));
+        try {
+          final resp = await client
+              .get(baseUri, headers: _upstreamHeaders)
+              .timeout(const Duration(seconds: 12));
+          if (resp.statusCode >= 200 && resp.statusCode < 300) {
+            body = resp.body;
+          } else {
+            _log('HLS_PROXY_PLAYLIST_HTTP_ERROR',
+                'attempt=$attempt status=${resp.statusCode}');
+          }
+        } catch (e) {
+          _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=$attempt error=$e');
+        }
       }
     }
     if (body == null) {

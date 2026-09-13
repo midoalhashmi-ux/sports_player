@@ -1170,12 +1170,15 @@ class _WatchScreenState extends State<WatchScreen>
       var playbackUri = Uri.parse(quality.url);
       var controllerHeaders = effectiveHeaders;
       // ملف محلي (file://) ناتج من إنقاذ WebView (_relayManifestViaWebView)
-      // مسبَق الكتابة بالكامل وروابط سيجمنته مطلقة أصلاً — تمرير رابط
-      // file:// لـ_hlsCacheProxy.start() مؤكَّد فشله دائماً (سجل تشخيص
-      // فعلي: "Invalid argument(s): No host specified in URI file://..."
-      // لأن http.Client لا يدعم جلب file:// أساساً) فيهدر جولة كاملة قبل
-      // الرجوع للرابط المباشر — نتخطّى الوكيل من الأساس لهذي الحالة.
-      if (formatHint == VideoFormat.hls && playbackUri.scheme != 'file') {
+      // يُمرَّر للوكيل بالضبط كأي مصدر HLS آخر — HlsCacheProxy يقرأ القائمة
+      // من القرص مباشرة لهذا المسار (بدل http.Client اللي لا يدعم file://
+      // أساساً، راجع hls_cache_proxy.dart) فيستفيد من نفس حماية التخزين/
+      // إعادة المحاولة للشرائح البعيدة اللي القائمة تشير إليها. **كان هذا
+      // مُتخطّى بالكامل بمحاولة سابقة** (اعتقاداً إن file:// مؤكَّد الفشل
+      // دائماً) — لكن سجل تشخيص فعلي لاحق أظهر تقطيعاً شديداً بالضبط
+      // بهذا المسار تحديداً (بلا أي حماية HLS_PROXY_* إطلاقاً أثناء
+      // التشغيل)، فتأكَّد إن تخطّيه كان الخطأ الفعلي، لا الحل.
+      if (formatHint == VideoFormat.hls) {
         final proxied = await _hlsCacheProxy.start(
           sourceUrl: quality.url,
           headers: effectiveHeaders,
