@@ -42,6 +42,22 @@ class HlsCacheProxy {
   final List<String> _segmentSequence = <String>[];
   final Set<String> _prefetching = <String>{};
 
+  /// طابور الجلب المسبق + عدد الاتصالات الفعلية بالخلفية حالياً — الجذر
+  /// الحقيقي لمشكلة تقطيع مؤكَّدة بسجل تشخيص فعلي بعد رفع `_prefetchAheadVod`
+  /// لـ12: كل شرائح الهامش كانت تُطلَق دفعة واحدة كـ12 اتصال HTTP متزامن
+  /// لنفس خادم CDN (`unawaited` بلا أي حد) — سجلات فعلية أظهرت عشرات
+  /// "Connection closed while receiving data"/502/"Connection attempt
+  /// cancelled" لعدة شرائح مختلفة **بفارق أقل من 5 ميلي ثانية بينها**، وهو
+  /// نمط كلاسيكي لخادم يحمي نفسه من عدد اتصالات متزامنة كبير من نفس
+  /// العميل (شائع جداً بمواقع البث المقرصنة) — لا علاقة له بجودة الشبكة.
+  /// الحل: نفس مقدار التخزين المسبق (12 شريحة "بالطابور") لكنه يُنفَّذ
+  /// بحد أقصى `_maxConcurrentPrefetch` اتصالات فعلية بنفس اللحظة فقط،
+  /// والباقي ينتظر دوره — يقلّل ضغط الاتصالات المتزامنة جذرياً بدون
+  /// التضحية بحجم التخزين المسبق نفسه.
+  final List<String> _prefetchQueue = <String>[];
+  int _activePrefetches = 0;
+  static const int _maxConcurrentPrefetch = 3;
+
   /// المصدر معلوماته الحقيقية تُكتشَف فقط بعد أول قائمة تشغيل تُجلب فعلياً
   /// (`_rewritePlaylist` تحدّثها). القيمة الافتراضية `false` قبل ذلك تعني
   /// "نتعامل معه كبث مباشر مؤقتاً" — الأكثر أماناً حتى نتأكد فعلياً.
@@ -149,6 +165,8 @@ class HlsCacheProxy {
     _segmentCacheBytes = 0;
     _segmentSequence.clear();
     _prefetching.clear();
+    _prefetchQueue.clear();
+    _activePrefetches = 0;
     _sourceHasKnownEnd = false;
     if (server != null) {
       try {
@@ -349,16 +367,34 @@ class HlsCacheProxy {
   }
 
   void _prefetchUrl(String url) {
-    if (_segmentCache.containsKey(url) || _prefetching.contains(url)) return;
+    if (_segmentCache.containsKey(url) ||
+        _prefetching.contains(url) ||
+        _prefetchQueue.contains(url)) {
+      return;
+    }
+    // نحجز فوراً (قبل حتى ما يبدأ الجلب الفعلي) حتى استدعاء متكرر لنفس
+    // الرابط أثناء انتظاره بالطابور لا يُضيفه مرتين.
     _prefetching.add(url);
-    unawaited(() async {
-      try {
-        final bytes = await _fetchSegmentWithRetry(url);
-        if (bytes != null) _cacheSegment(url, bytes);
-      } finally {
-        _prefetching.remove(url);
-      }
-    }());
+    _prefetchQueue.add(url);
+    _pumpPrefetchQueue();
+  }
+
+  void _pumpPrefetchQueue() {
+    while (_activePrefetches < _maxConcurrentPrefetch &&
+        _prefetchQueue.isNotEmpty) {
+      final url = _prefetchQueue.removeAt(0);
+      _activePrefetches++;
+      unawaited(() async {
+        try {
+          final bytes = await _fetchSegmentWithRetry(url);
+          if (bytes != null) _cacheSegment(url, bytes);
+        } finally {
+          _prefetching.remove(url);
+          _activePrefetches--;
+          _pumpPrefetchQueue();
+        }
+      }());
+    }
   }
 
   Future<void> _handleSegment(HttpRequest request, String originalUrl) async {
