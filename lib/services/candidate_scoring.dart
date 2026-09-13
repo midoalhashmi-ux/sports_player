@@ -116,9 +116,18 @@ class CandidateScoring {
   /// (`ExoPlaybackException: Source error`)، ثم تُستنفَد كل محاولات
   /// إعادة الاتصال التلقائي الثماني (`NATIVE_AUTO_RECONNECT`) بإعادة
   /// محاولة نفس رابط المفتاح تكراراً — يبدو للمستخدم كمصدر "توقف فجأة".
+  ///
+  /// `.ts` مؤكَّد بسجل تشخيص فعلي منفصل بنفس النمط بالضبط: شريحة HLS خام
+  /// وحيدة (`seg-1-v1-a1.ts`) — `scoreDetectedSource` أصلاً يخصم 100 نقطة
+  /// لأي رابط شريحة، لكن هذا الخصم كان يُلغى ببونص "مسجَّل كـhls بالسجل"
+  /// (+85) أو "من إطار عمل معروف" (+85) لو ظهر نفس رابط الشريحة بمصدر آخر
+  /// (مثل قائمة تشغيل JWPlayer الداخلية) — فيتجاوز حد 80 ويُختار كمرشّح
+  /// "قوي" رغم كونه شريحة واحدة لا قائمة تشغيل كاملة. نفس تسلسل الفشل:
+  /// `PLAY_SERVER_QUALITY_START .../seg-1-v1-a1.ts` يفشل حتماً، ثم إعادة
+  /// اتصال تلقائي تكراري بنفس الرابط الفاشل.
   static bool isNonMediaAsset(String url) {
     if (RegExp(
-      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm|key)(?:$|[?#])',
+      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm|key|ts)(?:$|[?#])',
       caseSensitive: false,
     ).hasMatch(url)) {
       return true;

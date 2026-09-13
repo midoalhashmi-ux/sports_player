@@ -109,5 +109,12 @@ void main() {
         isTrue,
       );
     });
+    test('a single raw HLS segment under /hls/ (real false positive seen in a diagnostic log)', () {
+      expect(
+        CandidateScoring.isNonMediaAsset(
+            'https://s32.grzcdn.com/hls/yqdzva4ayxypzfhh/seg-1-v1-a1.ts'),
+        isTrue,
+      );
+    });
   });
 }
