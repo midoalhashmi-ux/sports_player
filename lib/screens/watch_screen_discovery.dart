@@ -1461,11 +1461,25 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       }
       final second = await _webPlaybackSnapshot(controller);
       final secondHits = (second?['mediaHits'] as num?)?.toInt() ?? 0;
+      // تسجيل تشخيصي جديد: "الدليل" هنا شبكي بحت (عدد موارد متزايد) لا
+      // تشغيل فعلي مُلاحَظ — لو ظهر هذا التاغ بسجل تالٍ بلا أي
+      // WEB_PLAYBACK_EVIDENCE مقابل خلال نفس الجلسة، فهذا تأكيد أن الصفحة
+      // أُعلنت "جاهزة" اعتماداً على ضجيج شبكي فقط بينما عنصر <video> نفسه
+      // لم يُلاحَظ يشتغل إطلاقاً (راجع الحقل found: لو false فالعنصر غير
+      // مرئي أصلاً لجافاسكربت المُحقَن، مرشّح قوي لـ<video> داخل iframe
+      // من أصل مختلف لا نقدر نصل له).
       if (secondHits >= firstHits + 2 || secondHits >= 5) {
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 20).clamp(0, 100).toInt();
+        _slog('WEB_PLAYBACK_PROOF_NETWORK_ONLY',
+            'reason=hits_growing found=${first['found']} playing=${first['playing']} firstHits=$firstHits secondHits=$secondHits');
         return true;
       }
-      return _webMediaEvidenceScore >= 70 && _webMediaResourceHits >= 4;
+      if (_webMediaEvidenceScore >= 70 && _webMediaResourceHits >= 4) {
+        _slog('WEB_PLAYBACK_PROOF_NETWORK_ONLY',
+            'reason=score_threshold found=${first['found']} playing=${first['playing']} score=$_webMediaEvidenceScore hits=$_webMediaResourceHits');
+        return true;
+      }
+      return false;
     } catch (_) {
       return false;
     }
@@ -2406,6 +2420,12 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _setWebSessionState(_WebSessionState.webReady);
     await _applyPlayerFocus(controller);
     if (!mounted || _webPlaybackReady) return;
+    // مؤكَّد بمراجعة كود (سجل تشخيص فعلي: FALLBACK_TO_WEBVIEW يتكرر كل ~2
+    // ثانية طوال الجلسة، بلا توقف) — هذي الدالة لم تكن تضبط _webPlaybackReady
+    // إطلاقاً، فحارسها الخاص بأول السطر (`|| _webPlaybackReady`) كان ميتاً
+    // دائماً: تُعاد استدعاؤها بكل دورة اكتشاف بدل مرة واحدة فقط، تُعيد ضبط
+    // حالة الجلسة وتستدعي setState بلا داعٍ كل مرة.
+    _webPlaybackReady = true;
     setState(() {
       _state = _LoadState.ready;
       _isWebSource = true;
@@ -2419,6 +2439,8 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     await _applyPlayerFocus(controller);
     await _primeVideoJsPlayback(controller);
     if (!mounted || _webPlaybackReady) return;
+    // نفس إصلاح _revealVidmolyPlayer أعلاه — نفس الخلل بالضبط هنا.
+    _webPlaybackReady = true;
     setState(() {
       _state = _LoadState.ready;
       _isWebSource = true;
