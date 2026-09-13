@@ -58,6 +58,19 @@ class HlsCacheProxy {
   int _activePrefetches = 0;
   static const int _maxConcurrentPrefetch = 3;
 
+  /// رقم جيل الجلسة — يزيد بكل `stop()`. مراجعة كود لاحقة كشفت ثغرة حقيقية
+  /// بنفس آلية الحد أعلاه: `stop()` يصفّر `_activePrefetches`/الطوابير،
+  /// لكن مهام الجلب الفعلية (`unawaited` بـ`_pumpPrefetchQueue`) المُطلَقة
+  /// *قبل* `stop()` تبقى شغّالة بالخلفية ولا تُلغى — عند اكتمالها لاحقاً
+  /// (بعد `start()` جديد لجلسة تالية بنفس الكائن)، كتلة `finally` الخاصة
+  /// بها كانت تُنقِص `_activePrefetches` وتستدعي `_pumpPrefetchQueue()` على
+  /// حالة الجلسة *الجديدة* — يدفع العداد لسالب ويُطلق اتصالات إضافية تتجاوز
+  /// الحد `_maxConcurrentPrefetch`، فيعيد إنتاج نفس مشكلة قصف الاتصالات
+  /// المتزامنة اللي هذا الحد أُضيف أصلاً ليمنعها. كل مهمة جلب تحجز رقم
+  /// الجيل وقت إطلاقها، وتتجاهل تحديث الحالة المشتركة لو تغيّر الجيل
+  /// (يعني جلسة جديدة بدأت) بحلول وقت اكتمالها.
+  int _proxyGeneration = 0;
+
   /// المصدر معلوماته الحقيقية تُكتشَف فقط بعد أول قائمة تشغيل تُجلب فعلياً
   /// (`_rewritePlaylist` تحدّثها). القيمة الافتراضية `false` قبل ذلك تعني
   /// "نتعامل معه كبث مباشر مؤقتاً" — الأكثر أماناً حتى نتأكد فعلياً.
@@ -156,6 +169,7 @@ class HlsCacheProxy {
   }
 
   Future<void> stop() async {
+    _proxyGeneration++;
     final server = _server;
     _server = null;
     _client?.close();
@@ -387,9 +401,11 @@ class HlsCacheProxy {
   }
 
   void _prefetchUrl(String url) {
-    if (_segmentCache.containsKey(url) ||
-        _prefetching.contains(url) ||
-        _prefetchQueue.contains(url)) {
+    // _prefetchQueue.contains(url) لم يعد يُفحَص هنا: أي رابط بالطابور يكون
+    // فعلاً بـ_prefetching دائماً بنفس اللحظة (يُضافان معاً أدناه، ويُزالان
+    // معاً فقط عند اكتمال الجلب) — فحص القائمة إضافي بلا فائدة (ومسح خطي
+    // O(n) بلا داعٍ لكل رابط مكتشَف).
+    if (_segmentCache.containsKey(url) || _prefetching.contains(url)) {
       return;
     }
     // نحجز فوراً (قبل حتى ما يبدأ الجلب الفعلي) حتى استدعاء متكرر لنفس
@@ -400,6 +416,10 @@ class HlsCacheProxy {
   }
 
   void _pumpPrefetchQueue() {
+    // كل مهمة تحجز جيل الجلسة الحالي وقت إطلاقها — لو `stop()` استُدعيت
+    // (جيل جديد) قبل ما تكتمل، تتجاهل تحديث الحالة المشتركة بدل ما تُفسد
+    // عدّاد/طابور جلسة تالية بالخطأ (راجع تعليق `_proxyGeneration` أعلاه).
+    final generation = _proxyGeneration;
     while (_activePrefetches < _maxConcurrentPrefetch &&
         _prefetchQueue.isNotEmpty) {
       final url = _prefetchQueue.removeAt(0);
@@ -407,11 +427,15 @@ class HlsCacheProxy {
       unawaited(() async {
         try {
           final bytes = await _fetchSegmentWithRetry(url);
-          if (bytes != null) _cacheSegment(url, bytes);
+          if (bytes != null && generation == _proxyGeneration) {
+            _cacheSegment(url, bytes);
+          }
         } finally {
-          _prefetching.remove(url);
-          _activePrefetches--;
-          _pumpPrefetchQueue();
+          if (generation == _proxyGeneration) {
+            _prefetching.remove(url);
+            _activePrefetches--;
+            _pumpPrefetchQueue();
+          }
         }
       }());
     }
@@ -423,7 +447,13 @@ class HlsCacheProxy {
       bytes = await _fetchSegmentWithRetry(originalUrl);
       if (bytes != null) _cacheSegment(originalUrl, bytes);
     }
-    if (bytes == null) {
+    // جسم فارغ (200 OK بلا بيانات) مصدر فعلي غير نظري — بعض خوادم CDN
+    // المتقلقلة تفعلها فعلياً (`_fetchSegmentWithRetry` يقبل أي حالة 2xx
+    // بغض النظر عن الحجم). بلا هذا الفحص، `bytes.length - 1` يصير -1
+    // و`start.clamp(0, -1)` يرمي ArgumentError لاحقاً (Dart يرفض
+    // lowerLimit > upperLimit) — يُعامَل الآن كفشل جلب عادي (502)، بنفس
+    // مسار `bytes == null` أعلاه، بدل استثناء غير متوقَّع.
+    if (bytes == null || bytes.isEmpty) {
       request.response.statusCode = HttpStatus.badGateway;
       await request.response.close();
       return;

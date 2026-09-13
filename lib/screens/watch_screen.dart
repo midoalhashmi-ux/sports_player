@@ -735,6 +735,11 @@ class _WatchScreenState extends State<WatchScreen>
         final direct = _extractBestUrl(candidate.text, currentUrl);
         if (direct != null) {
           final resolved = _resolveRelativeUrl(direct, currentUrl);
+          // شبكة أمان إضافية: _extractUrlDeep (مسار JSON، أعلى بهذي الدالة)
+          // يرجّع أول رابط موجود بحقل معروف (url/src/stream/...) بلا أي
+          // تحقق من نوعه — لو كان ملف مفتاح تشفير/شريحة خام صدفةً بأحد هذي
+          // الحقول، نتجاهله هنا بدل تسليمه كرابط تشغيل نهائي مؤكَّد الفشل.
+          if (CandidateScoring.isNonMediaAsset(resolved)) continue;
           if (_isDirectPlayable(resolved)) {
             return _ResolvedPublicUrl(resolved, responseHeaders);
           }
@@ -889,6 +894,12 @@ class _WatchScreenState extends State<WatchScreen>
       var candidate = match.group(0)?.trim() ?? '';
       candidate = candidate.replaceAll(RegExp(r"""["'<>),;]+$"""), '');
       if (candidate.isEmpty) continue;
+      // نفس فئة خطأ مفتاح التشفير/الشريحة الخام المُصلَحة بمحرك اكتشاف
+      // WebView (راجع CandidateScoring.isNonMediaAsset) — هذا المسار
+      // المنفصل (استخراج رابط من JSON/نص صفحة عام) كان يفتقد نفس الفحص،
+      // فيقدر يختار ملفاً غير قابل للتشغيل إطلاقاً لمجرد احتوائه "/hls/"
+      // بمساره. استبعاده هنا يترك الفرصة لمرشّح آخر حقيقي بنفس النص.
+      if (CandidateScoring.isNonMediaAsset(candidate)) continue;
       final score = _scoreDetectedSource(candidate);
       if (score > bestScore) { best = candidate; bestScore = score; }
     }
