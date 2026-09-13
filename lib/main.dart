@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:app_links/app_links.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import 'firebase_options.dart';
@@ -9,14 +11,42 @@ import 'screens/force_update_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/watch_screen.dart';
 import 'services/ad_service.dart';
+import 'services/session_log_service.dart';
 import 'services/version_check_service.dart';
 import 'theme/app_theme.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
+// قبل هذا لم يكن هناك أي التقاط عام للأخطاء: أي استثناء يقع خارج مناطق
+// try/catch المحلية (خصوصاً استثناءات غير متزامنة، مثل خطأ يقع داخل
+// Future بلا await صريح) كان يُسقط العزل (isolate) بصمت تاماً بدون أي أثر —
+// لا شاشة خطأ، ولا سطر بسجل SessionLogService. بما أن كل تشخيص لمشاكل هذا
+// التطبيق يعتمد حالياً على تصدير المستخدم لسجل SessionLogService يدوياً،
+// أي عطل يقع خارج نطاقه لا يترك أي أثر يمكن تحليله لاحقاً. هذا لا يضيف أي
+// خدمة تتبّع أعطال جديدة (لا Crashlytics ولا اعتماد جديد) — فقط يوجّه ما
+// كان يُفقد بصمت إلى نفس آلية التسجيل الموجودة فعلاً وإلى console الجهاز
+// (adb logcat / flutter run)، ليظهر ضمن نفس ملف التشخيص الذي يرسله
+// المستخدم أصلاً عند الإبلاغ عن مشكلة.
+void _logUncaughtError(Object error, StackTrace stack) {
+  debugPrint('UNCAUGHT_ERROR: $error\n$stack');
+  if (SessionLogService.instance.hasLog) {
+    SessionLogService.instance.log('UNCAUGHT_ERROR', '$error');
+  }
+}
+
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const _BootApp());
+  runZonedGuarded(() {
+    WidgetsFlutterBinding.ensureInitialized();
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details);
+      _logUncaughtError(details.exception, details.stack ?? StackTrace.current);
+    };
+    PlatformDispatcher.instance.onError = (error, stack) {
+      _logUncaughtError(error, stack);
+      return true;
+    };
+    runApp(const _BootApp());
+  }, _logUncaughtError);
 }
 
 class _BootApp extends StatefulWidget {
@@ -158,6 +188,7 @@ class _PlayerAppState extends State<PlayerApp> {
   Widget? _watchScreenForUri(Uri uri) {
     final channelId = uri.queryParameters['channelId'];
     final url = uri.queryParameters['url'];
+    final title = uri.queryParameters['title'];
 
     if ((channelId == null || channelId.isEmpty) &&
         (url == null || url.isEmpty)) {
@@ -170,6 +201,7 @@ class _PlayerAppState extends State<PlayerApp> {
           (channelId != null && channelId.isNotEmpty) ? channelId : null,
       externalUrl:
           (url != null && url.isNotEmpty) ? Uri.decodeFull(url) : null,
+      title: (title != null && title.isNotEmpty) ? Uri.decodeFull(title) : null,
     );
   }
 

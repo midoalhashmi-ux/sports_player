@@ -1,7 +1,7 @@
 name: sports_player
 description: BinSheikh player
 publish_to: 'none'
-version: 1.0.5+6
+version: 1.0.6+7
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -12,7 +12,10 @@ dependencies:
   cupertino_icons: ^1.0.6
 
   # خط Tajawal الاحترافي للهوية البصرية الموحّدة (راجع lib/theme/app_theme.dart)
-  google_fonts: ^6.2.1
+  # 6.3.0 يفشل ببناء حقيقي: خطأ Dart compile ("does not have a primitive
+  # operator ==") بخريطة const داخلية بالمكتبة نفسها — مُصلَح بإصدارات
+  # أحدث؛ نفس واجهة tajawalTextTheme المستخدمة هنا (تحقّق من مصدر 8.2.1).
+  google_fonts: ^8.2.1
 
   firebase_core: ^2.32.0
   cloud_firestore: ^4.15.5
@@ -34,6 +37,9 @@ dependencies:
 
   # حفظ لقطات الشاشة في المعرض
   path_provider: ^2.1.4
+  # 3.0.5 يفشل بخطأ Kotlin compile مع Gradle/Kotlin الحديثين (مؤكَّد من
+  # محاولة بناء فعلية) — 4.0.1 يستخدم Kotlin/AGP أحدث بكوده الأندرويدي
+  # نفسه، بنفس واجهة Dart تماماً (saveImage/saveFile) فلا تغيير بالاستخدام.
   image_gallery_saver_plus: ^4.0.1
 
   # إعلانات AdMob (بيني + بانر)

@@ -96,19 +96,40 @@ class ChannelSourceResolver {
       // فيديو مباشر. في هذه الحالة نعرض الصفحة داخل WebView ولا نحاول
       // تمريرها إلى ExoPlayer كمصدر فيديو.
       if (data != null && data['streamType'] == 'web') {
-        final webUrl = (data['sourceUrl'] ?? data['streamUrl'] ?? data['directUrl'] ?? '').toString().trim();
-        if (webUrl.isEmpty) {
-          return StreamSession.failure('لم يتم ضبط رابط صفحة البث لهذه القناة بعد.');
+        // channels.sources: قائمة مصادر بديلة لنفس الحلقة (يكتبها استيراد
+        // المواقع بلوحة التحكم عند استيراد نفس العمل من أكثر من موقع —
+        // راجع site-importer.js). كل عنصر يصبح سيرفراً مستقلاً هنا، فيستفيد
+        // تلقائياً من نفس منطق تبديل السيرفرات الموجود أصلاً (راجع
+        // hasMultipleServers بـstream_models.dart وشاشة المشاهدة).
+        final rawSources = data['sources'] as List?;
+        final webServers = <StreamServerOption>[];
+        if (rawSources != null) {
+          for (final entry in rawSources) {
+            if (entry is! Map) continue;
+            final url = (entry['url'] ?? '').toString().trim();
+            if (url.isEmpty) continue;
+            webServers.add(StreamServerOption(
+              label: (entry['label'] ?? 'مصدر').toString(),
+              qualities: [StreamQuality(label: 'صفحة البث', url: url)],
+            ));
+          }
+        }
+        // توافق رجعي: حلقات مستوردة قبل إضافة sources[]، أو مُعدَّلة يدوياً
+        // بلوحة التحكم بدون هذا الحقل، تبقى تعمل بمصدر واحد كالسابق تماماً.
+        if (webServers.isEmpty) {
+          final webUrl = (data['sourceUrl'] ?? data['streamUrl'] ?? data['directUrl'] ?? '').toString().trim();
+          if (webUrl.isEmpty) {
+            return StreamSession.failure('لم يتم ضبط رابط صفحة البث لهذه القناة بعد.');
+          }
+          webServers.add(StreamServerOption(
+            label: 'المصدر الرسمي',
+            qualities: [StreamQuality(label: 'صفحة البث', url: webUrl)],
+          ));
         }
         return StreamSession.success(
           kind: StreamKind.web,
           isLive: data['status'] == 'live',
-          servers: [
-            StreamServerOption(
-              label: 'المصدر الرسمي',
-              qualities: [StreamQuality(label: 'صفحة البث', url: webUrl)],
-            ),
-          ],
+          servers: webServers,
           headers: sourceHeaders,
         );
       }
@@ -116,7 +137,7 @@ class ChannelSourceResolver {
       final isProtected = data == null || data['protected'] != false;
 
       if (!isProtected) {
-        final rawServers = data?['servers'] as List?;
+        final rawServers = data['servers'] as List?;
         if (rawServers != null && rawServers.isNotEmpty) {
           final servers = rawServers
               .whereType<Map>()
@@ -126,20 +147,20 @@ class ChannelSourceResolver {
           if (servers.isNotEmpty) {
             return StreamSession.success(
               kind: StreamKind.hls,
-              isLive: data?['status'] == 'live',
+              isLive: data['status'] == 'live',
               servers: servers,
               headers: sourceHeaders,
             );
           }
         }
 
-        final directUrl = data?['directUrl'] as String?;
+        final directUrl = data['directUrl'] as String?;
         if (directUrl == null || directUrl.isEmpty) {
           return StreamSession.failure('لم يتم ضبط رابط البث لهذه القناة بعد.');
         }
         return StreamSession.success(
           kind: StreamKind.hls,
-          isLive: data?['status'] == 'live',
+          isLive: data['status'] == 'live',
           servers: [
             StreamServerOption(
               label: 'مباشر',

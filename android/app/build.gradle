@@ -15,6 +15,18 @@ if (localPropertiesFile.exists()) {
 def flutterVersionCode = localProperties.getProperty("flutter.versionCode") ?: "1"
 def flutterVersionName = localProperties.getProperty("flutter.versionName") ?: "1.0"
 
+// كيستور محلي حقيقي (اختياري) للبناء على جهاز مطوّر بدون CI — أنشئه مرة
+// واحدة بـkeytool ثم اكتب مساره هنا بدل الاعتماد على مفتاح debug
+// المشترك. راجع android/key.properties.example للتعليمات؛ الملف نفسه
+// (key.properties) بـ.gitignore عمداً، لا يُرفع أبداً لأنه يحتوي كلمات مرور.
+def localKeyPropertiesFile = rootProject.file("key.properties")
+def localKeyProperties = new Properties()
+if (localKeyPropertiesFile.exists()) {
+    localKeyPropertiesFile.withReader("UTF-8") { reader ->
+        localKeyProperties.load(reader)
+    }
+}
+
 android {
     namespace "com.midoalhashmi.zoltrastream"
     compileSdk 36
@@ -39,14 +51,10 @@ android {
         targetSdk 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
-        // نحصر مكتبات التشغيل الأصلية (libmpv) على المعماريتين الحقيقيتين
-        // لأجهزة أندرويد الفعلية فقط (x86/x86_64 غير مستخدمة إلا بالمحاكيات)
-        // — هذا كان مضبوطاً هنا بثبات بـ ndk.abiFilters، لكنه يتعارض مباشرة
-        // مع "flutter build ... --split-per-abi" (يضبط splits.abi.filters
-        // بنفس المعماريتين، وAGP يرفض وجود الاثنين معاً: "Conflicting
-        // configuration"). التقييد الآن يتم فقط عبر علم "--target-platform
-        // android-arm,android-arm64" وقت البناء (بالمحلي وبـ Codemagic
-        // كلاهما) بدل تثبيته هنا — نفس الأثر بدون التعارض.
+        // تقييد المعماريات (armeabi-v7a/arm64-v8a) يتم فقط عبر علم
+        // "--target-platform" وقت البناء (محلياً وبـ codemagic.yaml) —
+        // عمداً لا يوجد هنا ndk.abiFilters ثابت، يتعارض مع --split-per-abi
+        // ("Conflicting configuration"، راجع TECHNICAL.md #22).
     }
 
     signingConfigs {
@@ -76,11 +84,35 @@ android {
                 keyPassword "android"
             }
         }
+        // بناء محلي حقيقي (بلا CI) لما يوجد android/key.properties — راجع
+        // key.properties.example. توقيع حقيقي ثابت (نفس المفتاح كل مرة)
+        // بدل مفتاح debug العشوائي المشترك بين كل تثبيت Flutter — يمنع أي
+        // تعارض/رسالة تحذير عند إعادة تثبيت التطبيق فوق نسخة قديمة (مؤكَّد
+        // بمحاولة فعلية: رسالة "غير متوافق" من MIUI استمرت حتى بعد الحذف
+        // الكامل لنسخة debug سابقة).
+        localRelease {
+            if (localKeyPropertiesFile.exists()) {
+                // rootProject (لا project) عمداً — الكيستور بجانب key.properties
+                // بمجلد android/ نفسه (حسب key.properties.example)، لا بـandroid/app/.
+                storeFile rootProject.file(localKeyProperties["storeFile"])
+                storePassword localKeyProperties["storePassword"]
+                keyAlias localKeyProperties["keyAlias"]
+                keyPassword localKeyProperties["keyPassword"]
+            }
+        }
     }
 
     buildTypes {
         release {
-            signingConfig signingConfigs.release
+            // ثلاث حالات: CI حقيقي (Codemagic) ← كيستور محلي حقيقي إن وُجد
+            // (android/key.properties) ← مفتاح debug المؤقت كملاذ أخير فقط.
+            if (System.getenv()["CI"]) {
+                signingConfig signingConfigs.release
+            } else if (localKeyPropertiesFile.exists()) {
+                signingConfig signingConfigs.localRelease
+            } else {
+                signingConfig signingConfigs.debug
+            }
             minifyEnabled true
             shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt')

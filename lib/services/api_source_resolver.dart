@@ -352,9 +352,13 @@ class ApiSourceResolver {
   static int _score(String url) {
     final l = url.toLowerCase();
     var score = 0;
-    if (l.contains('.m3u8')) score += 150;
-    else if (l.contains('.mpd')) score += 120;
-    else if (RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])').hasMatch(l)) score += 80;
+    if (l.contains('.m3u8')) {
+      score += 150;
+    } else if (l.contains('.mpd')) {
+      score += 120;
+    } else if (RegExp(r'\.(mp4|m4v|webm|mov)(?:$|[?#])').hasMatch(l)) {
+      score += 80;
+    }
     if (l.contains('/live/')) score += 45;
     if (l.contains('stream')) score += 30;
     if (l.contains('master')) score += 20;
