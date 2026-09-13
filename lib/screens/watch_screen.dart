@@ -804,6 +804,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
   Timer? _webPromotionFallbackTimer;
   bool _webIframePromotionInFlight = false;
   bool _webPromotedPlayerMode = false;
+  // يصير true أول ما نشوف دليل تشغيل حقيقي (WEB_PLAYBACK_EVIDENCE
+  // playing=true) ويبقى true لبقية الجلسة — يُستخدم بحارس التنقّل ليمنع
+  // أي تحويل لدومين مختلف بعد بدء التشغيل الفعلي، حتى لو كنا بوضع "مشغّل
+  // مُرقّى" (راجع _webPromotedPlayerMode) اللي يسمح عادة بتحويلات عابرة
+  // للنطاق كمصدر/CDN شرعي. فيديو يشتغل فعلاً ما له سبب شرعي يحوّل الإطار
+  // الرئيسي لموقع تاني — هذا بالضبط ما تستغله سلاسل إعلانات التحويل
+  // (رصدناها فعلياً بسجل تشخيص حقيقي: تحويل كامل لصفحة "حمّل VPN" وهمية
+  // منتصف التشغيل، توقف الفيديو لثوانٍ لحد ما يتعافى).
+  bool _webRealPlaybackConfirmed = false;
   // Vidmoly is a real embedded HLS.js player surface. Keep it visible so a
   // user tap can reach the player when Android blocks autoplay.
   bool _webVidmolyPlayerMode = false;
@@ -1147,6 +1156,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       final ready = decoded['ready'] == true;
       final currentTime = (decoded['time'] as num?)?.toDouble() ?? 0;
       if (playing || (ready && currentTime > 0.15)) {
+        if (playing) _webRealPlaybackConfirmed = true;
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
         _webLastMediaEvidenceAt = DateTime.now();
@@ -3045,6 +3055,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
     _webPromotionFallbackTimer?.cancel();
     _webIframePromotionInFlight = false;
     _webPromotedPlayerMode = false;
+    _webRealPlaybackConfirmed = false;
     _webVidmolyPlayerMode = false;
     _webVideoJsPlayerMode = false;
     _webVidmolyRevealTimer?.cancel();
@@ -3077,6 +3088,15 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       controller = WebViewController()
         ..setJavaScriptMode(JavaScriptMode.unrestricted)
         ..setBackgroundColor(Colors.black)
+        // يضبط هوية محرّك WebView نفسه (مو بس هيدر الطلب الأول) — بعض
+        // المواقع خلف حماية WAF تميّز/تحظر WebView المدمج بنظام أندرويد عن
+        // متصفح حقيقي حتى مع نفس نص الـ User-Agent بالهيدر، لأن هوية
+        // المحرّك الفعلية تُستخدم لأي طلب فرعي (جافاسكريبت، XHR، تنقّل...)
+        // بغض النظر عن هيدرز أول تحميل. نفس القيمة المستخدمة أصلاً بـ
+        // _headers أدناه — راجع مناقشة net::ERR_CONNECTION_RESET بسجل
+        // تشخيص حقيقي لموقع رفض WebView تحديداً بينما فتح عادي بمتصفح حقيقي.
+        ..setUserAgent(widget.externalUserAgent ??
+            'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.119 Mobile Safari/537.36')
         ..addJavaScriptChannel(
           'SportsPlayerSource',
           onMessageReceived: (message) {
@@ -3109,10 +3129,19 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
                 // Its legitimate player/CDN redirects may cross hosts; blocking
                 // them here can leave a working player stuck on its first page.
                 // Ad/popup hosts are still rejected by _isAllowedWebNavigation.
-                if (!_webPromotedPlayerMode) {
+                //
+                // Exception: once real playback is confirmed
+                // (_webRealPlaybackConfirmed), a cross-origin top-level
+                // navigation is never a legitimate player/CDN redirect — a
+                // video that is already playing has no reason to replace the
+                // whole page. Confirmed on a real diagnostic log: an ad
+                // redirect chain (fake "install VPN" page) hijacked the main
+                // frame mid-playback for ~7s before recovering, because this
+                // exact promoted-mode carve-out let it through.
+                if (!_webPromotedPlayerMode || _webRealPlaybackConfirmed) {
                   _slog(
                     'NAV_BLOCKED_CROSS_ORIGIN',
-                    'from=$originHost to=$requestHost promoted=$_webPromotedPlayerMode',
+                    'from=$originHost to=$requestHost promoted=$_webPromotedPlayerMode realPlayback=$_webRealPlaybackConfirmed',
                   );
                   return NavigationDecision.prevent;
                 }
