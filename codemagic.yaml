@@ -10,6 +10,11 @@ workflows:
       - name: جلب الحزم
         script: flutter pub get
       - name: بناء APK (للاختبار والتثبيت المباشر)
-        script: flutter build apk --release
+        # --target-platform يحصر المعماريات المبنية على armeabi-v7a/arm64-v8a
+        # فقط (يستثني x86/x86_64 غير المستخدمة إلا بالمحاكيات) — كان هذا
+        # مضبوطاً بثبات بـ android/app/build.gradle (ndk.abiFilters)، نُقل
+        # لهذا العلم لأنه يتعارض مباشرة مع "--split-per-abi" وقت البناء
+        # المحلي (راجع التعليق بجانب defaultConfig بـ build.gradle).
+        script: flutter build apk --release --target-platform android-arm,android-arm64
     artifacts:
       - build/**/outputs/**/*.apk
