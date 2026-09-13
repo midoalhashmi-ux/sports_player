@@ -83,6 +83,16 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // بدل انتظاره خلف مرشحين آخرين لم يسبق أن نجحوا. راجع PreferredServerService.
   String? _preferredServerHost;
   bool _preferredServerHostLoaded = false;
+  // دومين أول صفحة فُتحت هذي الجلسة (قبل أي ترقية iframe) — مفتاح وصفة
+  // الموقع أدناه. يُضبَط مرة واحدة بـ_openWebSource ولا يتغيّر بعدها حتى
+  // لو _webSourceOrigin تغيّر لاحقاً (يتحدّث لمضيف iframe المُرقَّى).
+  String? _webEntryHost;
+  // وصفة موقع متعلّمة: مضيف iframe الذي نجح سابقاً لنفس _webEntryHost،
+  // تُرقّى أي مرشح مطابق لنفس المضيف فوراً بدل انتظار الأدلة العامة
+  // (نص "playerish" أو crossHost). راجع SiteRecipeService وافكار_مهمة.md
+  // قسم 3.
+  SiteRecipe? _webSiteRecipe;
+  bool _webSiteRecipeLoaded = false;
   // اتصال HTTP واحد يُعاد استخدامه لكل نداءات فحص/تحقق المرشحين طوال
   // الجلسة بدل فتح اتصال جديد بكل نداء. راجع StreamNetworkClient.
   final StreamNetworkClient _streamNetworkClient = StreamNetworkClient();
@@ -545,10 +555,34 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         final proof = await _webPlaybackSentinel(current);
         if (proof || _webMediaEvidenceScore >= 60) {
           _slog('IFRAME_PROMOTE_CONFIRMED', 'url=${_safeLogUrl(iframeUrl)} proof=$proof score=$_webMediaEvidenceScore');
+          final entryHost = _webEntryHost;
+          final targetHost = Uri.tryParse(iframeUrl)?.host ?? '';
+          if (entryHost != null && entryHost.isNotEmpty && targetHost.isNotEmpty) {
+            final mode = _webVidmolyPlayerMode
+                ? 'vidmoly'
+                : (_webVideoJsPlayerMode ? 'videojs' : 'generic');
+            unawaited(SiteRecipeService.remember(
+                entryHost, SiteRecipe(targetHost: targetHost, playerMode: mode)));
+            _slog('SITE_RECIPE_SAVED', 'entryHost=$entryHost targetHost=$targetHost playerMode=$mode');
+          }
           return;
         }
         if (_webIframePromotionAttempts < 2 && parentUrl != null && parentUrl.isNotEmpty) {
           _slog('IFRAME_PROMOTE_TIMEOUT_REVERT', 'url=${_safeLogUrl(iframeUrl)} backTo=${_safeLogUrl(parentUrl)}');
+          // فشل الوصفة المحفوظة (لو كانت هي سبب هذي الترقية) — رجوع فوري
+          // للمسار الكامل العادي بإزالتها، بدل تركها تعطّل نفس المسار مجدداً
+          // بالزيارة القادمة لنفس الموقع.
+          final entryHost = _webEntryHost;
+          final recipe = _webSiteRecipe;
+          final failedHost = Uri.tryParse(iframeUrl)?.host.toLowerCase() ?? '';
+          if (entryHost != null &&
+              entryHost.isNotEmpty &&
+              recipe != null &&
+              recipe.targetHost.toLowerCase() == failedHost) {
+            _webSiteRecipe = null;
+            unawaited(SiteRecipeService.invalidate(entryHost));
+            _slog('SITE_RECIPE_INVALIDATED', 'entryHost=$entryHost targetHost=$failedHost');
+          }
           _webPromotedPlayerMode = false;
           _webSourceOrigin = Uri.tryParse(parentUrl)?.host;
           try {
@@ -2019,6 +2053,21 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       if (!_webSessionIsActive(generation)) return;
     }
 
+    if (!_webSiteRecipeLoaded) {
+      _webSiteRecipeLoaded = true;
+      final entryHost = _webEntryHost;
+      if (entryHost != null && entryHost.isNotEmpty) {
+        _webSiteRecipe = await SiteRecipeService.load(entryHost);
+        if (_webSiteRecipe != null) {
+          _slog(
+            'SITE_RECIPE_LOADED',
+            'entryHost=$entryHost targetHost=${_webSiteRecipe!.targetHost} playerMode=${_webSiteRecipe!.playerMode}',
+          );
+        }
+      }
+      if (!_webSessionIsActive(generation)) return;
+    }
+
     _webDetectorTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
       if (!_webSessionIsActive(generation)) {
         timer.cancel();
@@ -2136,11 +2185,24 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           final candidateHost = candidateUri?.host.toLowerCase() ?? '';
           final currentHost = _webSourceOrigin?.toLowerCase() ?? '';
           final playerish = RegExp(r'(embed|shell|player|video|watch|stream|play|live)', caseSensitive: false).hasMatch(iframeCandidate);
+          final recipe = _webSiteRecipe;
+          final recipeMatch = recipe != null && candidateHost == recipe.targetHost.toLowerCase();
           _slog(
             'IFRAME_POLL_CANDIDATE',
-            'url=${_safeLogUrl(iframeCandidate)} playerish=$playerish crossHost=${candidateHost != currentHost}',
+            'url=${_safeLogUrl(iframeCandidate)} playerish=$playerish crossHost=${candidateHost != currentHost} recipeMatch=$recipeMatch',
           );
-          if (playerish || candidateHost != currentHost) {
+          if (playerish || candidateHost != currentHost || recipeMatch) {
+            if (recipeMatch) {
+              // وصفة موقع متعلّمة: هذا الدومين بالضبط سبق ونجح معه هذا
+              // المضيف — نضبط نوع المشغّل فوراً بدل انتظار اكتشافه من صيغة
+              // الرابط لاحقاً بـonPageFinished، فتبدأ محاولات التنشيط
+              // (priming) من أول دورة بعد الترقية مباشرة.
+              if (recipe!.playerMode == 'vidmoly') {
+                _webVidmolyPlayerMode = true;
+              } else if (recipe.playerMode == 'videojs') {
+                _webVideoJsPlayerMode = true;
+              }
+            }
             await _promoteIframeToPlayerDocument(controller, iframeCandidate, 80);
             return;
           }
@@ -2625,6 +2687,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _webInitialLoadCompleted = false;
     _webHumanVerificationDetected = false;
     _webVerificationCheckInFlight = false;
+    _webEntryHost = null;
+    _webSiteRecipe = null;
+    _webSiteRecipeLoaded = false;
     final webStartupNow = DateTime.now();
     _webStartupDeadline = webStartupNow.add(const Duration(seconds: 20));
     _webStartupHardDeadline = webStartupNow.add(const Duration(seconds: 90));
@@ -2655,6 +2720,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     try {
       final sourceUri = Uri.parse(url);
       _webSourceOrigin = sourceUri.host;
+      _webEntryHost = sourceUri.host;
       _webVidmolyPlayerMode = _isVidmolyPlayerUrl(url);
       _webVideoJsPlayerMode = _isVideoJsPlayerUrl(url);
       late final WebViewController controller;
