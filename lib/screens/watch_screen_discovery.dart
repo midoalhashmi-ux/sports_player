@@ -2130,14 +2130,27 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
 
         // Phase 1: cheap synchronous filtering only (no network) — builds the
         // list of candidates worth an actual network validation call.
+        //
+        // التقييم/الاستبعاد أدناه يمرّ الآن عبر استراتيجية خاصة بنوع
+        // المشغّل المكتشَف فعلياً بهذي الجلسة (JWPlayer/vidmoly، video.js،
+        // أو عام) بدل صيغة واحدة مشتركة لكل الأنواع — راجع player_strategy
+        // .dart لسبب هذا الفصل (سجل #39/#40/#41ب بـTECHNICAL.md). القيم
+        // الافتراضية مطابقة تماماً للصيغة القديمة، فهذا لا يغيّر أي سلوك
+        // حالي بمفرده.
+        final strategy = PlayerStrategyRegistry.select(
+          isVideoJsMode: _webVideoJsPlayerMode,
+          isJwPlayerLikeMode: _webVidmolyPlayerMode,
+        );
         final probes = <_CandidateProbe>[];
         for (final sourceRaw in sources) {
           final source = _normalizeCandidate(sourceRaw);
-          if (_isNonMediaAsset(source)) continue;
+          if (strategy.isNonMediaAsset(source)) continue;
           final registered = _webCandidateRegistry[source];
-          final score = _scoreDetectedSource(source) +
-              (registered?.type == 'hls' ? 85 : 0) +
-              (frameworkSources.contains(sourceRaw) ? 85 : 0);
+          final score = strategy.scoreCandidate(
+            source,
+            isFrameworkSource: frameworkSources.contains(sourceRaw),
+            registeredAsHls: registered?.type == 'hls',
+          );
           final registryEvidence = registered?.evidenceScore ?? 0;
           _webCandidateEvidence[source] =
               (_webCandidateEvidence[source] ?? 0) + 1 + (registryEvidence ~/ 25);
