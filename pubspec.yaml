@@ -46,7 +46,12 @@ dependencies:
   google_mobile_ads: ^5.2.0
 
   # مشاركة التطبيق عبر قوائم مشاركة النظام
-  share_plus: ^10.0.2
+  # 10.1.4 يفشل ببناء حقيقي: "Compilation error" بمهمة
+  # :share_plus:compileReleaseKotlin مع Kotlin 2.2.20/AGP الحديثة (نفس فئة
+  # خلل image_gallery_saver_plus أعلاه) — 13.x يتطلب AGP >=8.12.1 (راجع
+  # android/settings.gradle) لكن نفس واجهة Share.share/shareXFiles القديمة
+  # لا تزال تعمل (deprecated فقط، لم تُحذف).
+  share_plus: ^13.3.0
 
   # فتح متجر Google Play وروابط خارجية من صفحة "اتصل بنا"
   url_launcher: ^6.3.1
