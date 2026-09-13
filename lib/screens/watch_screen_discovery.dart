@@ -813,20 +813,43 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         try { setInterval(inspectIframes, 1200); } catch (_) {}
 
         const mediaResourceSeen = new Set();
-        const mediaResourceLike = (url) => {
+        // مؤكَّد بسجل تشخيص فعلي (موقع مليء بإعلانات/تتبّع): إيجابيات كاذبة
+        // حقيقيتان بهذا الفحص كانتا تخدعان النظام بالكامل ليعتقد أن تشغيلاً
+        // حقيقياً أثبت نفسه خلال ثوانٍ من فتح الصفحة، رغم عدم وجود أي فيديو
+        // بعد: (أ) روابط favicon من جوجل (`s2.googleusercontent.com/s2/
+        // favicons?domain_url=...`) تضمّن رابط الصفحة نفسها بمعامل الاستعلام
+        // — لصفحة مسلسل/حلقة هذا يحتوي غالباً كلمات "video"/"watch" فيُطابق
+        // فحص الكلمات المفتاحية رغم إنه مجرد طلب أيقونة صغيرة. (ب) روابط
+        // إعلانات كازينو حقيقية (`.../content/stream/agl/....gif`) تحتوي
+        // كلمة "stream" بمسارها التسويقي (لا علاقة له بالبث)، فتُطابَق أيضاً.
+        // النتيجة الفعلية المرصودة: _webMediaEvidenceScore وصل 100 خلال أقل
+        // من 10 ثوانٍ من مجرد تحميل أيقونات وإعلانات، قبل حتى محاولة اكتشاف
+        // أي مشغّل حقيقي — وهذا "الدليل" الكاذب يُسكِت آلية النقر التلقائي
+        // (`_webInteractionAttempts` بـwatch_screen_discovery.dart، الشرط
+        // `!await _webPlaybackSentinel(...)`) طوال الجلسة، فلا يُنقَر أي زر
+        // سيرفر تلقائياً إطلاقاً على مواقع بهذا الشكل. الحل: (أ) فحص الكلمات
+        // المفتاحية يتجاهل معامل الاستعلام كلياً الآن (نطاق+مسار فقط، لا
+        // `search`) — رابط favicon يحمل الصفحة كاملة بمعامل استعلام لا يعود
+        // يُطابَق. (ب) أي مورد نوعه الحقيقي (`initiatorType`) صورة/ستايل/خط
+        // (`img`/`css`/`link`) أو امتداده صورة/خط معروف يُستبعَد قبل أي فحص
+        // كلمات مفتاحية إطلاقاً — شريحة/قائمة تشغيل حقيقية لا تُحمَّل أبداً
+        // بهذي الأنواع.
+        const mediaResourceLike = (url, initiatorType) => {
           try {
+            if (/^(img|css|link)$/i.test(initiatorType || '')) return false;
             const u = new URL(url, location.href);
-            const h = `${u.hostname} ${u.pathname} ${u.search}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect)/i.test(h)) return false;
-            return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(h) ||
-              /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/i.test(h);
+            const pathOnly = `${u.hostname} ${u.pathname}`.toLowerCase();
+            if (/\.(jpe?g|png|gif|webp|bmp|svg|ico|woff2?|ttf|eot|otf)(?:$|[?#])/i.test(pathOnly)) return false;
+            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|scorecardresearch|adservice|ads\b|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect|favicon)/i.test(pathOnly)) return false;
+            return /\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/i.test(pathOnly) ||
+              /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/i.test(pathOnly);
           } catch (_) { return false; }
         };
         const reportMediaResources = () => {
           try {
             performance.getEntriesByType('resource').forEach((e) => {
               const name = e && e.name ? String(e.name) : '';
-              if (!mediaResourceLike(name)) return;
+              if (!mediaResourceLike(name, e && e.initiatorType)) return;
               report({type:'media_resource', url:name});
               if (/\.(m3u8|m3u)(?:$|[?#])/i.test(name) ||
                   /(?:master|playlist|manifest)(?:[./?#&]|$)|\/m3\//i.test(name)) {
@@ -1430,10 +1453,22 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         let mediaHits = 0;
         let lastMedia = '';
         try {
+          // نفس إصلاح mediaResourceLike أعلى بالملف (مسافة الأسماء JS
+          // منفصلة هنا لأن هذا الحقن مستقل، لكن نفس فئة الإيجابية الكاذبة
+          // بالضبط — راجع تعليقها لسبب استبعاد search/الصور): يتجاهل معامل
+          // الاستعلام (رابط favicon يحمل صفحة الحلقة كاملة به) ويستبعد
+          // موارد الصور/الأيقونات صراحة (initiatorType أو الامتداد).
           performance.getEntriesByType('resource').forEach((e) => {
-            const n = String(e.name || '').toLowerCase();
-            if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(n) || /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/.test(n)) {
-              if (!/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect)/.test(n)) { mediaHits++; lastMedia = e.name; }
+            if (/^(img|css|link)$/i.test(e.initiatorType || '')) return;
+            let pathOnly = '';
+            try {
+              const u = new URL(e.name || '', location.href);
+              pathOnly = `${u.hostname} ${u.pathname}`.toLowerCase();
+            } catch (_) { return; }
+            if (/\.(jpe?g|png|gif|webp|bmp|svg|ico|woff2?|ttf|eot|otf)(?:$|[?#])/.test(pathOnly)) return;
+            if (/(doubleclick|googlesyndication|google-analytics|mc\.yandex|adservice|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|beacon|telemetry|metrics|pixel|collect|favicon)/.test(pathOnly)) return;
+            if (/\.(m3u8|mpd|mp4|m4v|webm|mov|m4s|ts)(?:$|[?#])/.test(pathOnly) || /(?:manifest|playlist|master|stream|video|media|segment|seg-|chunk|hls2|dash|\/v\/|\/m3\/)/.test(pathOnly)) {
+              mediaHits++; lastMedia = e.name;
             }
           });
         } catch (_) {}
