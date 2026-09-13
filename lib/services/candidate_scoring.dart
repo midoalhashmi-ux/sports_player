@@ -105,9 +105,20 @@ class CandidateScoring {
   /// asset extensions, or a path made up of nothing but slashes (a bare
   /// domain, "/", "//", ...) — seen in practice as false-positive
   /// candidates that burned a native trial attempt for nothing.
+  ///
+  /// `.key` مؤكَّد بسجل تشخيص فعلي: مفتاح تشفير AES-128 لشرائح HLS يعيش
+  /// عادةً بنفس مسار `/hls/...` للقائمة والشرائح نفسها — `looksLikeHls()`
+  /// (يطابق `/hls/` كمقطع مسار) كان يمنحه نقاط تقييم عالية (100+) رغم
+  /// إنه ملف مفتاح تشفير خام، لا فيديو قابل للتشغيل إطلاقاً. النتيجة
+  /// الفعلية: بعد فشل كل مرشّحي الفيديو الحقيقيين وإعادة فحص المصادر،
+  /// المفتاح كان يتصدّر كمرشّح "دليل قوي" ويُرسَل لمحاولة تشغيل أصلي
+  /// (`PLAY_SERVER_QUALITY_START .../encryption.key`) — يفشل حتماً
+  /// (`ExoPlaybackException: Source error`)، ثم تُستنفَد كل محاولات
+  /// إعادة الاتصال التلقائي الثماني (`NATIVE_AUTO_RECONNECT`) بإعادة
+  /// محاولة نفس رابط المفتاح تكراراً — يبدو للمستخدم كمصدر "توقف فجأة".
   static bool isNonMediaAsset(String url) {
     if (RegExp(
-      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm)(?:$|[?#])',
+      r'\.(jpe?g|png|gif|webp|bmp|svg|ico|css|woff2?|ttf|eot|otf|json|swf|wasm|key)(?:$|[?#])',
       caseSensitive: false,
     ).hasMatch(url)) {
       return true;

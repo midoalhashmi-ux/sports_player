@@ -102,5 +102,12 @@ void main() {
     test('a real manifest path is not a non-media asset', () {
       expect(CandidateScoring.isNonMediaAsset('https://x.com/stream/master.m3u8'), isFalse);
     });
+    test('an HLS AES-128 encryption key under /hls/ (real false positive seen in a diagnostic log)', () {
+      expect(
+        CandidateScoring.isNonMediaAsset(
+            'https://s32.grzcdn.com/hls/yqdzva4ayxypzfhh/encryption.key'),
+        isTrue,
+      );
+    });
   });
 }
