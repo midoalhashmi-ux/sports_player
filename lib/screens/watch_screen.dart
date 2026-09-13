@@ -2662,6 +2662,10 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
         _webDetectorTimer = null;
         if (_webSessionIsActive(generation) && _webSessionState == _WebSessionState.discovering) {
           _setWebSessionState(_WebSessionState.webReady);
+          // بدون هذا، _state يبقى "جاري التحميل" للأبد بعد استنفاد ميزانية
+          // الاكتشاف — نفس علة NATIVE_TRIALS_GIVEN_UP لكن هنا الطريق ينتهي
+          // بلا أي محاولة تشغيل أصلي إطلاقاً (لا مرشحات كافية أصلاً).
+          if (mounted) setState(() => _state = _LoadState.ready);
         }
         return;
       }
@@ -2677,6 +2681,7 @@ class _WatchScreenState extends State<WatchScreen> with WidgetsBindingObserver {
       }
       if (_webNativeAttempts >= _webMaxNativeAttempts) {
         _setWebSessionState(_WebSessionState.webReady);
+        if (mounted) setState(() => _state = _LoadState.ready);
         timer.cancel();
         _webDetectorTimer = null;
         return;
