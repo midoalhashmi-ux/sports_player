@@ -25,6 +25,7 @@ import '../services/native_cookie_service.dart';
 import '../services/player_strategies/player_strategy.dart';
 import '../services/player_visibility_service.dart';
 import '../services/preferred_server_service.dart';
+import '../services/site_recipe_service.dart';
 import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
 import '../theme/app_theme.dart';
