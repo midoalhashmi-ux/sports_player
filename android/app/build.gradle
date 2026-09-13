@@ -35,7 +35,7 @@ android {
 
     defaultConfig {
         applicationId "com.midoalhashmi.zoltrastream"
-        minSdk 21
+        minSdkVersion flutter.minSdkVersion
         targetSdk 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
