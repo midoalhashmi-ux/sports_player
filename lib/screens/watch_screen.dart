@@ -1978,24 +1978,41 @@ class _WatchScreenState extends State<WatchScreen>
     final hitsAtResume = _webMediaResourceHits;
     final urlAtResume = _webOriginalUrl;
     final generationAtResume = _webSessionGeneration;
-    _webResumeStallWatchdog = Timer(const Duration(seconds: 7), () {
-      if (!mounted ||
-          !_isWebSource ||
-          _webSessionState == _WebSessionState.nativePlaying ||
-          _webSessionGeneration != generationAtResume ||
-          urlAtResume == null) {
-        return;
-      }
-      if (_webMediaResourceHits > hitsAtResume) {
-        // فعلاً استأنف — دليل شبكي جديد تحرّك خلال المهلة.
-        return;
-      }
-      _slog(
-        'WEB_RESUME_STALLED',
-        'noNetworkActivityFor=7s hitsAtResume=$hitsAtResume — reopening web source fresh',
-      );
-      unawaited(_openWebSource(urlAtResume, server: _activeServer));
-    });
+    void arm() {
+      _webResumeStallWatchdog = Timer(const Duration(seconds: 7), () {
+        if (!mounted ||
+            !_isWebSource ||
+            _webSessionState == _WebSessionState.nativePlaying ||
+            _webSessionGeneration != generationAtResume ||
+            urlAtResume == null) {
+          return;
+        }
+        // نفس استثناء _startWebStartupTimeout بالضبط: حالات نشطة فعلاً
+        // (تحدٍّ بشري ينتظر تفاعل المستخدم، تحقّق مصدر، محاولة تشغيل قيد
+        // التنفيذ) ليست "عالقة" — إعادة فتح الصفحة هنا تقاطع مستخدماً يحل
+        // CAPTCHA فعلياً بيده، أو تهدر محاولة تشغيل شرعية لسا ما انتهت.
+        // نؤجّل الفحص بدل إلغائه، بنفس مبدأ arm() هناك.
+        final state = _webSessionState;
+        if (state == _WebSessionState.humanVerificationRequired ||
+            state == _WebSessionState.validating ||
+            state == _WebSessionState.nativeTrial ||
+            state == _WebSessionState.candidateTrial) {
+          arm();
+          return;
+        }
+        if (_webMediaResourceHits > hitsAtResume) {
+          // فعلاً استأنف — دليل شبكي جديد تحرّك خلال المهلة.
+          return;
+        }
+        _slog(
+          'WEB_RESUME_STALLED',
+          'noNetworkActivityFor=7s hitsAtResume=$hitsAtResume — reopening web source fresh',
+        );
+        unawaited(_openWebSource(urlAtResume, server: _activeServer));
+      });
+    }
+
+    arm();
   }
 
   @override
