@@ -149,6 +149,15 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // prize pages, app-store redirects, etc.), so it gets blocked to keep the
   // original channel page intact.
   bool _webInitialLoadCompleted = false;
+  // WebView always calls onPageFinished after a navigation attempt, even
+  // when that navigation actually failed (e.g. ERR_CONNECTION_RESET on the
+  // main frame — confirmed by a real log where onWebResourceError correctly
+  // set _state = error, only for onPageFinished to fire immediately after
+  // and unconditionally reset it back to loading + kick discovery against a
+  // page that never actually loaded any HTML, burning the auto-detect
+  // budget on 0 candidates every scan). Set on a fatal main-frame resource
+  // error, cleared at the start of every fresh page load in _openWebSource.
+  bool _webMainFrameLoadFailed = false;
   // Mirrors _webDrmDetected's pattern: a flag + a dedicated state, never an
   // attempt to defeat the check itself.
   bool _webHumanVerificationDetected = false;
@@ -359,6 +368,45 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     if (uri == null || !uri.hasScheme) return false;
     if (uri.scheme != 'http' && uri.scheme != 'https') return false;
     return !_isDangerousWebUrl(target);
+  }
+
+  // Dynamic replacement for a manually-maintained ad-domain blacklist.
+  // _isDangerousWebUrl above only catches names/keywords we already know —
+  // real logs show brand-new ad-redirect hosts (a random-looking .shop/
+  // .com.in/shortlink domain) sailing straight through it every time,
+  // exactly the "I have to keep adding domains myself" problem. Once a
+  // promoted player page has actually loaded real resources this session
+  // (an HLS manifest, a segment, the player's own JS — anything recorded in
+  // _webCandidateRegistry), nothing about legitimate playback ever needs
+  // the TOP FRAME to jump to a host that produced zero of that traffic —
+  // that shape (sudden top-level nav to a host we've never once fetched
+  // anything from) is exactly what an ad/redirect hijack looks like,
+  // regardless of what the domain is named. So instead of blacklisting
+  // known-bad names, this allowlists only hosts this session has actually
+  // seen serve real content — anything else is blocked automatically, no
+  // manual list to maintain.
+  bool _isTrustedNavigationHost(String host) {
+    if (host.isEmpty) return false;
+    bool sameSite(String a, String b) =>
+        a.isNotEmpty && b.isNotEmpty && (a == b || _registrableDomain(a) == _registrableDomain(b));
+    if (sameSite(host, _webEntryHost ?? '')) return true;
+    if (sameSite(host, _webSourceOrigin ?? '')) return true;
+    for (final candidate in _webCandidateRegistry.values) {
+      final candidateHost = Uri.tryParse(candidate.url)?.host.toLowerCase() ?? '';
+      if (sameSite(host, candidateHost)) return true;
+      final pageHost = Uri.tryParse(candidate.pageUrl)?.host.toLowerCase() ?? '';
+      if (sameSite(host, pageHost)) return true;
+    }
+    return false;
+  }
+
+  // Simplistic eTLD+1 extraction (last two labels) — good enough to
+  // recognize sibling CDN subdomains (cdn1.example.com vs cdn2.example.com
+  // as "the same site"); not a security boundary, just a same-site heuristic.
+  String _registrableDomain(String host) {
+    final parts = host.toLowerCase().split('.').where((p) => p.isNotEmpty).toList();
+    if (parts.length <= 2) return parts.join('.');
+    return parts.sublist(parts.length - 2).join('.');
   }
 
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
@@ -2685,6 +2733,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _webPlayerFocusApplied = false;
     _webOriginalUrl = url;
     _webInitialLoadCompleted = false;
+    _webMainFrameLoadFailed = false;
     _webHumanVerificationDetected = false;
     _webVerificationCheckInFlight = false;
     _webEntryHost = null;
@@ -2766,11 +2815,25 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
                 // A promoted cross-origin player is now the main document.
                 // Its legitimate player/CDN redirects may cross hosts; blocking
                 // them here can leave a working player stuck on its first page.
-                // Ad/popup hosts are still rejected by _isAllowedWebNavigation.
+                // Ad/popup hosts named in _isDangerousWebUrl are already
+                // rejected above, but that list always lags one step behind
+                // new ad domains (confirmed by real logs: sw.muralssouth.shop,
+                // trendyol.com.in, amzn.to none of which matched any keyword).
+                // Once promoted, only allow a further top-level jump to a
+                // host this session has actually seen serve real player
+                // traffic — see _isTrustedNavigationHost for why that's a
+                // reliable, name-agnostic stand-in for "is this an ad".
                 if (!_webPromotedPlayerMode) {
                   _slog(
                     'NAV_BLOCKED_CROSS_ORIGIN',
                     'from=$originHost to=$requestHost promoted=$_webPromotedPlayerMode',
+                  );
+                  return NavigationDecision.prevent;
+                }
+                if (!_isTrustedNavigationHost(requestHost)) {
+                  _slog(
+                    'NAV_BLOCKED_UNTRUSTED_HOST',
+                    'from=$originHost to=$requestHost promoted=true',
                   );
                   return NavigationDecision.prevent;
                 }
@@ -2791,6 +2854,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
             // كاملة ثانية لنفس المصدر — بدون إيقاف الأولى، فيسمع المستخدم
             // صوتين متزامنين. راجع سجل تشخيص فعلي وثّق هذا بالضبط.
             if (_webSessionState == _WebSessionState.nativePlaying) return;
+            // WebView calls onPageFinished even for a navigation that just
+            // failed at the network level — confirmed by a real log where
+            // onWebResourceError had already set _state = error for
+            // ERR_CONNECTION_RESET on the main frame, only for this exact
+            // callback to fire right after and silently reset it back to
+            // loading, then kick a full discovery cycle against a page that
+            // never actually loaded (9 scans in a row, 0 candidates every
+            // time — the error was correct, this callback just overwrote
+            // it). onWebResourceError already tried an alternate server or
+            // settled on the error screen; there is nothing here to do.
+            if (_webMainFrameLoadFailed) return;
             // The initial source may be RistoAnime, then V11 promotes its
             // Vidmoly iframe to the main document. Re-evaluate the player mode
             // on every completed main-frame navigation so the promoted embed
@@ -2855,6 +2929,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
               'code=${error.errorCode} desc=${error.description} mainFrame=${error.isForMainFrame} sessionState=$_webSessionState',
             );
             if (mounted && error.isForMainFrame == true && _webSessionState != _WebSessionState.candidateTrial && _webSessionState != _WebSessionState.nativePlaying) {
+              _webMainFrameLoadFailed = true;
               if (_tryNextWebServer('web_resource_error:${error.errorCode}')) return;
               setState(() {
                 _state = _LoadState.error;
