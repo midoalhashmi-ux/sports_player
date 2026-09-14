@@ -130,6 +130,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   String? _webLastPromotedIframeUrl;
   int _webMediaEvidenceScore = 0;
   int _webMediaResourceHits = 0;
+  // آخر لحظة زاد فيها هذا العدّاد فعلياً — تشخيص فقط: يسمح لوكيل الـHLS
+  // (hls_cache_proxy) يسجّل هل WebView كان نشطاً شبكياً (يجلب نفس المصدر)
+  // بنفس لحظة فشل جلب شريحتنا بالضبط، بدل مقارنة يدوية للطوابع الزمنية
+  // بين سجلَّين منفصلين لاحقاً.
+  DateTime? _lastWebMediaResourceHitAt;
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
@@ -457,6 +462,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     }
     if (type == 'media_resource') {
       _webMediaResourceHits++;
+      _lastWebMediaResourceHitAt = DateTime.now();
       final rawResourceUrl = decoded['url']?.toString() ?? '';
       final resourceUrl = rawResourceUrl.toLowerCase();
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
@@ -530,6 +536,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         if (playing) _webRealPlaybackConfirmed = true;
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
+        _lastWebMediaResourceHitAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 8));
         if (playing || currentTime > 0.15) {
           _smartLog(

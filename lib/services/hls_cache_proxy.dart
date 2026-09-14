@@ -24,11 +24,18 @@ import 'package:http/http.dart' as http;
 /// (راجع _playServerQuality) — أي تعليق الآن يتحوّل لفشل واضح خلال 15
 /// ثانية كحد أقصى، أياً كان السبب.
 class HlsCacheProxy {
-  HlsCacheProxy({this.onLog});
+  HlsCacheProxy({this.onLog, this.isWebViewActiveNearby});
 
   /// (tag, detail) — يُمرَّر لـ_slog بـwatch_screen لتظهر بسجل التشخيص
   /// الذي يصدّره المستخدم، بنفس تنسيق بقية أحداث المشغّل.
   final void Function(String tag, String detail)? onLog;
+
+  /// تشخيص فقط (لا يؤثر على أي منطق جلب/تزامن هنا): يرجع true لو WebView
+  /// جلب مورد شبكة فعلي خلال آخر ثوانٍ قليلة — يُستدعى فقط عند تسجيل خطأ
+  /// جلب، ليقول السجل مباشرة هل كان WebView نشطاً شبكياً بنفس لحظة فشل
+  /// جلبنا (فرضية: اتصالات وكيلنا + WebView المتزامنة قد تتجاوز حد تحمّل
+  /// الـCDN المنخفض أصلاً — راجع TECHNICAL.md #47).
+  final bool Function()? isWebViewActiveNearby;
 
   HttpServer? _server;
   http.Client? _client;
@@ -529,10 +536,10 @@ class HlsCacheProxy {
           return resp.bodyBytes;
         }
         _log('HLS_PROXY_SEGMENT_HTTP_ERROR',
-            'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds}');
+            'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()}');
       } catch (e) {
         _log('HLS_PROXY_SEGMENT_FETCH_ERROR',
-            'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} error=$e');
+            'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()} error=$e');
       }
     }
     return null;
