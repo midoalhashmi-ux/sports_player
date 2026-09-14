@@ -267,6 +267,20 @@ class _WatchScreenState extends State<WatchScreen>
   Timer? _nativeReconnectTimer;
   int _nativeAutoReconnectAttempts = 0;
   bool _userPausedPlayback = false;
+  // مؤشر جيل لكل استدعاء لـ_playServerQuality — مؤكَّد بسجل تشخيص فعلي:
+  // إعادة اتصال تلقائية صامتة (_handleNativePlaybackError، fallbackToWeb
+  // الافتراضي false) ومحاولة تجربة ثانية قادمة من اكتشاف WebView
+  // (fallbackToWeb=true) قد تعملان بالتوازي فعلياً على نفس القناة —
+  // الثانية نجحت (PLAY_SERVER_QUALITY_SUCCESS) بينما الأولى، القديمة
+  // فعلياً وغير ذات صلة، كانت لا تزال عالقة داخل initialize().timeout(9s)
+  // الخاص بها. لما انتهت أخيراً بفشل (Timeout)، فرع catch العام (fallbackToWeb
+  // false) نفّذ setState(_state = error) بلا أي شرط — يمسح حالة النجاح
+  // الحقيقية فوراً رغم أن المتحكم (_controller) الفعلي الناجح لم يُمس إطلاقاً،
+  // فيستمر صوت المصدر يُسمع خلف شاشة الخطأ. الحل: كل استدعاء يحجز رقم جيل
+  // فريد عند بدايته، ويتحقق منه قبل أي setState نهائي — استدعاء قديم تجاوزه
+  // استدعاء أحدث يتجاهل نتيجته (نجاحاً كان أو فشلاً) بصمت بدل الكتابة فوق
+  // حالة قد تكون أحدث وأصح.
+  int _playAttemptGeneration = 0;
   Duration _position = Duration.zero;
   Duration _duration = Duration.zero;
   double _volume = 100;
@@ -1106,6 +1120,7 @@ class _WatchScreenState extends State<WatchScreen>
         Map<String, String>? playbackHeaders,
         VideoFormat? formatHintOverride,
       }) async {
+    final myGeneration = ++_playAttemptGeneration;
     if (fallbackToWeb) {
       _setWebSessionState(_WebSessionState.nativeTrial);
       _smartLog('NATIVE', 'trial started');
@@ -1242,6 +1257,16 @@ class _WatchScreenState extends State<WatchScreen>
       await WakelockPlus.enable();
       _webStartupTimeoutTimer?.cancel();
       if (!mounted) return;
+      if (myGeneration != _playAttemptGeneration) {
+        // A newer _playServerQuality call already started while this one was
+        // awaiting initialize() — this attempt is stale even though it just
+        // succeeded. The newer call owns _controller now; dispose our own
+        // now-redundant controller instead of leaking it, and touch nothing
+        // else (no _state/_controller mutation — the newer call's own
+        // success or failure handling is authoritative).
+        unawaited(newController.dispose());
+        return;
+      }
       if (fallbackToWeb) {
         _setWebSessionState(_WebSessionState.nativePlaying);
         // الاكتشاف بالخلفية لم يعد له داعٍ بعد نجاح التشغيل الأصلي — تركه
@@ -1287,6 +1312,20 @@ class _WatchScreenState extends State<WatchScreen>
       }
     } catch (error) {
       if (!mounted) return;
+      if (myGeneration != _playAttemptGeneration) {
+        // Same staleness as the success path above, mirrored for failure:
+        // confirmed by a real log where a silent auto-reconnect call
+        // (_handleNativePlaybackError, fallbackToWeb=false) was still stuck
+        // inside its own 9s initialize() timeout when a second, newer trial
+        // from WebView discovery (fallbackToWeb=true) had already started,
+        // taken over _controller, and succeeded. The stale call's eventual
+        // TimeoutException fell straight into the unconditional
+        // setState(_state = error) below with nothing to stop it — wiping
+        // out a playback that was, at that moment, working correctly.
+        // _controller now belongs to the newer call; touching it (or
+        // _hlsCacheProxy, shared across calls) here would corrupt it.
+        return;
+      }
       if (fallbackToWeb) {
         final failedController = _controller;
         _controller = null;
