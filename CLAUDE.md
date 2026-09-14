@@ -1,3 +1,116 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## قبل أي تعديل على `watch_screen.dart`/`watch_screen_discovery.dart`
+
+استخدم مهارة `stream-debug` (`.claude/skills/stream-debug/`) — فيها منهجية
+التشخيص الوحيدة اللي أثبتت نجاحها بهذا المشروع (سجل تشخيص حقيقي مصدَّر من
+التطبيق، لا تخمين من الكود). تحتوي أيضاً على مرجع آلة الحالة الكاملة
+(`references/state-machine.md`) وأمثلة حقيقية لأخطاء سابقة
+(`references/known-bugs.md`) — اقرأها قبل إعادة اكتشاف نفس المعمارية من
+الصفر. **لا تشخّص أي مشكلة تشغيل بدون طلب سجل `sports_player_debug_log.txt`
+مُصدَّر من التطبيق أولاً** — تخمينات بلا سجل ضاعت جهداً حقيقياً بتاريخ هذا
+المشروع (راجع فكرة #2 المرفوضة بـ`افكار_مهمة.md`).
+
+## قواعد حماية صارمة — اقرأها قبل أي تعديل
+
+`project-protection-rules.md` يسرد ملفات/إعدادات ممنوع تعديلها بدون إذن
+صريح من المستخدم: `lib/main.dart`, `lib/firebase_options.dart`,
+`android/app/google-services.json`, `android/build.gradle` (الجذري
+وبمجلد `app/` تحديداً `applicationId`/`minSdkVersion`/`targetSdkVersion`/
+`compileSdkVersion`/`signingConfigs`), `codemagic.yaml`, ملفات التوقيع، أي
+ترقية لحزمة **موجودة أصلاً** بـ`pubspec.yaml`، وأسماء حقول/مجموعات
+Firestore المشتركة مع BinSheikh وAHMED-dashboard. أي تعديل يمس هذي
+المناطق: توقف واشرح للمستخدم ولا تفترض الموافقة.
+
+**قيد أمان ثابت (Auto Source Engine V3)**: يُقبل فقط روابط وسائط عامة
+تعرضها الصفحة نفسها. اكتشاف DRM يفرض وضع WebView-فقط دائماً — لا استخراج
+أو تجاوز لأي مفتاح تشفير أو محتوى مشفَّر مطلقاً.
+
+## أوامر التطوير
+
+```bash
+flutter pub get                 # تثبيت التبعيات
+flutter analyze                 # فحص ثابت — دائماً بعد أي تعديل على watch_screen*.dart
+flutter test                    # كل الاختبارات
+flutter test test/candidate_scoring_test.dart   # اختبار واحد
+flutter test test/player_strategy_test.dart
+```
+
+للبناء الفعلي (APK محلي على جهاز المستخدم، Windows) راجع القسم الكامل
+أسفل هذا الملف — فيه مسارات وإصدارات أدوات محدَّدة لجهاز بعينه، ضرورية
+لتجنّب إعادة تشخيص نفس أخطاء البناء من الصفر.
+
+## البنية المعمارية
+
+هذا المستودع جزء من منظومة 3 مستودعات منفصلة تتشارك نفس مشروع Firebase
+(`sports-stream-app-36a7a`) ونفس Cloudflare Worker
+(`binsheikh-api.binsheikh.workers.dev`، كوده بمستودع BinSheikh
+`cloudflare-worker/`):
+
+- **BinSheikh** — تطبيق تصفّح المحتوى (الأقسام/القنوات/الأفلام/المسلسلات/
+  الأنمي). لا يلمس روابط البث مباشرة — يفتح هذا التطبيق عبر `app_links`
+  بمعرّف قناة/حلقة فقط.
+- **sports_player** (هذا المستودع) — تطبيق منفصل وظيفته الوحيدة تشغيل
+  الفيديو. فصله يتيح تحديثه بـPlay Store دون المساس بـBinSheikh، ويعزل
+  منطق حل الروابط الحقيقية/تجاوز الحماية عن تطبيق المحتوى العام.
+- **AHMED-dashboard** — لوحة تحكم HTML/JS خام يديرها فريق المحتوى.
+
+روابط m3u8 الحقيقية **لا تُخزَّن ولا تُقرأ من Firestore مباشرة من هذا
+التطبيق** — تُجلب فقط عبر `POST /getStreamUrl` بالووركر (يقرأ
+`privateStreams` بصلاحيات خادم لا تصل لأي عميل).
+
+### `lib/screens/watch_screen.dart` + `watch_screen_discovery.dart` — المحرّك الرئيسي
+
+الشاشة الأكبر والأهم (~5700 سطر مجتمعتين) — آلة حالة كاملة لتشغيل
+الفيديو: تجربة سيرفرات/جودات متعددة، تبديل بين تشغيل native (ExoPlayer عبر
+`video_player`) وWebView، اكتشاف تلقائي لمصدر الفيديو من صفحة ويب بتتبّع
+طلبات شبكة داخل WebView، وتسجيل أحداث تشخيصية (`_slog` →
+`SessionLogService`) لكل خطوة. **متغيّرا حالة منفصلان لا يجب الخلط
+بينهما**: `_LoadState` (`loading`/`error`/`ready`، يتحكم بما يُعرض
+فعلياً) و`_WebSessionState` (أين وصلت خط أنابيب اكتشاف الويب، له 13 قيمة —
+`nativePlaying` قيمة نهائية حارسة: بمجرد نجاح ExoPlayer، أي منطق لاحق
+بدورة حياة WebView يجب يتحقق منها أولاً قبل أي تحديث حالة). التفاصيل
+الكاملة بـ`.claude/skills/stream-debug/references/state-machine.md`.
+
+### طبقة عزل استراتيجيات المشغّل (`lib/services/player_strategies/`)
+
+`PlayerStrategy` مجرَّدة + تحتها `GenericPlayerStrategy`/
+`VideoJsPlayerStrategy`/`JwPlayerStrategy` — كل نوع مشغّل ويب معروف
+(video.js، JWPlayer/vidmoly) له منطق تقييم/استبعاد مرشّحين معزول فيزيائياً
+عن الأنواع الأخرى، بدل صيغة تقييم مشتركة واحدة (`candidate_scoring.dart`)
+كان إصلاح خاص بموقع/مشغّل معيّن فيها يقدر يكسر مواقع أخرى بالخطأ (نمط
+تكرر 3 مرات فعلياً — راجع سجل #39/#40/#41 بـ`TECHNICAL.md`).
+`PlayerStrategyRegistry.select()` يختار حسب أعلام الاكتشاف الموجودة أصلاً.
+
+### خدمات أخرى مهمة بـ`lib/services/`
+
+- `stream_auth_service.dart` — يطلب جلسة بث من الووركر، يدعم شكل استجابة
+  متعدد السيرفرات/الجودات وشكل قديم مبسّط للتوافق الرجعي.
+- `channel_source_resolver.dart` / `api_source_resolver.dart` — حل مصدر
+  القناة (رابط مباشر مخزَّن أو مصدر API ديناميكي).
+- `candidate_scoring.dart` — الصيغة المشتركة الأساسية لتقييم/استبعاد
+  مرشّحي الفيديو المكتشَفين (`isNonMediaAsset` هو الاستبعاد الوحيد
+  الموثوق — لا تعتمد على النقاط النهائية وحدها، راجع الملاحظة بآخر
+  `TECHNICAL.md`).
+- `hls_cache_proxy.dart` — وكيل HLS محلي بحد أقصى 3 اتصالات متزامنة (يمنع
+  خوادم CDN المحمية من قطع الاتصال بسبب قصف طلبات متزامن) — **حسّاس
+  جداً لأي تعديل**، راجع تحذيرات آخر `TECHNICAL.md` قبل لمسه (تراجع كامل
+  مرة سابقاً بسبب تعليق تشغيل غير مختبَر).
+- `session_log_service.dart` — يجمع سجل تشخيص نصي زمني قابل للتصدير، أساس
+  كل تشخيص عن بعد بدون وصول فعلي لجهاز المستخدم.
+
+### مراجع أعمق
+
+- `TECHNICAL.md` — سجل مشاكل/حلول تراكمي (45+ حالة حقيقية موثّقة سطراً
+  بسطر) + نظرة عامة على المنظومة الثلاثية. أضف صفاً جديداً هنا لأي إصلاح
+  جوهري لاحق، ولا تُعِد تشخيص مشكلة موثّقة هنا من الصفر.
+- `افكار_مهمة.md` — أفكار معمارية نوقشت بعمق لتحسين الاستقرار/السرعة
+  (منفَّذ بعضها، والبعض مرفوض تقنياً مع سبب التحقّق الفعلي).
+
+---
+
 # دليل البناء المحلي (Windows) — sports_player
 
 > اقرأ هذا قبل أي طلب بناء APK لهذا المشروع. كل سطر هنا خرج من مشكلة
