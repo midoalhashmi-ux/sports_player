@@ -2830,7 +2830,25 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
                   );
                   return NavigationDecision.prevent;
                 }
-                if (!_isTrustedNavigationHost(requestHost)) {
+                // Confirmed regression by a real log (dororo/ristoanime.me):
+                // vidmoly.net immediately redirects its own embed page to
+                // vidmoly.biz — a same-service, different-TLD mirror, the
+                // exact first hop right after promotion, before this session
+                // has registered a single real candidate yet. That's normal,
+                // legitimate behavior for this class of site (mirrors rotate
+                // TLDs to dodge blocking) — blocking it here with nothing yet
+                // in _webCandidateRegistry to call it "trusted" left the page
+                // stuck re-polling the same dead candidate forever (confirmed
+                // in the log: 7+ IFRAME_POLL_CANDIDATE with zero progress).
+                // So only enforce the trusted-host allowlist once this
+                // session has actually registered real candidate traffic —
+                // every ad hijack confirmed so far (sw.muralssouth.shop,
+                // nfs.watchd.click, webls.net) happened well after that point
+                // (dozens of HLS_CANDIDATE_FROM_JS entries already logged),
+                // so this still catches all of them without blocking the
+                // very first, evidence-free redirect a legitimate mirror needs.
+                if (_webCandidateRegistry.isNotEmpty &&
+                    !_isTrustedNavigationHost(requestHost)) {
                   _slog(
                     'NAV_BLOCKED_UNTRUSTED_HOST',
                     'from=$originHost to=$requestHost promoted=true',
