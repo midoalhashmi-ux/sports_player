@@ -1938,9 +1938,19 @@ class _WatchScreenState extends State<WatchScreen>
     } catch (_) {}
   }
 
+  // لا نتوقف على _webWasPlayingBeforeBackground قبل المحاولة — علمها غير
+  // موثوق أصلاً بنفس عيب _pauseWebPlayback أعلاه: كلاهما querySelectorAll
+  // على الوثيقة الرئيسية فقط، ولا يصلان لعنصر <video> داخل iframe من أصل
+  // مختلف (الحالة الشائعة فعلياً: vidmoly/JWPlayer المُرقَّى كوثيقة رئيسية
+  // نفسه غالباً نفس الأصل، لكن بعض المزوّدين يُبقونه بداخل iframe متداخل).
+  // لو الفيديو كان يشتغل فعلاً بداخل iframe كذا، _pauseWebPlayback لم
+  // يلمسه أصلاً (فما احتاج استئناف)، لكن نظام أندرويد نفسه (لا كودنا) قد
+  // يُعلّق WebView بالكامل عند قفل الشاشة — الاستدعاء هنا لا يضر بأي حال
+  // (فحص v.paused قبل play() آمن حتى لو لم يكن متوقفاً أصلاً)، فلا داعي
+  // لحارس قد يمنع محاولة استئناف حقيقية.
   Future<void> _resumeWebPlayback() async {
     final controller = _webController;
-    if (controller == null || !_webWasPlayingBeforeBackground) return;
+    if (controller == null) return;
     _webWasPlayingBeforeBackground = false;
     try {
       await controller.runJavaScript(r'''(() => {
@@ -1949,6 +1959,43 @@ class _WatchScreenState extends State<WatchScreen>
         });
       })();''');
     } catch (_) {}
+  }
+
+  // مؤكَّد من المستخدم فعلياً: تشغيل ويب كان يعمل، قفل الشاشة بزر الباور
+  // ثم فتحها ترك الجلسة معلَّقة تماماً — لا استئناف تلقائي، ولا حتى إعادة
+  // تشغيل الصفحة من الصفر تنجح. _resumeWebPlayback أعلاه (استدعاء JS
+  // play() فقط) لا يكفي لو نظام أندرويد نفسه علَّق محرّك الرسم/الجافاسكربت
+  // الداخلي لـWebView بالكامل أثناء قفل الشاشة (سلوك معروف لبعض إصدارات
+  // أندرويد عند تعليق طويل نسبياً) — عندها لا يوجد أي استدعاء JS من جهتنا
+  // يقدر "يوقظه" لأن حلقة الأحداث نفسها متجمّدة. الحل: مراقب قصير بعد أي
+  // استئناف فعلي لجلسة ويب — لو لم يتحرّك أي دليل شبكي حقيقي خلال مهلة
+  // معقولة (يعني الصفحة فعلاً عالقة، لا مجرد استئناف بطيء)، نعيد فتح نفس
+  // المصدر من الصفر (نفس مسار "تبديل سيرفر تلقائي" الموجود أصلاً) بدل ترك
+  // المستخدم عالقاً للأبد على صفحة ميتة.
+  Timer? _webResumeStallWatchdog;
+  void _armWebResumeStallWatchdog() {
+    _webResumeStallWatchdog?.cancel();
+    final hitsAtResume = _webMediaResourceHits;
+    final urlAtResume = _webOriginalUrl;
+    final generationAtResume = _webSessionGeneration;
+    _webResumeStallWatchdog = Timer(const Duration(seconds: 7), () {
+      if (!mounted ||
+          !_isWebSource ||
+          _webSessionState == _WebSessionState.nativePlaying ||
+          _webSessionGeneration != generationAtResume ||
+          urlAtResume == null) {
+        return;
+      }
+      if (_webMediaResourceHits > hitsAtResume) {
+        // فعلاً استأنف — دليل شبكي جديد تحرّك خلال المهلة.
+        return;
+      }
+      _slog(
+        'WEB_RESUME_STALLED',
+        'noNetworkActivityFor=7s hitsAtResume=$hitsAtResume — reopening web source fresh',
+      );
+      unawaited(_openWebSource(urlAtResume, server: _activeServer));
+    });
   }
 
   @override
@@ -1972,7 +2019,10 @@ class _WatchScreenState extends State<WatchScreen>
           _wasPlayingBeforeBackground = false;
           controller.play();
         }
-        if (_isWebSource) unawaited(_resumeWebPlayback());
+        if (_isWebSource) {
+          unawaited(_resumeWebPlayback());
+          _armWebResumeStallWatchdog();
+        }
         break;
     }
   }
@@ -1996,6 +2046,7 @@ class _WatchScreenState extends State<WatchScreen>
     _stallNudgeTimer?.cancel();
     _stallGiveUpTimer?.cancel();
     _nativeReconnectTimer?.cancel();
+    _webResumeStallWatchdog?.cancel();
     _controller?.removeListener(_videoListener);
     WakelockPlus.disable();
     _controller?.dispose();

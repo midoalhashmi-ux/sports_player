@@ -2909,6 +2909,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
             if ((_webVidmolyPlayerMode || _webVideoJsPlayerMode) &&
                 _shouldShowWebPage) {
               _setWebSessionState(_WebSessionState.webReady);
+              // نفس إصلاح _revealVidmolyPlayer/_revealVideoJsPlayer (سجل
+              // #44) — نسخة ثالثة من نفس منطق "إظهار WebView جاهزاً" فاتها
+              // نفس الإصلاح: بدون _webPlaybackReady=true هنا، أي محاولة
+              // تشغيل أصلي لاحقة (مرشّح HLS يُكتشَف بعدها بثوانٍ عبر حلقة
+              // الاكتشاف العادية — "الناجح trial يُتخطّى" بالتعليق تحت غير
+              // صحيح فعلياً، يحصل كثيراً) تفرض _state=loading من جديد عبر
+              // حارس _playServerQuality (`!(fallbackToWeb && _webPlaybackReady)`)
+              // فتغطي شاشة تحميل فيديو WebView الشغّال فعلاً تحتها لحظياً —
+              // مؤكَّد بسجلات فعلية متعددة (native trial يفشل بعد 9 ثوانٍ
+              // متكررة بينما segmentEvidence=true مستمر طوال الوقت).
+              _webPlaybackReady = true;
               setState(() {
                 _state = _LoadState.ready;
                 _isWebSource = true;
