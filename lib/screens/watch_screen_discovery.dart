@@ -720,7 +720,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
              // روبوتاً") — لا يتعارض مع humanChallenge() لأن هذا الأخير يفحص
              // أولاً وجود ودجت كابتشا حقيقي (Cloudflare/hCaptcha/reCAPTCHA)
              // ويستثنيه قبل ما توصل هذي القائمة أصلاً.
-             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق|روبوت|لست إنسان|لست انسان|التحقق الأمني)/i.test(text);
+             // "انقر للمزيد للمتابعة"/"انتباه" — إعلان مقلَّد بشكل نافذة نظام
+             // (سكرين شوت فعلي من المستخدم: عنوان "انتباه" + زر "أكثر"/"إغلاق")
+             // فوق مشغّل vidtube/JWPlayer. "انتباه" وحدها آمنة هنا لأنها لا
+             // تصل هذا الفحص أصلاً إلا على عنصر مطابق مسبقاً لمحدِّد
+             // popup/dialog أو بفحص الحجم/الموضع الديناميكي (راجع
+             // hideUnsafePrompts أدناه) — لا فحص عام على كل نص الصفحة.
+             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق|روبوت|لست إنسان|لست انسان|التحقق الأمني|انتباه|انقر للمزيد|للمتابعة)/i.test(text);
            } catch (_) { return false; }
          };
          const adLike = (el) => {
@@ -741,9 +747,27 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
          const hideUnsafePrompts = () => {
            try {
              document.querySelectorAll('form,input,button,a,[role="dialog"],[class*="popup" i],[id*="popup" i],[class*="advert" i],[id*="advert" i]').forEach((el) => {
-               if (playerLike(el)) return;
                 if (humanChallenge(el) || (el.closest && humanChallenge(el.closest('form,[role="dialog"],body')))) return;
-               if (sensitivePrompt(el) || adLike(el)) neutralize(el);
+               // مؤكَّد بسكرين شوت فعلي من المستخدم: إعلان مقلَّد بشكل نافذة
+               // نظام ("انتباه"/"انقر للمزيد للمتابعة") يُحقَن غالباً **داخل**
+               // حاوية المشغّل نفسها (.jwplayer/.jw-wrapper) — playerLike()
+               // كان يستثنيه بالكامل قبل ما يوصل فحص sensitivePrompt أصلاً
+               // (الاستثناء موجود لحماية أزرار تحكّم حقيقية، لا إعلانات
+               // مقحَمة بداخل نفس الحاوية). الحل: افحص محتوى نص العنصر (أو
+               // أقرب حاوية تشبه نافذة/مربع حوار له) بغض النظر عن كونه داخل
+               // مشغّل أو لا — قائمة الكلمات محدَّدة بدقة كافية (لن تطابق
+               // أزرار تحكّم حقيقية)، وتبقى محمية بحارس humanChallenge أعلاه
+               // لأي كابتشا حقيقي. عنصر adLike() العام (حجم/موضع فقط، بلا
+               // كلمة مفتاحية) يبقى مستثنى من داخل المشغّل كما كان — خطر
+               // إيجابيات كاذبة أعلى (قائمة جودة حقيقية مثلاً).
+               const dialogContainer = (el.closest &&
+                 el.closest('[role="dialog"],[class*="modal" i],[class*="dialog" i],[class*="alert" i]')) || el;
+               if (sensitivePrompt(el) || sensitivePrompt(dialogContainer)) {
+                 neutralize(dialogContainer);
+                 return;
+               }
+               if (playerLike(el)) return;
+               if (adLike(el)) neutralize(el);
              });
              // طبقة ثانية ديناميكية بدون أي كلمة مفتاحية أو اسم كلاس: أي عنصر
              // مُلحَق مباشرة بـ<body> (نمط شبه ثابت لتراكبات الإعلانات
