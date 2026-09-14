@@ -709,7 +709,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
          const sensitivePrompt = (el) => {
            try {
              const text = `${el && el.innerText || ''} ${el && el.textContent || ''} ${el && el.getAttribute && el.getAttribute('placeholder') || ''} ${el && el.getAttribute && el.getAttribute('name') || ''} ${el && el.getAttribute && el.getAttribute('autocomplete') || ''}`.toLowerCase();
-             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق)/i.test(text);
+             // "روبوت" يغطي إعلانات مقلَّدة بشكل كابتشا عربية ("تأكد أنك لست
+             // روبوتاً") — لا يتعارض مع humanChallenge() لأن هذا الأخير يفحص
+             // أولاً وجود ودجت كابتشا حقيقي (Cloudflare/hCaptcha/reCAPTCHA)
+             // ويستثنيه قبل ما توصل هذي القائمة أصلاً.
+             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق|روبوت|لست إنسان|لست انسان|التحقق الأمني)/i.test(text);
            } catch (_) { return false; }
          };
          const adLike = (el) => {
@@ -722,17 +726,39 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
                (style.position === 'fixed' && r.width >= innerWidth * 0.55 && r.height >= innerHeight * 0.25);
            } catch (_) { return false; }
          };
+         const neutralize = (el) => {
+           el.setAttribute('data-sports-player-blocked-ad','1');
+           el.style.setProperty('display','none','important');
+           el.style.setProperty('pointer-events','none','important');
+         };
          const hideUnsafePrompts = () => {
            try {
              document.querySelectorAll('form,input,button,a,[role="dialog"],[class*="popup" i],[id*="popup" i],[class*="advert" i],[id*="advert" i]').forEach((el) => {
                if (playerLike(el)) return;
                 if (humanChallenge(el) || (el.closest && humanChallenge(el.closest('form,[role="dialog"],body')))) return;
-               if (sensitivePrompt(el) || adLike(el)) {
-                 el.setAttribute('data-sports-player-blocked-ad','1');
-                 el.style.setProperty('display','none','important');
-                 el.style.setProperty('pointer-events','none','important');
-               }
+               if (sensitivePrompt(el) || adLike(el)) neutralize(el);
              });
+             // طبقة ثانية ديناميكية بدون أي كلمة مفتاحية أو اسم كلاس: أي عنصر
+             // مُلحَق مباشرة بـ<body> (نمط شبه ثابت لتراكبات الإعلانات
+             // المزيّفة أياً كان اسم كلاسها/لغتها) يغطي مساحة كبيرة وثابتة من
+             // الشاشة — تكتشفه adLike() فعلاً بفحص الحجم/الموضع، لكنها ما
+             // كانت تُستدعى إلا على العناصر المحصورة بالسطر أعلاه. هذا يسد
+             // الثغرة لأي تصميم إعلان جديد مستقبلاً دون تدخل يدوي.
+             if (document.body) {
+               Array.from(document.body.children).forEach((el) => {
+                 if (el.hasAttribute && el.hasAttribute('data-sports-player-blocked-ad')) return;
+                 if (playerLike(el)) return;
+                 // playerLike() فقط يفحص الأسلاف (closest) — عنصر غلاف كامل
+                 // الشاشة (position:fixed) قد يحتوي المشغّل الحقيقي كسليل
+                 // بدل ما يكون هو نفسه المشغّل (تصميم شائع لمواقع مخصّصة
+                 // للفيديو). لازم نفحص أيضاً وجود مشغّل بداخله قبل إخفائه —
+                 // نفس نمط الفحص المزدوج (نفسه + أسلافه) المستخدَم أصلاً
+                 // بـhumanChallenge().
+                 if (el.querySelector && el.querySelector('video, audio, iframe, .video-js, .jwplayer, .jw-wrapper, .plyr, [class*="player" i], [id*="player" i]')) return;
+                 if (humanChallenge(el)) return;
+                 if (adLike(el)) neutralize(el);
+               });
+             }
            } catch (_) {}
          };
         const report = (payload) => {
@@ -883,7 +909,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
               const st = getComputedStyle(f);
               if (r.width < 180 || r.height < 100 || st.display === 'none' || st.visibility === 'hidden') return;
               const text = `${src} ${f.id || ''} ${f.className || ''}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
+            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) {
+              // معروف كإعلان — كان يُتجاهَل فقط من ترشيح المشغّل بدون تحييده
+              // فعلياً، فيبقى ظاهراً تفاعلياً (يقدر يعرض أي محتوى بما فيه
+              // تراكب كابتشا مزيّف). حيّده فعلياً بدل تجاهله فقط.
+              try { f.style.setProperty('display','none','important'); f.style.setProperty('pointer-events','none','important'); } catch (_) {}
+              return;
+            }
               let score = 10;
               if (r.width >= 320 && r.height >= 180) score += 25;
               else if (r.width >= 250 && r.height >= 140) score += 15;
