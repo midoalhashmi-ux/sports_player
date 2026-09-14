@@ -1402,6 +1402,16 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           headers['origin'] = pageOrigin;
           headers['referer'] = '$pageOrigin/';
         }
+        // _headers الأساسي (watch_screen.dart) يضبط 'sec-fetch-site' ثابتاً
+        // على 'same-origin' دائماً — قيمة خاطئة بالضبط لنفس هذا المسار
+        // (مرشّح CDN منفصل تماماً عن صفحة التضمين، وهذا سبب وجود فحص
+        // sameOrigin أعلاه أصلاً لـorigin/referer). متصفح حقيقي يرسل
+        // 'cross-site' هنا؛ قيمة ثابتة خاطئة تتناقض مع Origin/Referer
+        // المرسَلين بنفس الطلب — نمط كشف بوتات معروف (فحص تطابق
+        // Sec-Fetch-Site مع Origin الفعلي). لم يُختبَر بسجل بعد أن هذا هو
+        // سبب رفض CDN تحديداً — تصحيح منطقي مبني على قراءة الكود، صفر
+        // مخاطرة (تصحيح قيمة خاطئة أصلاً، لا تغيير بتوقيت/تزامن الجلب).
+        headers['sec-fetch-site'] = 'cross-site';
       }
     }
 
