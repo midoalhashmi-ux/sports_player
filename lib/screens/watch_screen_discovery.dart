@@ -130,6 +130,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   String? _webLastPromotedIframeUrl;
   int _webMediaEvidenceScore = 0;
   int _webMediaResourceHits = 0;
+  // آخر لحظة زاد فيها هذا العدّاد فعلياً — تشخيص فقط: يسمح لوكيل الـHLS
+  // (hls_cache_proxy) يسجّل هل WebView كان نشطاً شبكياً (يجلب نفس المصدر)
+  // بنفس لحظة فشل جلب شريحتنا بالضبط، بدل مقارنة يدوية للطوابع الزمنية
+  // بين سجلَّين منفصلين لاحقاً.
+  DateTime? _lastWebMediaResourceHitAt;
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
@@ -457,6 +462,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     }
     if (type == 'media_resource') {
       _webMediaResourceHits++;
+      _lastWebMediaResourceHitAt = DateTime.now();
       final rawResourceUrl = decoded['url']?.toString() ?? '';
       final resourceUrl = rawResourceUrl.toLowerCase();
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
@@ -530,6 +536,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         if (playing) _webRealPlaybackConfirmed = true;
         _webMediaEvidenceScore = (_webMediaEvidenceScore + 25).clamp(0, 100).toInt();
         _webMediaResourceHits = (_webMediaResourceHits + 1).clamp(0, 1000);
+        _lastWebMediaResourceHitAt = DateTime.now();
         _extendWebStartupDeadline(const Duration(seconds: 8));
         if (playing || currentTime > 0.15) {
           _smartLog(
@@ -709,7 +716,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
          const sensitivePrompt = (el) => {
            try {
              const text = `${el && el.innerText || ''} ${el && el.textContent || ''} ${el && el.getAttribute && el.getAttribute('placeholder') || ''} ${el && el.getAttribute && el.getAttribute('name') || ''} ${el && el.getAttribute && el.getAttribute('autocomplete') || ''}`.toLowerCase();
-             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق)/i.test(text);
+             // "روبوت" يغطي إعلانات مقلَّدة بشكل كابتشا عربية ("تأكد أنك لست
+             // روبوتاً") — لا يتعارض مع humanChallenge() لأن هذا الأخير يفحص
+             // أولاً وجود ودجت كابتشا حقيقي (Cloudflare/hCaptcha/reCAPTCHA)
+             // ويستثنيه قبل ما توصل هذي القائمة أصلاً.
+             // "انقر للمزيد للمتابعة"/"انتباه" — إعلان مقلَّد بشكل نافذة نظام
+             // (سكرين شوت فعلي من المستخدم: عنوان "انتباه" + زر "أكثر"/"إغلاق")
+             // فوق مشغّل vidtube/JWPlayer. "انتباه" وحدها آمنة هنا لأنها لا
+             // تصل هذا الفحص أصلاً إلا على عنصر مطابق مسبقاً لمحدِّد
+             // popup/dialog أو بفحص الحجم/الموضع الديناميكي (راجع
+             // hideUnsafePrompts أدناه) — لا فحص عام على كل نص الصفحة.
+             return /(otp|one[- ]?time|verification|verify|passcode|pin|sms|phone|mobile|رقم الهاتف|رمز|رسالة نصية|اشتراك|subscribe|subscription|install app|تنزيل التطبيق|روبوت|لست إنسان|لست انسان|التحقق الأمني|انتباه|انقر للمزيد|للمتابعة)/i.test(text);
            } catch (_) { return false; }
          };
          const adLike = (el) => {
@@ -722,17 +739,57 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
                (style.position === 'fixed' && r.width >= innerWidth * 0.55 && r.height >= innerHeight * 0.25);
            } catch (_) { return false; }
          };
+         const neutralize = (el) => {
+           el.setAttribute('data-sports-player-blocked-ad','1');
+           el.style.setProperty('display','none','important');
+           el.style.setProperty('pointer-events','none','important');
+         };
          const hideUnsafePrompts = () => {
            try {
              document.querySelectorAll('form,input,button,a,[role="dialog"],[class*="popup" i],[id*="popup" i],[class*="advert" i],[id*="advert" i]').forEach((el) => {
-               if (playerLike(el)) return;
                 if (humanChallenge(el) || (el.closest && humanChallenge(el.closest('form,[role="dialog"],body')))) return;
-               if (sensitivePrompt(el) || adLike(el)) {
-                 el.setAttribute('data-sports-player-blocked-ad','1');
-                 el.style.setProperty('display','none','important');
-                 el.style.setProperty('pointer-events','none','important');
+               // مؤكَّد بسكرين شوت فعلي من المستخدم: إعلان مقلَّد بشكل نافذة
+               // نظام ("انتباه"/"انقر للمزيد للمتابعة") يُحقَن غالباً **داخل**
+               // حاوية المشغّل نفسها (.jwplayer/.jw-wrapper) — playerLike()
+               // كان يستثنيه بالكامل قبل ما يوصل فحص sensitivePrompt أصلاً
+               // (الاستثناء موجود لحماية أزرار تحكّم حقيقية، لا إعلانات
+               // مقحَمة بداخل نفس الحاوية). الحل: افحص محتوى نص العنصر (أو
+               // أقرب حاوية تشبه نافذة/مربع حوار له) بغض النظر عن كونه داخل
+               // مشغّل أو لا — قائمة الكلمات محدَّدة بدقة كافية (لن تطابق
+               // أزرار تحكّم حقيقية)، وتبقى محمية بحارس humanChallenge أعلاه
+               // لأي كابتشا حقيقي. عنصر adLike() العام (حجم/موضع فقط، بلا
+               // كلمة مفتاحية) يبقى مستثنى من داخل المشغّل كما كان — خطر
+               // إيجابيات كاذبة أعلى (قائمة جودة حقيقية مثلاً).
+               const dialogContainer = (el.closest &&
+                 el.closest('[role="dialog"],[class*="modal" i],[class*="dialog" i],[class*="alert" i]')) || el;
+               if (sensitivePrompt(el) || sensitivePrompt(dialogContainer)) {
+                 neutralize(dialogContainer);
+                 return;
                }
+               if (playerLike(el)) return;
+               if (adLike(el)) neutralize(el);
              });
+             // طبقة ثانية ديناميكية بدون أي كلمة مفتاحية أو اسم كلاس: أي عنصر
+             // مُلحَق مباشرة بـ<body> (نمط شبه ثابت لتراكبات الإعلانات
+             // المزيّفة أياً كان اسم كلاسها/لغتها) يغطي مساحة كبيرة وثابتة من
+             // الشاشة — تكتشفه adLike() فعلاً بفحص الحجم/الموضع، لكنها ما
+             // كانت تُستدعى إلا على العناصر المحصورة بالسطر أعلاه. هذا يسد
+             // الثغرة لأي تصميم إعلان جديد مستقبلاً دون تدخل يدوي.
+             if (document.body) {
+               Array.from(document.body.children).forEach((el) => {
+                 if (el.hasAttribute && el.hasAttribute('data-sports-player-blocked-ad')) return;
+                 if (playerLike(el)) return;
+                 // playerLike() فقط يفحص الأسلاف (closest) — عنصر غلاف كامل
+                 // الشاشة (position:fixed) قد يحتوي المشغّل الحقيقي كسليل
+                 // بدل ما يكون هو نفسه المشغّل (تصميم شائع لمواقع مخصّصة
+                 // للفيديو). لازم نفحص أيضاً وجود مشغّل بداخله قبل إخفائه —
+                 // نفس نمط الفحص المزدوج (نفسه + أسلافه) المستخدَم أصلاً
+                 // بـhumanChallenge().
+                 if (el.querySelector && el.querySelector('video, audio, iframe, .video-js, .jwplayer, .jw-wrapper, .plyr, [class*="player" i], [id*="player" i]')) return;
+                 if (humanChallenge(el)) return;
+                 if (adLike(el)) neutralize(el);
+               });
+             }
            } catch (_) {}
          };
         const report = (payload) => {
@@ -883,7 +940,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
               const st = getComputedStyle(f);
               if (r.width < 180 || r.height < 100 || st.display === 'none' || st.visibility === 'hidden') return;
               const text = `${src} ${f.id || ''} ${f.className || ''}`.toLowerCase();
-            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) return;
+            if (/(doubleclick|googlesyndication|adservice|adnxs|adsco\.re|betteradsystem|vacantazon|scogienaira|backsetaspises|taghas|inboxdollars|moolahsyangtze|wvdme|rtmark|ay267|adexchangerapid|adminmr|realmoneycasino|mormors|popads|popcash|propellerads|exoclick|juicyads|trafficjunky|adsterra|popup|popunder|clickunder|interstitial)/i.test(text)) {
+              // معروف كإعلان — كان يُتجاهَل فقط من ترشيح المشغّل بدون تحييده
+              // فعلياً، فيبقى ظاهراً تفاعلياً (يقدر يعرض أي محتوى بما فيه
+              // تراكب كابتشا مزيّف). حيّده فعلياً بدل تجاهله فقط.
+              try { f.style.setProperty('display','none','important'); f.style.setProperty('pointer-events','none','important'); } catch (_) {}
+              return;
+            }
               let score = 10;
               if (r.width >= 320 && r.height >= 180) score += 25;
               else if (r.width >= 250 && r.height >= 140) score += 15;
@@ -1370,6 +1433,16 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           headers['origin'] = pageOrigin;
           headers['referer'] = '$pageOrigin/';
         }
+        // _headers الأساسي (watch_screen.dart) يضبط 'sec-fetch-site' ثابتاً
+        // على 'same-origin' دائماً — قيمة خاطئة بالضبط لنفس هذا المسار
+        // (مرشّح CDN منفصل تماماً عن صفحة التضمين، وهذا سبب وجود فحص
+        // sameOrigin أعلاه أصلاً لـorigin/referer). متصفح حقيقي يرسل
+        // 'cross-site' هنا؛ قيمة ثابتة خاطئة تتناقض مع Origin/Referer
+        // المرسَلين بنفس الطلب — نمط كشف بوتات معروف (فحص تطابق
+        // Sec-Fetch-Site مع Origin الفعلي). لم يُختبَر بسجل بعد أن هذا هو
+        // سبب رفض CDN تحديداً — تصحيح منطقي مبني على قراءة الكود، صفر
+        // مخاطرة (تصحيح قيمة خاطئة أصلاً، لا تغيير بتوقيت/تزامن الجلب).
+        headers['sec-fetch-site'] = 'cross-site';
       }
     }
 

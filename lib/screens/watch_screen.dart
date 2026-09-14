@@ -365,7 +365,13 @@ class _WatchScreenState extends State<WatchScreen>
   @override
   void initState() {
     super.initState();
-    _hlsCacheProxy = HlsCacheProxy(onLog: _slog);
+    _hlsCacheProxy = HlsCacheProxy(
+      onLog: _slog,
+      isWebViewActiveNearby: () =>
+          _lastWebMediaResourceHitAt != null &&
+          DateTime.now().difference(_lastWebMediaResourceHitAt!) <
+              const Duration(seconds: 3),
+    );
     SessionLogService.instance.startSession(
       'channelId=${widget.channelId} externalUrl=${widget.externalUrl}',
     );
@@ -1232,16 +1238,21 @@ class _WatchScreenState extends State<WatchScreen>
       // بلا نجاح ولا فشل مسجَّل لأكثر من 40 ثانية (بلا هذا الحد). أي تعليق
       // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال مهلة محدودة، فيدخل بمسار
       // المعالجة/إعادة الاتصال الموجود بدل تعليق صامت غير مشخَّص.
-      // خُفِّضت من 15 إلى 9 ثوانٍ: سجلات تشخيص فعلية متعددة تُظهر أن أي
-      // تشغيل ناجح فعلياً يكتمل خلال 3-5 ثوانٍ كحد أقصى (مهما كان المصدر)،
-      // بينما مرشّح ميت فعلياً (اتصال CDN منقطع) كان يُهدر المهلة الكاملة
-      // 15 ثانية قبل الانتقال للمرشّح التالي — مع وجود مرشّحين محتملين أو
-      // أكثر بجلسة واحدة هذا يعني حتى 30 ثانية انتظار قبل ما يبدأ المسلسل،
-      // رغم إن كلا المرشّحين ميّتان فعلياً من ثوانيهما الأولى.
+      // خُفِّضت سابقاً من 15 إلى 9 ثوانٍ (افتراض وقتها: أي تشغيل ناجح
+      // فعلياً يكتمل خلال 3-5 ثوانٍ كحد أقصى) — **سجل تشخيص فعلي لاحق نقض
+      // هذا الافتراض**: تشغيل أنمي نجح فعلياً (`PLAY_SERVER_QUALITY_SUCCESS`)
+      // خلال 6.9 ثانية بالضبط، بلا أي خطأ اتصال (صفر
+      // `HLS_PROXY_SEGMENT_FETCH_ERROR` بكامل السجل) — كان بمجرد أبطأ قليلاً
+      // (شبكة/CDN) لسقط بحد الـ9 ثوانٍ رغم كونه اتصالاً سليماً تماماً، لا
+      // مرشّحاً ميتاً. هذا يفسّر بلاغ مستخدم مباشر: "المشغل الويب يعمل
+      // ولم يلتقطه مشغلي إلا متأخراً" — نجاح متأخر حقيقي كان يخاطر بالسقوط
+      // بالحد القديم. رُفعت لـ13 ثانية: هامش أوسع (~6 ثوانٍ فوق أبطأ نجاح
+      // حقيقي مسجَّل) بدل العودة الكاملة لـ15 (تفادياً لمشكلة "30 ثانية
+      // انتظار بمرشّحين ميّتين" الأصلية اللي بررت التخفيض لـ9 أصلاً).
       await newController.initialize().timeout(
-        const Duration(seconds: 9),
+        const Duration(seconds: 13),
         onTimeout: () => throw TimeoutException(
-            'native initialize() timed out after 9s — url=${_safeLogUrl(quality.url)}'),
+            'native initialize() timed out after 13s — url=${_safeLogUrl(quality.url)}'),
       );
       if (resumeFrom != null) {
         try {

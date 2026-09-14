@@ -24,11 +24,18 @@ import 'package:http/http.dart' as http;
 /// (راجع _playServerQuality) — أي تعليق الآن يتحوّل لفشل واضح خلال 15
 /// ثانية كحد أقصى، أياً كان السبب.
 class HlsCacheProxy {
-  HlsCacheProxy({this.onLog});
+  HlsCacheProxy({this.onLog, this.isWebViewActiveNearby});
 
   /// (tag, detail) — يُمرَّر لـ_slog بـwatch_screen لتظهر بسجل التشخيص
   /// الذي يصدّره المستخدم، بنفس تنسيق بقية أحداث المشغّل.
   final void Function(String tag, String detail)? onLog;
+
+  /// تشخيص فقط (لا يؤثر على أي منطق جلب/تزامن هنا): يرجع true لو WebView
+  /// جلب مورد شبكة فعلي خلال آخر ثوانٍ قليلة — يُستدعى فقط عند تسجيل خطأ
+  /// جلب، ليقول السجل مباشرة هل كان WebView نشطاً شبكياً بنفس لحظة فشل
+  /// جلبنا (فرضية: اتصالات وكيلنا + WebView المتزامنة قد تتجاوز حد تحمّل
+  /// الـCDN المنخفض أصلاً — راجع TECHNICAL.md #47).
+  final bool Function()? isWebViewActiveNearby;
 
   HttpServer? _server;
   http.Client? _client;
@@ -129,6 +136,11 @@ class HlsCacheProxy {
     await stop();
     try {
       _upstreamHeaders = headers;
+      // تشخيص فقط: أسماء الهيدرز الفعلية (لا قيمها — قد تحوي كوكيز/توكن
+      // جلسة الموقع) المُرسَلة لكل طلب قائمة/شريحة بهذي الجلسة، للمقارنة
+      // مع ما يرسله WebView نفسه (راجع مناقشة سبب فشل جلب الشرائح رغم
+      // نجاح WebView المتزامن لنفس الرابط بـTECHNICAL.md).
+      _log('HLS_PROXY_HEADERS', 'keys=${headers.keys.join(",")}');
       _client = http.Client();
       final server =
           await HttpServer.bind(InternetAddress.loopbackIPv4, 0, shared: false);
@@ -253,6 +265,7 @@ class HlsCacheProxy {
         if (generation != _proxyGeneration) break;
         final client = _client;
         if (client == null) break;
+        final attemptStopwatch = Stopwatch()..start();
         try {
           final resp = await client
               .get(baseUri, headers: _upstreamHeaders)
@@ -261,10 +274,11 @@ class HlsCacheProxy {
             body = resp.body;
           } else {
             _log('HLS_PROXY_PLAYLIST_HTTP_ERROR',
-                'attempt=$attempt status=${resp.statusCode}');
+                'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds}');
           }
         } catch (e) {
-          _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=$attempt error=$e');
+          _log('HLS_PROXY_PLAYLIST_FETCH_ERROR',
+              'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} error=$e');
         }
       }
     }
@@ -509,6 +523,11 @@ class HlsCacheProxy {
       if (generation != _proxyGeneration) return null;
       final client = _client;
       if (client == null) return null;
+      // elapsedMs تشخيص فقط (Stopwatch لا يغيّر أي توقيت/مهلة فعلية):
+      // فشل فوري (<500ms) يرجّح رفضاً نشطاً من الـCDN لهذا العميل تحديداً
+      // (بصمة/هيدرز/توقيع)، بينما اقتراب من حد الـ15 ثانية يرجّح تعليق
+      // شبكة فعلي — يفرّق بين فرضيتين مختلفتين تماماً بسطر سجل واحد.
+      final attemptStopwatch = Stopwatch()..start();
       try {
         final resp = await client
             .get(Uri.parse(url), headers: _upstreamHeaders)
@@ -517,9 +536,10 @@ class HlsCacheProxy {
           return resp.bodyBytes;
         }
         _log('HLS_PROXY_SEGMENT_HTTP_ERROR',
-            'attempt=$attempt status=${resp.statusCode}');
+            'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()}');
       } catch (e) {
-        _log('HLS_PROXY_SEGMENT_FETCH_ERROR', 'attempt=$attempt error=$e');
+        _log('HLS_PROXY_SEGMENT_FETCH_ERROR',
+            'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()} error=$e');
       }
     }
     return null;
