@@ -1173,9 +1173,6 @@ class _WatchScreenState extends State<WatchScreen>
       _activeServer = server;
       _activeQuality = quality;
     });
-    // أول رابط يُشغَّل لهذا المصدر هو "التلقائي" (القائمة الرئيسية) —
-    // نحفظه ليعود إليه المستخدم من زر الجودة بعد أي اختيار يدوي.
-    if (_manualQualityUrl == null) _activeQualityUrlForAuto = quality;
     try {
       // تبديل جودة/سيرفر يدوي أثناء تشغيل فعلي (مو أول محاولة قادمة من
       // WebView) يجب يكمل من نفس النقطة بدل ما يرجّع الفيديو لبدايته.
@@ -2555,131 +2552,54 @@ class _WatchScreenState extends State<WatchScreen>
   // تعديل ثانٍ: أُضيف نص (_loadingMessage نفسه المستخدَم بـ_buildLoading،
   // يتغيّر تلقائياً مع الوقت) — المؤشر الدائري وحده لم يكن كافياً ليشعر
   // المستخدم أن التشغيل على وشك البدء فعلاً.
-  /// الجودات المتاحة للمصدر الحالي (من القائمة الرئيسية التي مرّت بالوكيل)،
-  /// الأعلى أولاً — تُبنى منها أزرار الجودة. فارغة = المصدر بجودة واحدة
-  /// فلا يُعرض الزر أصلاً.
-  List<HlsVariant> _availableQualities = const <HlsVariant>[];
-
-  /// رابط الجودة المختارة يدوياً، أو null = تلقائي (يتكيّف ExoPlayer وحده
-  /// ضمن السقف الآمن).
-  String? _manualQualityUrl;
-
+  /// يغذّي قائمة الجودات الموجودة أصلاً (`_openQualitySheet`) بما اكتشفه
+  /// الوكيل داخل القائمة الرئيسية.
+  ///
+  /// **لا ننشئ قائمة موازية**: الورقة الحالية تتعامل أصلاً مع فرق
+  /// WebView/native وتبديل السيرفرات بمنطق ناضج — نحقن الجودات في
+  /// `_activeServer.qualities` فتظهر تلقائياً بقسم "الجودة" هناك.
+  /// الجودة الأولى تبقى "تلقائي" (القائمة الرئيسية = تكيّف ExoPlayer ضمن
+  /// السقف الآمن)، يليها كل الدرجات للاختيار اليدوي.
   void _onHlsVariantsDiscovered(List<HlsVariant> variants) {
     if (!mounted || variants.length < 2) return;
+    final server = _activeServer;
+    final current = _activeQuality;
+    if (server == null || current == null) return;
+    // سيرفر مُكتشَف تلقائياً فقط: جوداته روابط وسائط مُثبَتة، بينما سيرفر
+    // من لوحة التحكم قد تكون "جوداته" صفحات ويب لا يصح استبدالها.
+    if (server.label != _autoDiscoveredServerLabel) return;
+
     final sorted = [...variants]
       ..sort((a, b) => b.bandwidth.compareTo(a.bandwidth));
-    // مقارنة بالروابط: نفس القائمة تُبلَّغ مع كل تحديث للقائمة الرئيسية،
-    // فلا نعيد البناء بلا داعٍ.
-    final sameAsCurrent = _availableQualities.length == sorted.length &&
-        List.generate(sorted.length, (i) => sorted[i].url)
-            .every((url) => _availableQualities.any((q) => q.url == url));
-    if (sameAsCurrent) return;
+    final variantUrls = sorted.map((v) => v.url).toList();
+    final qualities = <StreamQuality>[
+      if (!variantUrls.contains(current.url))
+        StreamQuality(label: 'تلقائي', url: current.url),
+      for (final variant in sorted)
+        StreamQuality(label: variant.label, url: variant.url),
+    ];
+
+    // نفس القائمة تُبلَّغ مع كل تحديث للقائمة الرئيسية — لا نُعيد البناء
+    // بلا تغيير فعلي (وإلا دارت setState بلا نهاية).
+    final unchanged = server.qualities.length == qualities.length &&
+        List.generate(qualities.length, (i) => server.qualities[i].url)
+            .join('|') ==
+            qualities.map((q) => q.url).join('|');
+    if (unchanged) return;
+
     _slog('QUALITIES_AVAILABLE',
-        'count=${sorted.length} labels=${sorted.map((q) => q.label).join(",")}');
-    setState(() => _availableQualities = List<HlsVariant>.unmodifiable(sorted));
+        'count=${qualities.length} labels=${qualities.map((q) => q.label).join(",")}');
+    setState(() {
+      _activeServer =
+          StreamServerOption(label: server.label, qualities: qualities);
+    });
   }
-
-  /// يبدّل الجودة يدوياً مع استئناف نفس اللحظة — `_position` نتتبّعه بأنفسنا
-  /// فلا يضيع مكان المشاهدة بالتبديل.
-  Future<void> _switchQuality(HlsVariant? variant) async {
-    final server = _activeServer;
-    if (server == null) return;
-    final resumeAt = _position;
-    setState(() => _manualQualityUrl = variant?.url);
-    _slog('QUALITY_SWITCH_REQUESTED',
-        'label=${variant?.label ?? 'تلقائي'} resumeAt=$resumeAt');
-    final target = variant == null
-        ? _activeQualityUrlForAuto
-        : StreamQuality(label: variant.label, url: variant.url);
-    if (target == null) return;
-    await _playServerQuality(server, target);
-  }
-
-  /// الرابط الأصلي (القائمة الرئيسية) الذي يعيد الوضع التلقائي.
-  StreamQuality? _activeQualityUrlForAuto;
 
   Widget _buildQualityButton() {
     return _circleIconButton(
       icon: Icons.high_quality,
       tooltip: 'جودة الفيديو',
       onPressed: _openQualitySheet,
-    );
-  }
-
-  Future<void> _openQualitySheet() async {
-    final variants = _availableQualities;
-    if (variants.isEmpty) return;
-    await showModalBottomSheet<void>(
-      context: context,
-      backgroundColor: const Color(0xFF16181C),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Padding(
-              padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
-              child: Row(
-                children: [
-                  Icon(Icons.high_quality, color: Colors.white70, size: 20),
-                  SizedBox(width: 10),
-                  Text('جودة الفيديو',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600)),
-                ],
-              ),
-            ),
-            const Divider(height: 1, color: Colors.white12),
-            ListTile(
-              dense: true,
-              leading: Icon(Icons.auto_awesome,
-                  size: 20,
-                  color: _manualQualityUrl == null
-                      ? Colors.redAccent
-                      : Colors.white54),
-              title: const Text('تلقائي',
-                  style: TextStyle(color: Colors.white, fontSize: 14)),
-              subtitle: const Text('يتكيّف مع سرعة اتصالك',
-                  style: TextStyle(color: Colors.white38, fontSize: 11)),
-              trailing: _manualQualityUrl == null
-                  ? const Icon(Icons.check, color: Colors.redAccent, size: 18)
-                  : null,
-              onTap: () {
-                Navigator.of(sheetContext).pop();
-                _switchQuality(null);
-              },
-            ),
-            for (final variant in variants)
-              ListTile(
-                dense: true,
-                leading: Icon(Icons.hd,
-                    size: 20,
-                    color: _manualQualityUrl == variant.url
-                        ? Colors.redAccent
-                        : Colors.white54),
-                title: Text(variant.label,
-                    style: const TextStyle(color: Colors.white, fontSize: 14)),
-                subtitle: variant.bandwidth > 0
-                    ? Text('${(variant.bandwidth / 1000).round()} كيلوبت/ث',
-                        style: const TextStyle(
-                            color: Colors.white38, fontSize: 11))
-                    : null,
-                trailing: _manualQualityUrl == variant.url
-                    ? const Icon(Icons.check, color: Colors.redAccent, size: 18)
-                    : null,
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _switchQuality(variant);
-                },
-              ),
-            const SizedBox(height: 8),
-          ],
-        ),
-      ),
     );
   }
 
@@ -3000,7 +2920,8 @@ class _WatchScreenState extends State<WatchScreen>
                         : 'التبديل إلى الوضع الأفقي',
                     onPressed: _toggleOrientation,
                   ),
-                  if (_availableQualities.length >= 2 && !_isWebSource)
+                  if (!_isWebSource &&
+                      (_activeServer?.qualities.length ?? 0) >= 2)
                     _buildQualityButton(),
                   _circleIconButton(
                     icon: Icons.more_vert,
