@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import 'hls_variant_selector.dart';
+
 /// وكيل HLS محلي (127.0.0.1) يوضع بين المشغّل والمصدر الحقيقي — يجلب
 /// الشرائح القادمة مسبقاً ويعيد محاولة الفاشلة منها تلقائياً، لتفادي
 /// التقطيع الناتج عن `video_player` التي لا تعرض أي تحكم بحجم التخزين
@@ -24,15 +26,36 @@ import 'package:http/http.dart' as http;
 /// (راجع _playServerQuality) — أي تعليق الآن يتحوّل لفشل واضح خلال 15
 /// ثانية كحد أقصى، أياً كان السبب.
 class HlsCacheProxy {
-  HlsCacheProxy({this.onLog});
+  HlsCacheProxy({
+    this.onLog,
+    this.isWebViewActiveNearby,
+    this.onVariantsDiscovered,
+  });
 
   /// (tag, detail) — يُمرَّر لـ_slog بـwatch_screen لتظهر بسجل التشخيص
   /// الذي يصدّره المستخدم، بنفس تنسيق بقية أحداث المشغّل.
   final void Function(String tag, String detail)? onLog;
 
+  /// تشخيص فقط (لا يؤثر على أي منطق جلب/تزامن هنا): يرجع true لو WebView
+  /// جلب مورد شبكة فعلي خلال آخر ثوانٍ قليلة — يُستدعى فقط عند تسجيل خطأ
+  /// جلب، ليقول السجل مباشرة هل كان WebView نشطاً شبكياً بنفس لحظة فشل
+  /// جلبنا (فرضية: اتصالات وكيلنا + WebView المتزامنة قد تتجاوز حد تحمّل
+  /// الـCDN المنخفض أصلاً — راجع TECHNICAL.md #47).
+  final bool Function()? isWebViewActiveNearby;
+
+  /// يُبلَّغ بكل الجودات المكتشَفة داخل أي قائمة رئيسية تمر بالوكيل —
+  /// تُبنى منها أزرار الجودة بشاشة المشاهدة. يُستدعى بالجودات **كاملة**
+  /// (قبل تطبيق السقف) حتى يبقى للمستخدم خيار يدوي بكل الدرجات.
+  final void Function(List<HlsVariant> variants)? onVariantsDiscovered;
+
   HttpServer? _server;
   http.Client? _client;
   Map<String, String> _upstreamHeaders = const {};
+
+  /// مفاتيح الجودات التي أثبت مشغّل الموقع تشغيلها فعلاً بهذي الجلسة.
+  /// فارغة = سلوك قديم حرفياً بلا أي تعديل على القائمة (راجع
+  /// `_applyVariantCeiling`).
+  Set<String> _provenVariantKeys = const <String>{};
 
   final Map<String, List<int>> _segmentCache = <String, List<int>>{};
   final List<String> _segmentCacheOrder = <String>[];
@@ -124,11 +147,18 @@ class HlsCacheProxy {
   Future<Uri?> start({
     required String sourceUrl,
     required Map<String, String> headers,
+    Set<String> provenVariantKeys = const <String>{},
   }) async {
     if (!looksLikeHlsPlaylist(sourceUrl)) return null;
     await stop();
     try {
       _upstreamHeaders = headers;
+      _provenVariantKeys = provenVariantKeys;
+      // تشخيص فقط: أسماء الهيدرز الفعلية (لا قيمها — قد تحوي كوكيز/توكن
+      // جلسة الموقع) المُرسَلة لكل طلب قائمة/شريحة بهذي الجلسة، للمقارنة
+      // مع ما يرسله WebView نفسه (راجع مناقشة سبب فشل جلب الشرائح رغم
+      // نجاح WebView المتزامن لنفس الرابط بـTECHNICAL.md).
+      _log('HLS_PROXY_HEADERS', 'keys=${headers.keys.join(",")}');
       _client = http.Client();
       final server =
           await HttpServer.bind(InternetAddress.loopbackIPv4, 0, shared: false);
@@ -182,6 +212,7 @@ class HlsCacheProxy {
     _prefetchQueue.clear();
     _activePrefetches = 0;
     _sourceHasKnownEnd = false;
+    _provenVariantKeys = const <String>{};
     if (server != null) {
       try {
         await server.close(force: true);
@@ -253,6 +284,7 @@ class HlsCacheProxy {
         if (generation != _proxyGeneration) break;
         final client = _client;
         if (client == null) break;
+        final attemptStopwatch = Stopwatch()..start();
         try {
           final resp = await client
               .get(baseUri, headers: _upstreamHeaders)
@@ -261,10 +293,11 @@ class HlsCacheProxy {
             body = resp.body;
           } else {
             _log('HLS_PROXY_PLAYLIST_HTTP_ERROR',
-                'attempt=$attempt status=${resp.statusCode}');
+                'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds}');
           }
         } catch (e) {
-          _log('HLS_PROXY_PLAYLIST_FETCH_ERROR', 'attempt=$attempt error=$e');
+          _log('HLS_PROXY_PLAYLIST_FETCH_ERROR',
+              'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} error=$e');
         }
       }
     }
@@ -304,6 +337,9 @@ class HlsCacheProxy {
 
     // كل مجموعة: وسوم سبقت رابطاً + سطر الرابط نفسه (مُعاد كتابته مسبقاً).
     final blocks = <List<String>>[];
+    // الرابط **الأصلي** لكل مجموعة قبل تحويله لرابط الوكيل — مطلوب لفحص
+    // سقف الجودة أدناه (بعد `proxify` يصبح كل الروابط 127.0.0.1).
+    final blockUrls = <String?>[];
     var pending = <String>[];
     var sawSegmentUri = false;
     var sawPlaylistUri = false;
@@ -339,10 +375,12 @@ class HlsCacheProxy {
           }
           pending.add(proxify(resolved));
           blocks.add(pending);
+          blockUrls.add(resolved.toString());
           pending = <String>[];
         } catch (_) {
           pending.add(line);
           blocks.add(pending);
+          blockUrls.add(null);
           pending = <String>[];
         }
       }
@@ -360,10 +398,15 @@ class HlsCacheProxy {
       _log('HLS_SOURCE_CLASSIFIED',
           'hasEndlist=$hasEndlist prefetchAhead=${hasEndlist ? _prefetchAheadVod : _prefetchAheadLive}');
     }
-    final effectiveBlocks =
+    var effectiveBlocks =
         (isLiveMediaPlaylist && blocks.length > _liveEdgeMarginSegments + 2)
             ? blocks.sublist(0, blocks.length - _liveEdgeMarginSegments)
             : blocks;
+
+    // قائمة جودات رئيسية (روابطها قوائم فرعية لا شرائح): نطبّق سقف الجودة.
+    if (sawPlaylistUri && !sawSegmentUri) {
+      effectiveBlocks = _applyVariantCeiling(effectiveBlocks, blockUrls);
+    }
 
     final out = StringBuffer();
     for (final block in effectiveBlocks) {
@@ -390,6 +433,65 @@ class HlsCacheProxy {
       }
     }
     return out.toString();
+  }
+
+  /// يحذف الجودات الأثقل من القائمة الرئيسية قبل تسليمها لـExoPlayer.
+  ///
+  /// الترتيب وحده لا يكفي هنا: ExoPlayer يملك آلية تكيّف خاصة به، فيقدر
+  /// يبدأ بالأعلى (تقدير نطاق أوّلي متفائل) أو يصعد إليها بمنتصف التشغيل —
+  /// وكلاهما مرصود بسجلات فعلية (`_x/seg-1` بالبداية، و`_x/seg-83`
+  /// بالمنتصف بعد تشغيل ناجح). القرار نفسه معزول ومُختبَر بوحدة
+  /// `HlsVariantSelector` (راجع `test/hls_variant_selector_test.dart`).
+  ///
+  /// آمن بالكامل: لو رجعت الوحدة `null` (جودة واحدة، أو لا شيء يُحذف)
+  /// تُعاد المجموعات كما هي حرفياً بلا أي تعديل.
+  List<List<String>> _applyVariantCeiling(
+    List<List<String>> blocks,
+    List<String?> blockUrls,
+  ) {
+    final variants = <HlsVariant>[];
+    for (var i = 0; i < blocks.length && i < blockUrls.length; i++) {
+      final url = blockUrls[i];
+      if (url == null) continue;
+      final streamInf = blocks[i].firstWhere(
+        (line) => line.startsWith('#EXT-X-STREAM-INF'),
+        orElse: () => '',
+      );
+      if (streamInf.isEmpty) continue;
+      final bandwidth = int.tryParse(
+              RegExp(r'BANDWIDTH=(\d+)').firstMatch(streamInf)?.group(1) ?? '') ??
+          0;
+      final height =
+          RegExp(r'RESOLUTION=\d+x(\d+)').firstMatch(streamInf)?.group(1);
+      final label = height != null
+          ? '${height}p'
+          : (bandwidth > 0 ? '${(bandwidth / 1000).round()} كيلوبت/ث' : 'تلقائي');
+      variants.add(HlsVariant(bandwidth: bandwidth, label: label, url: url));
+    }
+    if (variants.length < 2) return blocks;
+
+    // نبلّغ بالقائمة **الكاملة** قبل السقف — أزرار الجودة بالواجهة يجب أن
+    // تعرض كل الدرجات، فالسقف تلقائي والمستخدم يبقى سيّد اختياره.
+    try {
+      onVariantsDiscovered?.call(List<HlsVariant>.unmodifiable(variants));
+    } catch (_) {}
+
+    final allowed = HlsVariantSelector.allowedUrls(
+      variants,
+      provenKeys: _provenVariantKeys,
+    );
+    if (allowed == null) return blocks;
+
+    final kept = <List<String>>[];
+    for (var i = 0; i < blocks.length; i++) {
+      final url = i < blockUrls.length ? blockUrls[i] : null;
+      // مجموعة بلا رابط (وسوم فقط) تبقى دائماً — لا نكسر بنية القائمة.
+      if (url == null || allowed.contains(url)) kept.add(blocks[i]);
+    }
+    if (kept.isEmpty) return blocks;
+    _log('HLS_VARIANT_CEILING',
+        'kept=${allowed.length}/${variants.length} proven=${_provenVariantKeys.length}');
+    return kept;
   }
 
   void _prefetchNearLiveEdge(List<String> sequence) {
@@ -445,7 +547,8 @@ class HlsCacheProxy {
   Future<void> _handleSegment(HttpRequest request, String originalUrl) async {
     var bytes = _segmentCache[originalUrl];
     if (bytes == null) {
-      bytes = await _fetchSegmentWithRetry(originalUrl);
+      _dropStalePrefetches(originalUrl);
+      bytes = await _fetchSegmentWithRetry(originalUrl, foreground: true);
       if (bytes != null) _cacheSegment(originalUrl, bytes);
     }
     // جسم فارغ (200 OK بلا بيانات) مصدر فعلي غير نظري — بعض خوادم CDN
@@ -488,7 +591,39 @@ class HlsCacheProxy {
     await request.response.close();
   }
 
-  Future<List<int>?> _fetchSegmentWithRetry(String url) async {
+  /// يُلغي الجلب المسبق الذي لم يعد له معنى بعد قفزة بالفيديو (seek).
+  ///
+  /// **سبب وجودها (مؤكَّد بسجل فعلي)**: عند التقديم لدقيقة 8، يطلب ExoPlayer
+  /// شريحة بعيدة، بينما طابور الجلب المسبق لا يزال مملوءاً بشرائح البداية
+  /// (`seg-2`, `seg-6`, `seg-7`, `seg-24`). تلك الشرائح الميتة كانت تحتجز
+  /// **كل** فتحات التزامن الثلاث بمهلة 15 ثانية × 3 محاولات = حتى 45 ثانية
+  /// لكل واحدة، فتتضوّر الشريحة التي يحتاجها المشغّل فعلاً الآن → تجمّد →
+  /// `Source error` → إعادة اتصال. راجع TECHNICAL.md #53.
+  void _dropStalePrefetches(String requestedUrl) {
+    if (_prefetchQueue.isEmpty) return;
+    final index = _segmentSequence.indexOf(requestedUrl);
+    if (index < 0) return;
+    final horizon = index + _prefetchAhead + 4;
+    final stale = _prefetchQueue
+        .where((url) {
+          final position = _segmentSequence.indexOf(url);
+          return position < index || position > horizon;
+        })
+        .toList();
+    if (stale.isEmpty) return;
+    for (final url in stale) {
+      _prefetchQueue.remove(url);
+      _prefetching.remove(url);
+    }
+    _log('HLS_PREFETCH_DROPPED_STALE',
+        'dropped=${stale.length} around=$index remaining=${_prefetchQueue.length}');
+  }
+
+  /// `foreground`: طلب يحتاجه المشغّل الآن (يحجب التشغيل) — يستحق مهلة
+  /// كاملة. الجلب المسبق بالخلفية يأخذ مهلة أقصر بكثير: تعليقه الطويل هو
+  /// ما كان يخنق فتحات التزامن ويجمّد المشاهدة.
+  Future<List<int>?> _fetchSegmentWithRetry(String url,
+      {bool foreground = false}) async {
     // ملتقَط الجيل *وليس* الـclient نفسه: قبل الإصلاح كان `client` يُلتقَط
     // مرة واحدة بأول السطر ويُعاد استخدامه بكل محاولات إعادة الجلب الثلاث
     // — لو `stop()` استُدعيت بينهما (تبديل المرشّح لرابط بث آخر أثناء نفس
@@ -502,24 +637,31 @@ class HlsCacheProxy {
     // فعلياً يُسرّع تحرّر فتحات الجلب المتوازي (`_maxConcurrentPrefetch`)
     // لصالح الجلسة الجديدة بدل حجزها بمحاولات ميتة.
     final generation = _proxyGeneration;
-    for (var attempt = 0; attempt < 3; attempt++) {
+    final maxAttempts = foreground ? 3 : 2;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         await Future.delayed(Duration(milliseconds: 200 * attempt * attempt));
       }
       if (generation != _proxyGeneration) return null;
       final client = _client;
       if (client == null) return null;
+      // elapsedMs تشخيص فقط (Stopwatch لا يغيّر أي توقيت/مهلة فعلية):
+      // فشل فوري (<500ms) يرجّح رفضاً نشطاً من الـCDN لهذا العميل تحديداً
+      // (بصمة/هيدرز/توقيع)، بينما اقتراب من حد الـ15 ثانية يرجّح تعليق
+      // شبكة فعلي — يفرّق بين فرضيتين مختلفتين تماماً بسطر سجل واحد.
+      final attemptStopwatch = Stopwatch()..start();
       try {
         final resp = await client
             .get(Uri.parse(url), headers: _upstreamHeaders)
-            .timeout(const Duration(seconds: 15));
+            .timeout(Duration(seconds: foreground ? 15 : 6));
         if (resp.statusCode >= 200 && resp.statusCode < 300) {
           return resp.bodyBytes;
         }
         _log('HLS_PROXY_SEGMENT_HTTP_ERROR',
-            'attempt=$attempt status=${resp.statusCode}');
+            'attempt=$attempt status=${resp.statusCode} elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()}');
       } catch (e) {
-        _log('HLS_PROXY_SEGMENT_FETCH_ERROR', 'attempt=$attempt error=$e');
+        _log('HLS_PROXY_SEGMENT_FETCH_ERROR',
+            'attempt=$attempt elapsedMs=${attemptStopwatch.elapsedMilliseconds} webViewActiveNearby=${isWebViewActiveNearby?.call()} error=$e');
       }
     }
     return null;
