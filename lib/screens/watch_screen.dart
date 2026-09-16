@@ -21,6 +21,7 @@ import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/hls_cache_proxy.dart';
+import '../services/hls_variant_selector.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_strategies/player_strategy.dart';
 import '../services/player_visibility_service.dart';
@@ -1216,6 +1217,10 @@ class _WatchScreenState extends State<WatchScreen>
         final proxied = await _hlsCacheProxy.start(
           sourceUrl: quality.url,
           headers: effectiveHeaders,
+          // الجودات التي أثبت مشغّل الموقع تشغيلها فعلاً بهذي الشبكة —
+          // الوكيل يحصر بها قائمة الجودات المسلَّمة لـExoPlayer فلا يبدأ
+          // بالأثقل ولا يصعد إليها بمنتصف التشغيل (TECHNICAL.md #50).
+          provenVariantKeys: _webProvenVariantKeys,
         );
         if (proxied != null) {
           playbackUri = proxied;

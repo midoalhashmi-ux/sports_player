@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:http/http.dart' as http;
 
+import 'hls_variant_selector.dart';
+
 /// وكيل HLS محلي (127.0.0.1) يوضع بين المشغّل والمصدر الحقيقي — يجلب
 /// الشرائح القادمة مسبقاً ويعيد محاولة الفاشلة منها تلقائياً، لتفادي
 /// التقطيع الناتج عن `video_player` التي لا تعرض أي تحكم بحجم التخزين
@@ -40,6 +42,11 @@ class HlsCacheProxy {
   HttpServer? _server;
   http.Client? _client;
   Map<String, String> _upstreamHeaders = const {};
+
+  /// مفاتيح الجودات التي أثبت مشغّل الموقع تشغيلها فعلاً بهذي الجلسة.
+  /// فارغة = سلوك قديم حرفياً بلا أي تعديل على القائمة (راجع
+  /// `_applyVariantCeiling`).
+  Set<String> _provenVariantKeys = const <String>{};
 
   final Map<String, List<int>> _segmentCache = <String, List<int>>{};
   final List<String> _segmentCacheOrder = <String>[];
@@ -131,11 +138,13 @@ class HlsCacheProxy {
   Future<Uri?> start({
     required String sourceUrl,
     required Map<String, String> headers,
+    Set<String> provenVariantKeys = const <String>{},
   }) async {
     if (!looksLikeHlsPlaylist(sourceUrl)) return null;
     await stop();
     try {
       _upstreamHeaders = headers;
+      _provenVariantKeys = provenVariantKeys;
       // تشخيص فقط: أسماء الهيدرز الفعلية (لا قيمها — قد تحوي كوكيز/توكن
       // جلسة الموقع) المُرسَلة لكل طلب قائمة/شريحة بهذي الجلسة، للمقارنة
       // مع ما يرسله WebView نفسه (راجع مناقشة سبب فشل جلب الشرائح رغم
@@ -194,6 +203,7 @@ class HlsCacheProxy {
     _prefetchQueue.clear();
     _activePrefetches = 0;
     _sourceHasKnownEnd = false;
+    _provenVariantKeys = const <String>{};
     if (server != null) {
       try {
         await server.close(force: true);
@@ -318,6 +328,9 @@ class HlsCacheProxy {
 
     // كل مجموعة: وسوم سبقت رابطاً + سطر الرابط نفسه (مُعاد كتابته مسبقاً).
     final blocks = <List<String>>[];
+    // الرابط **الأصلي** لكل مجموعة قبل تحويله لرابط الوكيل — مطلوب لفحص
+    // سقف الجودة أدناه (بعد `proxify` يصبح كل الروابط 127.0.0.1).
+    final blockUrls = <String?>[];
     var pending = <String>[];
     var sawSegmentUri = false;
     var sawPlaylistUri = false;
@@ -353,10 +366,12 @@ class HlsCacheProxy {
           }
           pending.add(proxify(resolved));
           blocks.add(pending);
+          blockUrls.add(resolved.toString());
           pending = <String>[];
         } catch (_) {
           pending.add(line);
           blocks.add(pending);
+          blockUrls.add(null);
           pending = <String>[];
         }
       }
@@ -374,10 +389,15 @@ class HlsCacheProxy {
       _log('HLS_SOURCE_CLASSIFIED',
           'hasEndlist=$hasEndlist prefetchAhead=${hasEndlist ? _prefetchAheadVod : _prefetchAheadLive}');
     }
-    final effectiveBlocks =
+    var effectiveBlocks =
         (isLiveMediaPlaylist && blocks.length > _liveEdgeMarginSegments + 2)
             ? blocks.sublist(0, blocks.length - _liveEdgeMarginSegments)
             : blocks;
+
+    // قائمة جودات رئيسية (روابطها قوائم فرعية لا شرائح): نطبّق سقف الجودة.
+    if (sawPlaylistUri && !sawSegmentUri) {
+      effectiveBlocks = _applyVariantCeiling(effectiveBlocks, blockUrls);
+    }
 
     final out = StringBuffer();
     for (final block in effectiveBlocks) {
@@ -404,6 +424,54 @@ class HlsCacheProxy {
       }
     }
     return out.toString();
+  }
+
+  /// يحذف الجودات الأثقل من القائمة الرئيسية قبل تسليمها لـExoPlayer.
+  ///
+  /// الترتيب وحده لا يكفي هنا: ExoPlayer يملك آلية تكيّف خاصة به، فيقدر
+  /// يبدأ بالأعلى (تقدير نطاق أوّلي متفائل) أو يصعد إليها بمنتصف التشغيل —
+  /// وكلاهما مرصود بسجلات فعلية (`_x/seg-1` بالبداية، و`_x/seg-83`
+  /// بالمنتصف بعد تشغيل ناجح). القرار نفسه معزول ومُختبَر بوحدة
+  /// `HlsVariantSelector` (راجع `test/hls_variant_selector_test.dart`).
+  ///
+  /// آمن بالكامل: لو رجعت الوحدة `null` (جودة واحدة، أو لا شيء يُحذف)
+  /// تُعاد المجموعات كما هي حرفياً بلا أي تعديل.
+  List<List<String>> _applyVariantCeiling(
+    List<List<String>> blocks,
+    List<String?> blockUrls,
+  ) {
+    final variants = <HlsVariant>[];
+    for (var i = 0; i < blocks.length && i < blockUrls.length; i++) {
+      final url = blockUrls[i];
+      if (url == null) continue;
+      final streamInf = blocks[i].firstWhere(
+        (line) => line.startsWith('#EXT-X-STREAM-INF'),
+        orElse: () => '',
+      );
+      if (streamInf.isEmpty) continue;
+      final bandwidth = int.tryParse(
+              RegExp(r'BANDWIDTH=(\d+)').firstMatch(streamInf)?.group(1) ?? '') ??
+          0;
+      variants.add(HlsVariant(bandwidth: bandwidth, label: '', url: url));
+    }
+    if (variants.length < 2) return blocks;
+
+    final allowed = HlsVariantSelector.allowedUrls(
+      variants,
+      provenKeys: _provenVariantKeys,
+    );
+    if (allowed == null) return blocks;
+
+    final kept = <List<String>>[];
+    for (var i = 0; i < blocks.length; i++) {
+      final url = i < blockUrls.length ? blockUrls[i] : null;
+      // مجموعة بلا رابط (وسوم فقط) تبقى دائماً — لا نكسر بنية القائمة.
+      if (url == null || allowed.contains(url)) kept.add(blocks[i]);
+    }
+    if (kept.isEmpty) return blocks;
+    _log('HLS_VARIANT_CEILING',
+        'kept=${allowed.length}/${variants.length} proven=${_provenVariantKeys.length}');
+    return kept;
   }
 
   void _prefetchNearLiveEdge(List<String> sequence) {

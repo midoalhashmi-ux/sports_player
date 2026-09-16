@@ -135,6 +135,12 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // بنفس لحظة فشل جلب شريحتنا بالضبط، بدل مقارنة يدوية للطوابع الزمنية
   // بين سجلَّين منفصلين لاحقاً.
   DateTime? _lastWebMediaResourceHitAt;
+  /// مفاتيح الجودات التي أثبت مشغّل الموقع (داخل WebView) أنه يجلب شرائحها
+  /// فعلاً على هذي الشبكة بهذي اللحظة — أدق مقياس متاح لقدرة الاتصال، لأن
+  /// آلية التكيّف الخاصة بالموقع تعمل بنفس الظروف تماماً. تُستخدَم لتقديم
+  /// نفس الجودة للتشغيل الأصلي بدل الأعلى دائماً (راجع
+  /// `HlsVariantSelector` وTECHNICAL.md #50).
+  final Set<String> _webProvenVariantKeys = <String>{};
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
@@ -467,6 +473,15 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       final resourceUrl = rawResourceUrl.toLowerCase();
       final segmentEvidence = RegExp(r'(^|[/._-])seg(?:ment)?[-_]?\d+|\.(ts|m4s)(?:$|[?#])').hasMatch(resourceUrl);
       _webMediaEvidenceScore = (_webMediaEvidenceScore + (segmentEvidence ? 22 : 12)).clamp(0, 100).toInt();
+      if (segmentEvidence) {
+        // شريحة فيديو حقيقية جلبها الموقع بنجاح = إثبات عملي أن الشبكة
+        // تتحمّل هذي الجودة تحديداً. نسجّلها لنقدّمها للتشغيل الأصلي بدل
+        // الأعلى نطاقاً (الأخيرة أثبتت السجلات فشلها المتكرر).
+        final provenKey = HlsVariantSelector.variantKey(rawResourceUrl);
+        if (provenKey != null && _webProvenVariantKeys.add(provenKey)) {
+          _slog('WEB_PROVEN_VARIANT', 'key=$provenKey');
+        }
+      }
       _slog(
         'MEDIA_RESOURCE',
         'url=${_safeLogUrl(rawResourceUrl)} segmentEvidence=$segmentEvidence score=$_webMediaEvidenceScore hits=$_webMediaResourceHits',
@@ -1357,9 +1372,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     final lines = text.split(RegExp(r'\r?\n'));
 
     if (text.contains('#EXT-X-STREAM-INF')) {
-      // (ترتيب الفرز, الدقة/التسمية, الرابط) — الفرز يعتمد BANDWIDTH لأنه
-      // موجود دائماً بينما RESOLUTION اختياري بالمواصفة.
-      final variants = <(int, String, String)>[];
+      // الفرز يعتمد BANDWIDTH لأنه موجود دائماً بينما RESOLUTION اختياري
+      // بالمواصفة.
+      final variants = <HlsVariant>[];
       for (var i = 0; i < lines.length; i++) {
         if (!lines[i].startsWith('#EXT-X-STREAM-INF')) continue;
         final bwMatch = RegExp(r'BANDWIDTH=(\d+)').firstMatch(lines[i]);
@@ -1376,14 +1391,31 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         final label = height != null
             ? '${height}p'
             : (bandwidth > 0 ? '${(bandwidth / 1000).round()} kbps' : 'تلقائي');
-        variants.add((bandwidth, label, _resolveRelativeUrl(urlLine, manifestUrl)));
+        variants.add(HlsVariant(
+          bandwidth: bandwidth,
+          label: label,
+          url: _resolveRelativeUrl(urlLine, manifestUrl),
+        ));
       }
       if (variants.isEmpty) return null;
-      variants.sort((a, b) => b.$1.compareTo(a.$1));
+      // **لا نبدأ بالأعلى نطاقاً بعد الآن**: السجلات أثبتت أن الطبقة الأعلى
+      // هي بالضبط ما يفشل جلبه (شريحة تزحف ثوانيَ ثم يُقطع الاتصال)، بينما
+      // مشغّل الموقع نفسه يشتغل بنجاح على جودة أدنى بنفس اللحظة. الترتيب
+      // الآن بالأفضلية الفعلية — المُثبَتة من WebView أولاً — مع الإبقاء
+      // على كل الجودات متاحة للاختيار اليدوي (راجع TECHNICAL.md #50).
+      final prioritized = HlsVariantSelector.prioritize(
+        variants,
+        provenKeys: _webProvenVariantKeys,
+      );
+      _slog(
+        'HLS_VARIANTS_PRIORITIZED',
+        'count=${prioritized.length} proven=${_webProvenVariantKeys.length} '
+        'first=${prioritized.first.label}',
+      );
       final seen = <String>{};
       final ordered = <MapEntry<String, String>>[];
-      for (final v in variants) {
-        if (seen.add(v.$3)) ordered.add(MapEntry(v.$2, v.$3));
+      for (final v in prioritized) {
+        if (seen.add(v.url)) ordered.add(MapEntry(v.label, v.url));
       }
       return _RelayedManifest.variants(ordered);
     }
@@ -2826,6 +2858,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _webLastPromotedIframeUrl = null;
     _webMediaEvidenceScore = 0;
     _webMediaResourceHits = 0;
+    // إثبات الجودة خاص بجلسة/شبكة/مصدر بعينه — حلقة أخرى قد تكون على CDN
+    // مختلف تماماً، فلا يُورَّث الإثبات القديم.
+    _webProvenVariantKeys.clear();
     _webStartupTimeoutTimer?.cancel();
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
