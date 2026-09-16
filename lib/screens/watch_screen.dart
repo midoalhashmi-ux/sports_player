@@ -29,6 +29,7 @@ import '../services/preferred_server_service.dart';
 import '../services/site_recipe_service.dart';
 import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
+import 'web_injection_scripts.dart';
 import '../theme/app_theme.dart';
 
 // محرك اكتشاف مصدر WebView -> Native (كل _web* السابقة) صار mixin منفصل
