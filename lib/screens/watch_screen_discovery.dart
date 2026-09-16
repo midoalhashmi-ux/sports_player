@@ -49,6 +49,10 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   Map<String, String>? get _resolvedStreamHeaders;
   String get _autoDiscoveredServerLabel;
 
+  /// تسمية الجودة الافتراضية (وليست تسمية السيرفر) — راجع
+  /// `_adaptiveQualityLabel` بـwatch_screen.dart.
+  String get _adaptiveQualityLabel;
+
   Map<String, String> _effectiveStreamHeaders();
   String _resolveRelativeUrl(String url, String baseUrl);
   Future<void> _muteWebForNativeTrial(bool mute);
@@ -626,6 +630,21 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     final parentUrl = _webOriginalUrl;
     final parentHeaders = <String, String>{..._effectiveStreamHeaders()};
     if (parentUrl != null && parentUrl.startsWith('http')) parentHeaders['referer'] = parentUrl;
+    // **إصلاح تأخير مؤكَّد بسجل تشخيص**: بعد هذي الترقية تصير صفحة المشغّل
+    // (`iframeUrl`) هي مستند الصفحة الرئيسي فعلياً، فكل طلب وسائط تالٍ
+    // يحمل `Referer`/`Origin` الخاصين بها — لكن `_webContextHeaders` كانت
+    // لا تُحدَّث إلا من `onPageFinished`، والتي تأخّرت **22 ثانية** بسجل
+    // المستخدم (ترقية عند +5.8s، `PAGE_FINISHED` عند +28.1s). خلال تلك
+    // الفجوة جرت أول محاولة تشغيل أصلي بلا `referer`/`origin` إطلاقاً،
+    // فردّ الـCDN `403 Forbidden` (مسجَّل حرفياً بـ
+    // `NATIVE_TRIAL_DIAGNOSTIC`) واحترقت المحاولة. بمجرد ما تحدَّثت هذي
+    // الترويسات لاحقاً، نفس الرابط بالضبط اشتغل. نضبطها الآن لحظة الترقية
+    // — نحن من نطلب هذا التنقّل، فالوجهة معروفة يقيناً قبل حدوثه.
+    //
+    // موضعها بعد بناء `parentHeaders` مقصود: طلب التنقّل نفسه يجب أن يحمل
+    // referer الصفحة **الأب** (هي من ضمّنت هذا الـiframe)، أما ما نضبطه
+    // هنا فهو سياق ما **بعد** التنقّل لطلبات الوسائط التالية.
+    _applyPromotedDocumentContext(iframeUrl);
     try {
       _webSourceOrigin = Uri.parse(iframeUrl).host;
       _webPromotionFallbackTimer?.cancel();
@@ -890,11 +909,52 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
   bool _isNonMediaAsset(String url) => CandidateScoring.isNonMediaAsset(url);
 
+  /// يضبط `referer`/`origin` على مستند المشغّل الذي رقّيناه للتو، بدل
+  /// انتظار `onPageFinished` الخاص به (راجع التعليق بموضع الاستدعاء).
+  void _applyPromotedDocumentContext(String documentUrl) {
+    final uri = Uri.tryParse(documentUrl);
+    if (uri == null || !uri.hasScheme || uri.host.isEmpty) return;
+    final origin = _originForUri(uri);
+    if (origin.isEmpty) return;
+    final context = <String, String>{...?_webContextHeaders};
+    context['origin'] = origin;
+    context['referer'] = documentUrl;
+    if (mounted) _webContextHeaders = context;
+  }
+
+  /// صفحة التضمين التي "تنتمي" لها هذي المرشّحة — مصدر `Referer`/`Origin`
+  /// اللذين يفحصهما الـCDN.
+  ///
+  /// كان الاعتماد على `candidate.pageUrl` وحده: لو جاءت المرشّحة من مسح
+  /// الـDOM لا من سجل الشبكة (يحصل كثيراً — سجل المستخدم يُظهر
+  /// `SOURCES_SCAN ... registry=0` مع خمس مرشّحات صالحة) يكون `registered`
+  /// = null فلا يُضبَط أي `referer`، ويُرفَض الطلب بـ403. السلسلة أدناه
+  /// تعطي دائماً أفضل معلومة متاحة فعلاً عن المستند الحالي.
+  Future<Uri?> _embeddingPageUri(_WebNetworkCandidate? candidate) async {
+    Uri? usable(String? raw) {
+      final uri = Uri.tryParse(raw ?? '');
+      if (uri == null || !uri.hasScheme || uri.host.isEmpty) return null;
+      if (uri.scheme != 'http' && uri.scheme != 'https') return null;
+      return uri;
+    }
+
+    final fromRegistry = usable(candidate?.pageUrl);
+    if (fromRegistry != null) return fromRegistry;
+    final fromPromotion = usable(_webLastPromotedIframeUrl);
+    if (fromPromotion != null) return fromPromotion;
+    try {
+      final current = await _webController?.currentUrl();
+      final fromController = usable(current);
+      if (fromController != null) return fromController;
+    } catch (_) {}
+    return usable(_webOriginalUrl);
+  }
+
   Future<Map<String, String>> _headersForCandidate(
       String source, _WebNetworkCandidate? candidate) async {
     final headers = <String, String>{..._effectiveStreamHeaders()};
     final sourceUri = Uri.tryParse(source);
-    final pageUri = Uri.tryParse(candidate?.pageUrl ?? '');
+    final pageUri = await _embeddingPageUri(candidate);
     if (sourceUri != null &&
         pageUri != null &&
         sourceUri.hasScheme &&
@@ -1559,7 +1619,15 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           'attempt=$attempts framework=${frameworkSources.length} generic=${genericSources.length} registry=${_webCandidateRegistry.length} total=${sources.length}',
         );
 
-        if (_webInteractionAttempts < _webMaxInteractionAttempts && !await _webPlaybackSentinel(controller)) {
+        // كان هنا استدعاء ثانٍ لـ`_webPlaybackSentinel` بنفس الدورة —
+        // ونتيجته محسوبة أصلاً قبل أسطر بـ`webPlaybackProven`. كل استدعاء
+        // يكلّف من جولتَي إلى ثلاث جولات جافاسكربت عبر جسر المنصة **بالإضافة
+        // إلى انتظار 700 ميلي ثانية** حين يكون العنصر يشتغل فعلاً، وكلها
+        // تقع بالضبط على المسار الحرج بين اكتشاف المرشّح وتجربته. نعيد
+        // استخدام النتيجة المحسوبة بدل إعادة القياس.
+        if (_webInteractionAttempts < _webMaxInteractionAttempts &&
+            !webPlaybackProven &&
+            !_webPlaybackProven) {
           _slog('AUTO_CLICK_ATTEMPT', 'interactionAttempts=$_webInteractionAttempts/$_webMaxInteractionAttempts');
           final interacted = await _runSmartInteraction(controller);
           _slog('AUTO_CLICK_RESULT', 'clicked=$interacted');
@@ -1753,7 +1821,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           _slog('NATIVE_TRIAL_QUEUED', 'url=${_safeLogUrl(probe.source)} attempt=$_webNativeAttempts/$_webMaxNativeAttempts');
           timer.cancel();
 
-          final quality = StreamQuality(label: _autoDiscoveredServerLabel, url: probe.source);
+          // تسمية **السيرفر** تبقى `_autoDiscoveredServerLabel` (علامة
+          // داخلية يعتمد عليها منطق التشغيل)، أما تسمية **الجودة** فهي
+          // نص يُعرض للمستخدم بشارة الجودة — فتُفصَل عنها.
+          final quality =
+              StreamQuality(label: _adaptiveQualityLabel, url: probe.source);
           await _playServerQuality(
             StreamServerOption(label: _autoDiscoveredServerLabel, qualities: [quality]),
             quality,

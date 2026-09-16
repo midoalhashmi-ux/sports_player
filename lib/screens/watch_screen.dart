@@ -26,6 +26,7 @@ import '../services/native_cookie_service.dart';
 import '../services/player_strategies/player_strategy.dart';
 import '../services/player_visibility_service.dart';
 import '../services/preferred_server_service.dart';
+import '../services/playback_prefs_service.dart';
 import '../services/site_recipe_service.dart';
 import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
@@ -222,6 +223,20 @@ class _WatchScreenState extends State<WatchScreen>
   @override
   String get _autoDiscoveredServerLabel => 'المصدر المكتشف تلقائياً';
 
+  /// تسمية **الجودة** الافتراضية لمصدر مُكتشَف تلقائياً، منفصلة تماماً عن
+  /// `_autoDiscoveredServerLabel` أعلاه (الذي بقي كما هو لأنه علامة داخلية
+  /// يُقارَن بها منطق التشغيل بعدة مواضع، لا نص للعرض).
+  ///
+  /// قبل هذا الفصل كانت الجودة الوحيدة تُنشَأ بنفس نص السيرفر، فتظهر عبارة
+  /// "المصدر المكتشف تلقائياً" كاملةً داخل شارة الجودة بشريط التحكم — وهي
+  /// لا تصف جودة إطلاقاً. طلب صريح من المستخدم بإزالتها.
+  @override
+  String get _adaptiveQualityLabel => 'تلقائي';
+
+  /// نص شارة الجودة حين يكون المصدر يدعم فعلاً عدة جودات والمختار منها هو
+  /// الوضع التكيّفي (القائمة الرئيسية — ExoPlayer يختار حسب الشبكة).
+  static const String _multiQualityBadgeLabel = 'جودات متعددة';
+
   VideoPlayerController? _controller;
   late final HlsCacheProxy _hlsCacheProxy;
   @override
@@ -383,6 +398,7 @@ class _WatchScreenState extends State<WatchScreen>
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_setPlayerOrientation(true));
     });
+    unawaited(_restoreSavedFit());
     unawaited(_prepareAndStartPlayback());
   }
 
@@ -390,7 +406,17 @@ class _WatchScreenState extends State<WatchScreen>
     if (mounted) {
       setState(() {
         _isLandscape = landscape;
-        if (!landscape) _fullscreen = false;
+        // الوضع الأفقي بشاشة مشاهدة = ملء شاشة حقيقي، مثل يوتيوب تماماً.
+        //
+        // **بلاغ مستخدم مباشر مع لقطة شاشة**: "ظلال بالشاشة... ليس مغطياً
+        // كامل الشاشة". السبب لم يكن الفيديو نفسه: `_fullscreen` كان
+        // يبدأ `false` دائماً، فيلتف `SafeArea` حول المحتوى كاملاً ويقتطع
+        // حواف الشاشة بمقدار نتوء الكاميرا/شريط الحالة — وبالوضع الأفقي
+        // هذا الاقتطاع يقع على **الجانبين**، فتظهر أشرطة سوداء عريضة
+        // يمين ويسار الفيديو، ويبقى شريط حالة النظام فوقه (`edgeToEdge`).
+        // الآن الدخول للوضع الأفقي يدخل ملء الشاشة مباشرة، وزر ملء الشاشة
+        // يحتفظ بمعناه: الخروج منه يُظهر أشرطة النظام و`SafeArea` مجدداً.
+        _fullscreen = landscape;
       });
     }
     try {
@@ -405,7 +431,9 @@ class _WatchScreenState extends State<WatchScreen>
                 DeviceOrientation.portraitDown,
               ],
       );
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await SystemChrome.setEnabledSystemUIMode(landscape
+          ? SystemUiMode.immersiveSticky
+          : SystemUiMode.edgeToEdge);
     } catch (_) {
       // Orientation control is best effort on platforms that do not expose it.
     }
@@ -554,6 +582,32 @@ class _WatchScreenState extends State<WatchScreen>
 
   void _handleNativePlaybackError() {
     if (!mounted) return;
+    // **صراع مؤكَّد بسجلَي تشخيص**: إعادة الاتصال الصامتة هذي وُضعت لتشغيل
+    // *أصلي قائم فعلاً* يصطدم بخطأ شبكة عابر. لكنها كانت تعمل أيضاً أثناء
+    // "تجربة تشغيل أصلي" قادمة من WebView (`fallbackToWeb: true`) — وهناك
+    // يكون خطأ ExoPlayer هو **النتيجة المتوقَّعة** للتجربة نفسها، ولها
+    // مسار تعافٍ خاص بها بالكامل (حجر المرشّح، إنقاذ المانفست، المرشّح
+    // التالي، ثم الرجوع لـWebView). فكان المساران يتسابقان على نفس
+    // المتحكّم ونفس الوكيل:
+    //
+    //   [+28.641s] NATIVE_TRIAL_QUEUED ... fallbackToWeb=true
+    //   [+28.774s] PLAY_SERVER_QUALITY_START ... fallbackToWeb=false  ← هذي
+    //   [+28.723s] HLS_PROXY_STARTED: port=36311
+    //   [+28.795s] HLS_PROXY_STARTED: port=42861
+    //   [+28.776s] HLS_PROXY_PLAYLIST_FETCH_ERROR: Connection attempt cancelled
+    //   [+28.802s] HLS_PROXY_SELFTEST_FAILED: Connection closed ...
+    //   [+28.810s] HLS_PROXY_SELFTEST_FAILED: Connection reset by peer
+    //
+    // أي أن المحاولتين قتلتا بعضهما (كل `start()` يُغلق `_client`
+    // المشترك)، فسقطت التجربة الأخيرة المتاحة لسبب من صنعنا لا من الـCDN.
+    // طالما WebView هو صاحب القرار الآن (`_isWebSource`)، نترك التعافي
+    // كاملاً لمساره — يصير `_isWebSource=false` فقط بعد نجاح أصلي مُثبَت.
+    if (_isWebSource) {
+      _slog('NATIVE_AUTO_RECONNECT_SKIPPED',
+          'reason=web_trial_owns_recovery webSessionState=$_webSessionState');
+      _cancelNativeReconnect();
+      return;
+    }
     final server = _activeServer;
     final currentQuality = _activeQuality;
     if (_userPausedPlayback ||
@@ -1159,6 +1213,10 @@ class _WatchScreenState extends State<WatchScreen>
         bool fallbackToWeb = false,
         Map<String, String>? playbackHeaders,
         VideoFormat? formatHintOverride,
+        // true فقط للنداء الذي **يرجع** لجودة كانت تعمل بعد فشل تبديل
+        // يدوي — يمنع أي تراجع متسلسل لو فشل الرجوع نفسه (راجع كتلة
+        // `catch` بالأسفل).
+        bool isQualityRevert = false,
       }) async {
     final myGeneration = ++_playAttemptGeneration;
     if (fallbackToWeb) {
@@ -1183,6 +1241,11 @@ class _WatchScreenState extends State<WatchScreen>
     // — resumeFrom أصلاً يكمل من نفس النقطة، فلا داعي لشاشة تحميل كاملة).
     final wasAlreadyPlayingNative =
         !fallbackToWeb && _state == _LoadState.ready && !_isWebSource;
+    // نلتقطهما قبل `setState` أدناه مباشرةً لأنه يستبدلهما — هذا هو
+    // "ما كان يعمل فعلاً قبل لحظة"، ونحتاجه للرجوع إليه لو فشل التبديل.
+    final previousServer = _activeServer;
+    final previousQuality = _activeQuality;
+    final previousPosition = _position;
     setState(() {
       // A background candidate trial fired *after* the WebView's own
       // playback was already proven and shown (_webPlaybackReady) must stay
@@ -1217,6 +1280,43 @@ class _WatchScreenState extends State<WatchScreen>
           (!fallbackToWeb && _position > Duration.zero) ? _position : null;
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
+      // **حرج — انهيار مؤكَّد بسجل تشخيص فعلي**: كان `_controller` يبقى
+      // مشيراً للمتحكّم القديم طوال `await dispose()` وطوال تهيئة الجديد
+      // بعده. `dispose()` لا يصفّر `value`، فـ`value.isInitialized` يبقى
+      // true، وأي إعادة بناء بهذي الفجوة (مؤقّت إخفاء الأزرار، دوران
+      // الشاشة، أي setState آخر) تبني `VideoPlayer(_controller)` على
+      // متحكّم تخلّصنا منه فعلاً → `Texture` بمعرّف أُزيل من جهة أندرويد:
+      // `Exception: Could not find corresponding view type for playerId: N`.
+      // ظهر هذا السطر بسجل المستخدم **مرّتين، كلتاهما بلحظة تبديل الجودة
+      // بالضبط** (playerId 7 و8) وتبعه فشل التشغيل. مفتاح `ObjectKey` بـ
+      // `_buildVideo` لا يعالجها: الكائن نفسه هو نفسه، فلا يرى Flutter أي
+      // سبب لإعادة إنشاء العنصر أصلاً. التصفير داخل `setState` قبل
+      // `dispose` هو الحل الفعلي — الشاشة تعرض إطاراً أسود قصيراً
+      // (سلوك طبيعي بأي مشغّل عند تبديل الجودة) بدل أن تنهار.
+      if (oldController != null && mounted) {
+        setState(() {
+          _controller = null;
+          // مؤشر التحميل الدائري الصغير بدل سواد صامت أثناء الفجوة —
+          // `_state` يبقى `ready` هنا فلا تظهر شاشة التحميل الكاملة.
+          if (wasAlreadyPlayingNative) {
+            _isBuffering = true;
+            _bufferIndicatorVisible = true;
+          }
+        });
+        if (wasAlreadyPlayingNative) {
+          // نفس شبكة الأمان المستخدَمة بمسار المؤشر العادي
+          // (`_videoListener`): مؤشر يدوي لا يزيله أحد لو فشلت المحاولة
+          // قبل أن يُربَط أي مستمع جديد.
+          _bufferIndicatorTimer?.cancel();
+          _bufferIndicatorTimer = Timer(const Duration(seconds: 3), () {
+            if (mounted && _bufferIndicatorVisible) {
+              setState(() => _bufferIndicatorVisible = false);
+            }
+          });
+        }
+      } else {
+        _controller = null;
+      }
       await oldController?.dispose();
       await _hlsCacheProxy.stop();
 
@@ -1510,7 +1610,45 @@ class _WatchScreenState extends State<WatchScreen>
         return;
       }
       _slog('PLAY_SERVER_QUALITY_FAILED', 'url=${_safeLogUrl(quality.url)} error=${_describePlaybackError(error)} rawError=$error');
-      unawaited(_hlsCacheProxy.stop());
+      await _hlsCacheProxy.stop();
+      // **بلاغ مستخدم مباشر**: "عند تغيير الجودة تحدث مشكلة وفشل".
+      // مؤكَّد بسجله: بعد اختياره 960p يدوياً وفيديو يعمل بسلاسة، فشلت
+      // الجودة الجديدة (`initialize() timed out after 13s` مرتين) — وكان
+      // المسار الوحيد هنا هو `_state = error`، أي **هدم تشغيل سليم تماماً
+      // واستبداله بشاشة خطأ** لمجرد أن درجة واحدة من درجات نفس المصدر لم
+      // تعمل على هذي الشبكة. أي مشغّل احترافي يتراجع للجودة السابقة
+      // بصمت ويخبر المستخدم بسطر واحد. الخطأ الكامل يبقى بالسجل.
+      if (wasAlreadyPlayingNative &&
+          !isQualityRevert &&
+          previousServer != null &&
+          previousQuality != null &&
+          previousQuality.url != quality.url) {
+        _slog(
+          'QUALITY_SWITCH_REVERTED',
+          'failed=${_safeLogUrl(quality.url)} revertingTo=${_safeLogUrl(previousQuality.url)} reason=${_describePlaybackError(error)}',
+        );
+        if (!mounted) return;
+        // المتحكّم الفاشل قد يكون بثّ أحداث بموضع صفر قبل ما يسقط، فيمسح
+        // `_position` الذي يبني عليه `resumeFrom` — نعيد الموضع الحقيقي
+        // الذي كان المستخدم عنده حتى يكمل الرجوع من نفس النقطة لا من
+        // البداية.
+        _position = previousPosition;
+        _showCenterToast(
+          'تعذّر تشغيل «${quality.label}» — رجعنا للجودة السابقة',
+          duration: const Duration(seconds: 3),
+        );
+        await _playServerQuality(
+          previousServer,
+          previousQuality,
+          playbackHeaders: playbackHeaders,
+          formatHintOverride: formatHintOverride,
+          isQualityRevert: true,
+        );
+        return;
+      }
+      // `await _hlsCacheProxy.stop()` أعلاه نقطة تعليق — نعيد فحص mounted
+      // قبل أي setState بعدها.
+      if (!mounted) return;
       setState(() {
         _state = _LoadState.error;
         _errorMessage = _describePlaybackError(error);
@@ -1667,7 +1805,21 @@ class _WatchScreenState extends State<WatchScreen>
     final modes = _fitModes.keys.toList();
     final next = modes[(modes.indexOf(_fit) + 1) % modes.length];
     setState(() => _fit = next);
+    // الاختيار يبقى محفوظاً للحلقات/القنوات القادمة — راجع
+    // PlaybackPrefsService لسبب وجوده.
+    unawaited(PlaybackPrefsService.saveFitIndex(next.index));
     _showCenterToast(_fitModes[next]?.$1 ?? '');
+  }
+
+  Future<void> _restoreSavedFit() async {
+    final index = await PlaybackPrefsService.loadFitIndex();
+    if (index == null || index < 0 || index >= BoxFit.values.length) return;
+    final saved = BoxFit.values[index];
+    // نقبل فقط الأوضاع المعروضة فعلاً بـ`_fitModes` — لو حُذف وضع لاحقاً
+    // (حصل فعلاً: أُزيل `fitWidth`) لا نستعيد قيمة لم تعد بالقائمة.
+    if (!_fitModes.containsKey(saved)) return;
+    if (!mounted || saved == _fit) return;
+    setState(() => _fit = saved);
   }
 
   // خمسة أوضاع عرض بدل ثلاثة — شاشات الهواتف تختلف نسبتها (19.5:9، 20:9،
@@ -1933,7 +2085,11 @@ class _WatchScreenState extends State<WatchScreen>
                 ..._activeServer!.qualities.map((quality) => ListTile(
                       title: Text(quality.label,
                           style: const TextStyle(color: Colors.white)),
-                      trailing: quality.label == _activeQuality?.label
+                      // المطابقة بالرابط لا بالنص: التسميات قد تتكرر
+                      // (جودتان بنفس الارتفاع بمعدّلَي نقل مختلفين، أو
+                      // "جودة 1"/"جودة 2" حين لا يعلن المصدر دقة) فتظهر
+                      // علامة ✓ على أكثر من صف. الرابط فريد دائماً.
+                      trailing: quality.url == _activeQuality?.url
                           ? const Icon(Icons.check, color: Colors.greenAccent)
                           : null,
                       onTap: () {
@@ -2630,9 +2786,18 @@ class _WatchScreenState extends State<WatchScreen>
 
     _slog('QUALITIES_AVAILABLE',
         'count=${qualities.length} labels=${qualities.map((q) => q.label).join(",")}');
+    // الجودة النشطة كانت تبقى مشيرة لكائن `StreamQuality` القديم (الذي لم
+    // يعد ضمن القائمة الجديدة إطلاقاً) — فتظهر شارة الجودة بنصّها القديم،
+    // ولا تُعلَّم أي درجة بعلامة ✓ داخل ورقة الاختيار. نعيد ربطها بالكائن
+    // المكافئ لها بالقائمة الجديدة (نفس الرابط) وإلا بأول عنصر (التكيّفي).
+    final rebound = qualities.firstWhere(
+      (q) => q.url == current.url,
+      orElse: () => qualities.first,
+    );
     setState(() {
       _activeServer =
           StreamServerOption(label: server.label, qualities: qualities);
+      _activeQuality = rebound;
     });
   }
 
@@ -2644,7 +2809,18 @@ class _WatchScreenState extends State<WatchScreen>
   /// عليها أو على منطق اكتشاف الجودات — تعديل شكلي فقط لهذا الزر.
   Widget _buildQualityButton() {
     final rawLabel = _activeQuality?.label.trim() ?? '';
-    final label = rawLabel.isNotEmpty ? rawLabel : 'الجودة';
+    // "تلقائي" تعني القائمة الرئيسية (تكيّف ExoPlayer). لو المصدر يعرض
+    // فعلاً أكثر من جودة، هذا بالضبط ما يستحق أن يُقال للمستخدم: أن
+    // المصدر **يدعم جودات متعددة** — لا مجرد كلمة "تلقائي" الغامضة، ولا
+    // نص السيرفر الداخلي. أما لو اختار المستخدم درجة بعينها (720p...)
+    // فتظهر كما هي، لأنها الأدق.
+    final hasRealVariants = (_activeServer?.qualities.length ?? 0) > 1;
+    final isAdaptiveSelection = rawLabel.isEmpty ||
+        rawLabel == _adaptiveQualityLabel ||
+        rawLabel == _autoDiscoveredServerLabel;
+    final label = isAdaptiveSelection
+        ? (hasRealVariants ? _multiQualityBadgeLabel : 'الجودة')
+        : rawLabel;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Tooltip(
@@ -2917,12 +3093,24 @@ class _WatchScreenState extends State<WatchScreen>
     final canSeek = _contentIsSeekable;
     final compactControls = MediaQuery.sizeOf(context).width < 600;
     return Container(
-      decoration: const BoxDecoration(
+      // تدرّج الأزرار كان `black87 → شفاف → black87` بتوقّفات
+      // `[0, 0.45, 1]` — أي أن التعتيم يمتد على **45% من ارتفاع الشاشة من
+      // الأعلى ومثلها من الأسفل**، فيغطي عملياً كل الإطار تقريباً ويظهر
+      // للمستخدم كـ"ظلال" على الفيديو (بلاغ مباشر مع لقطة شاشة). النسخة
+      // الجديدة تحصر التعتيم بشريطين ضيّقين خلف الأزرار فقط (~20% أعلى
+      // و~24% أسفل) وبكثافة أقل — تبقى الأزرار مقروءة تماماً على أي خلفية
+      // بينما يبقى وسط الصورة نظيفاً بلا أي تعتيم.
+      decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
           end: Alignment.bottomCenter,
-          colors: [Colors.black87, Colors.transparent, Colors.black87],
-          stops: [0, 0.45, 1],
+          colors: [
+            Colors.black.withValues(alpha: 0.62),
+            Colors.transparent,
+            Colors.transparent,
+            Colors.black.withValues(alpha: 0.72),
+          ],
+          stops: const [0, 0.2, 0.76, 1],
         ),
       ),
       child: SafeArea(
@@ -3159,9 +3347,13 @@ class _WatchScreenState extends State<WatchScreen>
                   _cycleFit();
                 },
               ),
+              // `_session` يُبنى مرة واحدة عند الحل الأول ولا يُحدَّث حين
+              // تُكتشَف جودات حقيقية لاحقاً (`_onHlsVariantsDiscovered`
+              // يحدّث `_activeServer` وحده) — فكان هذا المدخل يبقى مخفياً
+              // رغم توفّر جودات فعلية للاختيار.
               if (_session != null &&
                   (_session!.hasMultipleServers ||
-                      _session!.hasMultipleQualities))
+                      (_activeServer?.qualities.length ?? 0) > 1))
                 ListTile(
                   leading: const Icon(Icons.hd, color: Colors.white),
                   title: const Text('الجودة والسيرفر',

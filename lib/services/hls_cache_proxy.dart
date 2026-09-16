@@ -52,6 +52,31 @@ class HlsCacheProxy {
   http.Client? _client;
   Map<String, String> _upstreamHeaders = const {};
 
+  /// قفل تسلسل بسيط حول `start()`/`stop()`.
+  ///
+  /// **خلل حقيقي مؤكَّد بسجل تشخيص**: `start()` يبدأ بـ`await stop()` ثم
+  /// `await HttpServer.bind(...)`. أي استدعاءين متزامنين (يحصل فعلياً كل
+  /// جلسة تقريباً: تجربة تشغيل أصلي + إنقاذ مانفست + تبديل جودة يدوي قد
+  /// تتداخل) يتشابكان عند نقاط الـawait هذي: الثاني يستدعي `stop()` بينما
+  /// `_server` لا يزال null (الأول لم ينهِ `bind` بعد) فلا يُغلق شيئاً،
+  /// ثم كلاهما يكتب `_server = ...` — فيبقى خادم الأول **شغّالاً للأبد**
+  /// بلا مرجع، مع طابور جلب مسبق حيّ يقصف نفس الـCDN بالتوازي مع الجلسة
+  /// الجديدة. سجل المستخدم أظهر بالضبط هذا: تسعة `HLS_PROXY_STARTED`
+  /// ببورتات مختلفة بجلسة واحدة (اثنان منها بفارق 2 ميلي ثانية)، ثم
+  /// `Connection closed while receiving data` لشرائح جودة **سابقة** أثناء
+  /// تشغيل جودة جديدة — وهو سبب فشل تبديل الجودة (`initialize()` ينتهي
+  /// بمهلة 13 ثانية مرتين) والتقطيع معاً.
+  Future<void> _lifecycleLock = Future<void>.value();
+
+  /// يُسلسِل عملية دورة حياة (start/stop) خلف سابقتها — أبسط من mutex
+  /// كامل، وكافٍ تماماً هنا لأن كل العمليات على نفس الـisolate.
+  Future<T> _serialized<T>(Future<T> Function() action) {
+    final previous = _lifecycleLock;
+    final completer = Completer<void>();
+    _lifecycleLock = completer.future;
+    return previous.then((_) => action()).whenComplete(completer.complete);
+  }
+
   /// مفاتيح الجودات التي أثبت مشغّل الموقع تشغيلها فعلاً بهذي الجلسة.
   /// فارغة = سلوك قديم حرفياً بلا أي تعديل على القائمة (راجع
   /// `_applyVariantCeiling`).
@@ -62,8 +87,48 @@ class HlsCacheProxy {
   int _segmentCacheBytes = 0;
   static const int _maxCacheBytes = 60 * 1024 * 1024; // 60MB
 
-  final List<String> _segmentSequence = <String>[];
+  /// ترتيب الشرائح **مفصولاً لكل قائمة تشغيل (جودة) على حدة**.
+  ///
+  /// **خلل بنيوي مؤكَّد بسجل تشخيص**: كانت قائمة واحدة مشتركة
+  /// (`_segmentSequence`) تتراكم فيها شرائح كل الجودات معاً. عند تشغيل
+  /// القائمة الرئيسية، يجلب ExoPlayer قوائم عدة جودات عبرنا، فتُلحَق
+  /// شرائحها كلها بنفس التسلسل — ثم يصير "الشريحة التالية" بـ
+  /// `_schedulePrefetch` شريحةً من **جودة أخرى تماماً**، ويصير أي تبديل
+  /// جودة تكيّفي (ABR) يبدو كقفزة هائلة بالترتيب فيمسح
+  /// `_dropStalePrefetches` الطابور بأكمله. سجل المستخدم يُظهر النتيجة
+  /// حرفياً: `HLS_PREFETCH_DROPPED_STALE: dropped=8 around=181
+  /// remaining=0` أثناء تشغيل سليم، أي أن التخزين المسبق أُفرِغ بالكامل
+  /// وبقيت كل شريحة تالية تُجلب لحظياً — وهذا بالضبط شكل التقطيع
+  /// (`تكسير`) المُبلَّغ عنه.
+  final Map<String, List<String>> _playlistSequences =
+      <String, List<String>>{};
+
+  /// رابط الشريحة → مفتاح قائمة التشغيل التي تنتمي لها.
+  final Map<String, String> _segmentPlaylist = <String, String>{};
+
+  /// رابط الشريحة → ترتيبها **داخل قائمتها هي**. كان الترتيب يُستخرَج
+  /// بـ`List.indexOf` (مسح خطي) مرة لكل شريحة يطلبها المشغّل **ومرة لكل
+  /// عنصر بالطابور** داخل `_dropStalePrefetches`.
+  final Map<String, int> _segmentIndex = <String, int>{};
+
+  /// حد أقصى لعدد قوائم التشغيل المتتبَّعة بنفس الوقت (جودات مختلفة +
+  /// انتقالات) — يمنع تضخّم الخرائط أعلاه بجلسة طويلة.
+  static const int _maxTrackedPlaylists = 6;
+  static const int _maxSegmentsPerPlaylist = 500;
   final Set<String> _prefetching = <String>{};
+
+  /// جلبات جارية فعلاً الآن، مفهرسة بالرابط.
+  ///
+  /// **خلل حقيقي مؤكَّد بسجل تشخيص**: شريحة يجلبها الطابور بالخلفية ثم
+  /// يطلبها ExoPlayer نفسها قبل اكتمالها كانت تُجلَب **مرتين بالتوازي**
+  /// (الخلفية + الأمامية) — سجل المستخدم يُظهر سطرَي
+  /// `HLS_PROXY_SEGMENT_FETCH_ERROR` لنفس `seg-1-v1-a1.ts` بنفس الطابع
+  /// الزمني بالضبط وبـ`elapsedMs` مختلفين (4812 و12818). مضاعفة اتصالات
+  /// لنفس الشريحة على CDN يحمي نفسه أصلاً من التزامن = قطع الاتصال لكليهما،
+  /// وهو بالضبط ما أفشل تبديل الجودة. الآن الطلب الثاني ينضم لنتيجة الأول
+  /// بدل فتح اتصال جديد.
+  final Map<String, Future<List<int>?>> _inFlightFetches =
+      <String, Future<List<int>?>>{};
 
   /// طابور الجلب المسبق + عدد الاتصالات الفعلية بالخلفية حالياً — الجذر
   /// الحقيقي لمشكلة تقطيع مؤكَّدة بسجل تشخيص فعلي بعد رفع `_prefetchAheadVod`
@@ -144,13 +209,30 @@ class HlsCacheProxy {
   /// يستجيب (اختبار ذاتي). يعيد null لو لم يكن الرابط HLS، أو لو فشل
   /// تشغيل/استجابة الخادم المحلي لأي سبب — عندها يجب على المستدعي
   /// استخدام الرابط الأصلي كما هو (بلا أي تغيير بالسلوك القديم).
+  /// نقطة الدخول العامة — مُسلسَلة خلف أي `start`/`stop` سابق (راجع
+  /// `_lifecycleLock`). المنطق الفعلي بـ`_startLocked`، ويستدعي
+  /// `_stopLocked` مباشرة بدل `stop()` العامة تفادياً لقفل ذاتي.
   Future<Uri?> start({
     required String sourceUrl,
     required Map<String, String> headers,
     Set<String> provenVariantKeys = const <String>{},
+  }) {
+    if (!looksLikeHlsPlaylist(sourceUrl)) return Future<Uri?>.value();
+    return _serialized(() => _startLocked(
+          sourceUrl: sourceUrl,
+          headers: headers,
+          provenVariantKeys: provenVariantKeys,
+        ));
+  }
+
+  Future<void> stop() => _serialized(_stopLocked);
+
+  Future<Uri?> _startLocked({
+    required String sourceUrl,
+    required Map<String, String> headers,
+    required Set<String> provenVariantKeys,
   }) async {
-    if (!looksLikeHlsPlaylist(sourceUrl)) return null;
-    await stop();
+    await _stopLocked();
     try {
       _upstreamHeaders = headers;
       _provenVariantKeys = provenVariantKeys;
@@ -181,24 +263,24 @@ class HlsCacheProxy {
         if (probe.statusCode < 200 || probe.statusCode >= 300) {
           _log('HLS_PROXY_SELFTEST_FAILED',
               'status=${probe.statusCode} elapsedMs=$elapsedMs — falling back to direct URL');
-          await stop();
+          await _stopLocked();
           return null;
         }
         _log('HLS_PROXY_SELFTEST_OK', 'elapsedMs=$elapsedMs bodyLen=${probe.body.length}');
       } catch (e) {
         _log('HLS_PROXY_SELFTEST_FAILED', 'error=$e — falling back to direct URL');
-        await stop();
+        await _stopLocked();
         return null;
       }
       return localUri;
     } catch (e) {
       _log('HLS_PROXY_START_ERROR', 'error=$e');
-      await stop();
+      await _stopLocked();
       return null;
     }
   }
 
-  Future<void> stop() async {
+  Future<void> _stopLocked() async {
     _proxyGeneration++;
     final server = _server;
     _server = null;
@@ -207,7 +289,10 @@ class HlsCacheProxy {
     _segmentCache.clear();
     _segmentCacheOrder.clear();
     _segmentCacheBytes = 0;
-    _segmentSequence.clear();
+    _playlistSequences.clear();
+    _segmentPlaylist.clear();
+    _segmentIndex.clear();
+    _inFlightFetches.clear();
     _prefetching.clear();
     _prefetchQueue.clear();
     _activePrefetches = 0;
@@ -419,12 +504,7 @@ class HlsCacheProxy {
     }
 
     if (newSequence.isNotEmpty) {
-      for (final url in newSequence) {
-        if (!_segmentSequence.contains(url)) _segmentSequence.add(url);
-      }
-      if (_segmentSequence.length > 500) {
-        _segmentSequence.removeRange(0, _segmentSequence.length - 500);
-      }
+      _absorbSequence(baseUri.toString(), newSequence);
       if (isLiveMediaPlaylist) {
         // نجلب أحدث الشرائح بالخلفية فوراً — بما فيها المخفية عن ExoPlayer
         // بهامش الأمان أعلاه — حتى تكون جاهزة بالكاش قبل ما تُكشَف له
@@ -494,6 +574,39 @@ class HlsCacheProxy {
     return kept;
   }
 
+  /// يدمج ترتيب شرائح قائمة تشغيل واحدة بخرائط التتبّع، ويقصّ القديم.
+  void _absorbSequence(String playlistKey, List<String> newSequence) {
+    final sequence =
+        _playlistSequences.putIfAbsent(playlistKey, () => <String>[]);
+    for (final url in newSequence) {
+      if (_segmentPlaylist[url] == playlistKey) continue;
+      _segmentPlaylist[url] = playlistKey;
+      _segmentIndex[url] = sequence.length;
+      sequence.add(url);
+    }
+    if (sequence.length > _maxSegmentsPerPlaylist) {
+      final dropped =
+          sequence.sublist(0, sequence.length - _maxSegmentsPerPlaylist);
+      sequence.removeRange(0, dropped.length);
+      for (final url in dropped) {
+        _segmentIndex.remove(url);
+        _segmentPlaylist.remove(url);
+      }
+      for (var i = 0; i < sequence.length; i++) {
+        _segmentIndex[sequence[i]] = i;
+      }
+    }
+    // خرائط Dart تحفظ ترتيب الإدراج، فأول مفتاح هو أقدم قائمة تتبّعناها.
+    while (_playlistSequences.length > _maxTrackedPlaylists) {
+      final oldestKey = _playlistSequences.keys.first;
+      final oldest = _playlistSequences.remove(oldestKey) ?? const <String>[];
+      for (final url in oldest) {
+        _segmentIndex.remove(url);
+        _segmentPlaylist.remove(url);
+      }
+    }
+  }
+
   void _prefetchNearLiveEdge(List<String> sequence) {
     final startIndex =
         (sequence.length - (_prefetchAhead + _liveEdgeMarginSegments))
@@ -529,7 +642,7 @@ class HlsCacheProxy {
       _activePrefetches++;
       unawaited(() async {
         try {
-          final bytes = await _fetchSegmentWithRetry(url);
+          final bytes = await _fetchSegmentShared(url);
           if (bytes != null && generation == _proxyGeneration) {
             _cacheSegment(url, bytes);
           }
@@ -548,7 +661,21 @@ class HlsCacheProxy {
     var bytes = _segmentCache[originalUrl];
     if (bytes == null) {
       _dropStalePrefetches(originalUrl);
-      bytes = await _fetchSegmentWithRetry(originalUrl, foreground: true);
+      final generation = _proxyGeneration;
+      // ننضم لجلب جارٍ لنفس الشريحة إن وُجد (راجع `_inFlightFetches`) بدل
+      // فتح اتصال ثانٍ متوازٍ لنفس الرابط.
+      final joinedBackgroundFetch = _inFlightFetches.containsKey(originalUrl);
+      bytes = await _fetchSegmentShared(originalUrl, foreground: true);
+      // الجلب المسبق بالخلفية يأخذ مهلة أقصر (6ث) ومحاولتين فقط. لو كنا
+      // انضممنا لواحد منها وفشل، نستحق محاولة أمامية كاملة واحدة قبل ما
+      // نردّ 502 — فالمشغّل ينتظر هذي الشريحة الآن فعلاً. الشرط
+      // `joinedBackgroundFetch` ضروري: بدونه كان الفشل الأمامي العادي
+      // يُضاعَف (3 محاولات × 15ث مرتين = حتى 90 ثانية على شريحة ميتة).
+      if (bytes == null &&
+          joinedBackgroundFetch &&
+          generation == _proxyGeneration) {
+        bytes = await _fetchSegmentShared(originalUrl, foreground: true);
+      }
       if (bytes != null) _cacheSegment(originalUrl, bytes);
     }
     // جسم فارغ (200 OK بلا بيانات) مصدر فعلي غير نظري — بعض خوادم CDN
@@ -601,12 +728,16 @@ class HlsCacheProxy {
   /// `Source error` → إعادة اتصال. راجع TECHNICAL.md #53.
   void _dropStalePrefetches(String requestedUrl) {
     if (_prefetchQueue.isEmpty) return;
-    final index = _segmentSequence.indexOf(requestedUrl);
+    final index = _segmentIndex[requestedUrl] ?? -1;
     if (index < 0) return;
+    final playlistKey = _segmentPlaylist[requestedUrl];
     final horizon = index + _prefetchAhead + 4;
     final stale = _prefetchQueue
         .where((url) {
-          final position = _segmentSequence.indexOf(url);
+          // شريحة من قائمة/جودة أخرى لم يعد لها معنى بعد ما انتقل المشغّل
+          // لهذي القائمة — تُسقَط دائماً بغض النظر عن ترتيبها.
+          if (_segmentPlaylist[url] != playlistKey) return true;
+          final position = _segmentIndex[url] ?? -1;
           return position < index || position > horizon;
         })
         .toList();
@@ -617,6 +748,25 @@ class HlsCacheProxy {
     }
     _log('HLS_PREFETCH_DROPPED_STALE',
         'dropped=${stale.length} around=$index remaining=${_prefetchQueue.length}');
+  }
+
+  /// يضمن اتصالاً شبكياً واحداً فقط لكل رابط شريحة بنفس اللحظة: أي طالب
+  /// ثانٍ (أمامي أو مسبق) ينتظر نتيجة الأول بدل فتح اتصال موازٍ له.
+  ///
+  /// لو كان الجلب الجاري مسبقاً (خلفية) وجاء طلب أمامي، نتركه ينتظر نفس
+  /// النتيجة — مهلة الخلفية أقصر، لذا `_handleSegment` يعيد المحاولة مرة
+  /// واحدة بمهلة أمامية كاملة لو رجعت null.
+  Future<List<int>?> _fetchSegmentShared(String url,
+      {bool foreground = false}) {
+    final existing = _inFlightFetches[url];
+    if (existing != null) return existing;
+    final future = _fetchSegmentWithRetry(url, foreground: foreground);
+    _inFlightFetches[url] = future;
+    return future.whenComplete(() {
+      if (identical(_inFlightFetches[url], future)) {
+        _inFlightFetches.remove(url);
+      }
+    });
   }
 
   /// `foreground`: طلب يحتاجه المشغّل الآن (يحجب التشغيل) — يستحق مهلة
@@ -680,10 +830,14 @@ class HlsCacheProxy {
   }
 
   void _schedulePrefetch(String justRequestedUrl) {
-    final index = _segmentSequence.indexOf(justRequestedUrl);
+    final index = _segmentIndex[justRequestedUrl] ?? -1;
     if (index < 0) return;
-    for (var i = index + 1; i <= index + _prefetchAhead && i < _segmentSequence.length; i++) {
-      _prefetchUrl(_segmentSequence[i]);
+    final sequence = _playlistSequences[_segmentPlaylist[justRequestedUrl]];
+    if (sequence == null) return;
+    for (var i = index + 1;
+        i <= index + _prefetchAhead && i < sequence.length;
+        i++) {
+      _prefetchUrl(sequence[i]);
     }
   }
 }
