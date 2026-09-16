@@ -966,3 +966,197 @@ const String kVidmolyPrimeScript = r"""(() => {
           });
         } catch (_) {}
       })();""";
+
+/// كاسح التراكبات الإعلانية — **بنيوي لا لغوي**.
+///
+/// قوائم الكلمات المفتاحية (روبوت/انتباه/verify...) تُهزم بتغيير نص واحد،
+/// وأسماء الكلاسات تُولَّد عشوائياً أصلاً لتفادي الفلاتر. هذا الكاسح لا
+/// يقرأ أي كلمة ولا يعتمد أي اسم: يحكم بالسلوك والشكل الهندسي فقط، فيبقى
+/// صالحاً مهما تغيّر شكل الإعلان أو مضمونه أو لغته.
+///
+/// **بوابة إلزامية** (شرط لا يكفي غيره): إما أن يحوي العنصر رابطاً/زراً
+/// لنطاق مختلف أو يفتح نافذة جديدة (هدف الإعلان الوحيد أصلاً)، أو أن يكون
+/// خارج حاوية المشغّل رغم تغطيته للفيديو. هذا تحديداً ما يمنع حجب واجهة
+/// مشغّل حقيقية بالخطأ: قائمة جودة حقيقية تظهر بعد التشغيل وبمنتصف
+/// الفيديو، لكنها داخل حاوية المشغّل وبلا أي رابط خارجي.
+///
+/// وأي تحدٍّ بشري حقيقي (Cloudflare/hCaptcha/reCAPTCHA) مستثنى صراحةً
+/// ليبقى ظاهراً وقابلاً للحل — الحجب هنا للإعلانات المزيّفة فقط.
+const String kOverlayAdSweeperScript = r'''(() => {
+  try {
+    if (window.__sportsPlayerOverlaySweeper) return;
+    window.__sportsPlayerOverlaySweeper = true;
+
+    const REAL_CHALLENGE = 'iframe[src*="challenges.cloudflare.com" i],iframe[src*="hcaptcha.com" i],iframe[src*="recaptcha" i],.cf-turnstile,#cf-chl-widget,#challenge-form,#challenge-running,.g-recaptcha,.h-captcha';
+    const PLAYER_BOX = 'video,.video-js,.jwplayer,.jw-wrapper,.plyr,[class*="player" i],[id*="player" i]';
+
+    const report = (payload) => {
+      try {
+        if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
+          window.SportsPlayerSource.postMessage(JSON.stringify(payload));
+        }
+      } catch (_) {}
+    };
+
+    const bornAt = new WeakMap();
+    let playbackStartedAt = 0;
+
+    const notePlayback = () => {
+      if (playbackStartedAt) return;
+      try {
+        document.querySelectorAll('video,audio').forEach((v) => {
+          if (!v.paused && v.currentTime > 0.2) playbackStartedAt = Date.now();
+        });
+      } catch (_) {}
+    };
+
+    const videoRects = () => {
+      const rects = [];
+      try {
+        document.querySelectorAll('video').forEach((v) => {
+          const r = v.getBoundingClientRect();
+          if (r.width >= 80 && r.height >= 60) rects.push(r);
+        });
+      } catch (_) {}
+      return rects;
+    };
+
+    const overlaps = (a, b) =>
+      !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+
+    const registrable = (host) => {
+      const parts = String(host || '').toLowerCase().split('.').filter(Boolean);
+      return parts.length <= 2 ? parts.join('.') : parts.slice(-2).join('.');
+    };
+
+    const isRealChallenge = (el) => {
+      try {
+        if (el.matches && el.matches(REAL_CHALLENGE)) return true;
+        if (el.querySelector && el.querySelector(REAL_CHALLENGE)) return true;
+        if (el.closest && el.closest(REAL_CHALLENGE)) return true;
+      } catch (_) {}
+      return false;
+    };
+
+    // يرجع 0 لو العنصر ليس تراكباً إعلانياً، وإلا درجة ثقة.
+    const suspicion = (el) => {
+      try {
+        if (!el || el.nodeType !== 1) return 0;
+        if (el.hasAttribute && el.hasAttribute('data-sports-player-blocked-ad')) return 0;
+        if (isRealChallenge(el)) return 0;
+        // لا نلمس أبداً عنصراً يحتضن الفيديو نفسه.
+        if (el.querySelector && el.querySelector('video,audio')) return 0;
+
+        const style = getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return 0;
+        if (parseFloat(style.opacity || '1') < 0.05) return 0;
+
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 60 || rect.height < 40) return 0;
+
+        const videos = videoRects();
+        if (!videos.length) return 0;
+        if (!videos.some((v) => overlaps(rect, v))) return 0;
+
+        // --- البوابة الإلزامية ---
+        const pageHost = registrable(location.hostname);
+        let external = 0;
+        let controls = 0;
+        try {
+          el.querySelectorAll('a,button,[role="button"],[onclick]').forEach((node) => {
+            controls++;
+            const target = ((node.getAttribute && node.getAttribute('target')) || '').toLowerCase();
+            if (target === '_blank' || target === '_new') external++;
+            const href = node.getAttribute && node.getAttribute('href');
+            if (href && /^https?:/i.test(href)) {
+              try {
+                if (registrable(new URL(href, location.href).hostname) !== pageHost) external++;
+              } catch (_) {}
+            }
+          });
+        } catch (_) {}
+        let insidePlayer = false;
+        try { insidePlayer = !!(el.closest && el.closest(PLAYER_BOX)); } catch (_) {}
+        if (external === 0 && insidePlayer) return 0;
+
+        // --- الترجيح ---
+        let score = 0;
+        const position = style.position;
+        if (position === 'fixed' || position === 'absolute' || position === 'sticky') score += 20;
+        const zIndex = parseInt(style.zIndex || '0', 10);
+        if (zIndex >= 100) score += 20;
+        else if (zIndex >= 10) score += 10;
+        if (external > 0) score += 40;
+
+        const appearedAt = bornAt.get(el);
+        if (playbackStartedAt && appearedAt && appearedAt >= playbackStartedAt) score += 30;
+
+        if (controls >= 1 && controls <= 3) score += 10;
+        const text = ((el.innerText || '') + '').trim();
+        if (text.length > 0 && text.length <= 200) score += 10;
+
+        // تراكب بوسط الفيديو (لا شريط تحكم بحافته)
+        const v = videos[0];
+        if (rect.top > v.top + v.height * 0.05 && rect.bottom < v.bottom - v.height * 0.02) {
+          score += 15;
+        }
+        return score;
+      } catch (_) {
+        return 0;
+      }
+    };
+
+    const neutralize = (el, score) => {
+      try {
+        el.setAttribute('data-sports-player-blocked-ad', '1');
+        el.style.setProperty('display', 'none', 'important');
+        el.style.setProperty('pointer-events', 'none', 'important');
+        report({ type: 'overlay_ad_blocked', score: score, tag: el.tagName || '' });
+      } catch (_) {}
+    };
+
+    const THRESHOLD = 75;
+
+    const sweep = () => {
+      notePlayback();
+      try {
+        const roots = [];
+        if (document.body) {
+          Array.prototype.push.apply(roots, Array.from(document.body.children));
+        }
+        // كل عنصر مُلحَق حديثاً (سجّله المراقب) يُفحَص أيضاً ولو كان عميقاً.
+        recent.forEach((el) => roots.push(el));
+        const seen = new Set();
+        roots.forEach((el) => {
+          if (!el || seen.has(el)) return;
+          seen.add(el);
+          const score = suspicion(el);
+          if (score >= THRESHOLD) neutralize(el, score);
+        });
+      } catch (_) {}
+    };
+
+    // عناصر أُضيفت للصفحة مؤخراً — أقوى إشارة على تراكب مُقحَم بعد التشغيل.
+    let recent = [];
+    try {
+      new MutationObserver((records) => {
+        const now = Date.now();
+        records.forEach((record) => {
+          record.addedNodes && record.addedNodes.forEach((node) => {
+            if (!node || node.nodeType !== 1) return;
+            bornAt.set(node, now);
+            recent.push(node);
+          });
+        });
+        if (recent.length > 60) recent = recent.slice(-60);
+        sweep();
+      }).observe(document.documentElement || document, { childList: true, subtree: true });
+    } catch (_) {}
+
+    sweep();
+    try { setInterval(sweep, 1500); } catch (_) {}
+
+    // نقطة دخول يدوية: زر النجاة بواجهة Flutter يستدعيها مباشرة.
+    window.__sportsPlayerSweepOverlays = sweep;
+  } catch (_) {}
+})();''';

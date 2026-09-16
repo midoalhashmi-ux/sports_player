@@ -466,6 +466,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       _setWebSessionState(_WebSessionState.drmWebOnly);
       return;
     }
+    if (type == 'overlay_ad_blocked') {
+      // تشخيص فقط — يثبت بالسجل أن الكاسح البنيوي اشتغل فعلاً وعلى ماذا،
+      // بدل الاعتماد على وصف المستخدم لشكل الإعلان.
+      _slog('OVERLAY_AD_BLOCKED',
+          'score=${decoded['score']} tag=${decoded['tag']}');
+      return;
+    }
     if (type == 'media_resource') {
       _webMediaResourceHits++;
       _lastWebMediaResourceHitAt = DateTime.now();
@@ -700,6 +707,10 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
 
   Future<void> _installWebProtection(WebViewController controller) async {
     await controller.runJavaScript(kWebProtectionScript);
+    // كاسح بنيوي مستقل يعمل بالتوازي مع الحماية أعلاه: لا يقرأ أي كلمة
+    // ولا يعتمد أي اسم كلاس، فيصمد أمام أي إعلان جديد مهما تغيّر شكله أو
+    // لغته (راجع kOverlayAdSweeperScript وTECHNICAL.md #51).
+    await controller.runJavaScript(kOverlayAdSweeperScript);
   }
 
   Future<List<String>> _detectPublicMediaSources(WebViewController controller) async {

@@ -2249,6 +2249,8 @@ class _WatchScreenState extends State<WatchScreen>
                     child: WebViewWidget(controller: _webController!),
                   ),
                 ),
+              if (_isWebSource && _webController != null && _shouldShowWebPage)
+                _buildOverlayAdEscapeButton(),
               if (_isHiddenWebSourceActive && _hiddenSourceGraceElapsed)
                 _buildHiddenWebSourceStatus(),
               if (_state == _LoadState.ready && !_isWebSource)
@@ -2546,6 +2548,82 @@ class _WatchScreenState extends State<WatchScreen>
   // تعديل ثانٍ: أُضيف نص (_loadingMessage نفسه المستخدَم بـ_buildLoading،
   // يتغيّر تلقائياً مع الوقت) — المؤشر الدائري وحده لم يكن كافياً ليشعر
   // المستخدم أن التشغيل على وشك البدء فعلاً.
+  /// زر نجاة مضمون — يعيش بطبقة Flutter فوق الـWebView، خارج متناول
+  /// الصفحة تماماً.
+  ///
+  /// مهما تطوّرت أساليب الإعلانات (تراكب داخل iframe من أصل مختلف لا يصله
+  /// جافاسكربتنا إطلاقاً بقيد المتصفح نفسه، أو شكل جديد لم يتوقّعه
+  /// الكاسح)، يبقى للمستخدم مخرج فوري بضغطة واحدة بدل الخروج من الحلقة.
+  Widget _buildOverlayAdEscapeButton() {
+    return Positioned(
+      top: 8,
+      left: 8,
+      child: SafeArea(
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.45),
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: IconButton(
+            tooltip: 'إخفاء الإعلانات',
+            iconSize: 18,
+            constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.block, color: Colors.white70),
+            onPressed: _sweepOverlayAdsNow,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// يعيد تشغيل كاسح التراكبات فوراً، ويحذف كذلك أي تراكب يغطي الفيديو
+  /// حتى لو لم يبلغ عتبة الثقة التلقائية — الضغط اليدوي نفسه هو الإشارة:
+  /// المستخدم يرى شيئاً يزعجه الآن.
+  Future<void> _sweepOverlayAdsNow() async {
+    final controller = _webController;
+    if (controller == null) return;
+    _slog('OVERLAY_AD_MANUAL_SWEEP', 'requested by user');
+    try {
+      await controller.runJavaScript(r'''(() => {
+        try {
+          if (window.__sportsPlayerSweepOverlays) window.__sportsPlayerSweepOverlays();
+          const real = 'iframe[src*="challenges.cloudflare.com" i],iframe[src*="hcaptcha.com" i],iframe[src*="recaptcha" i],.cf-turnstile,#cf-chl-widget,#challenge-form,#challenge-running,.g-recaptcha,.h-captcha';
+          const videos = [];
+          document.querySelectorAll('video').forEach((v) => {
+            const r = v.getBoundingClientRect();
+            if (r.width >= 80 && r.height >= 60) videos.push(r);
+          });
+          if (!videos.length) return;
+          // نحصر الحذف اليدوي بما يغطي **مركز** الفيديو: النوافذ المزيّفة
+          // تتوسّط الصورة دائماً (لتُجبر على النقر)، بينما شريط التحكم
+          // الحقيقي يلتصق بحافة سفلية/علوية ولا يمر بالمركز — فلا يُحذف.
+          const covers = (r, v) => {
+            const cx = v.left + v.width / 2;
+            const cy = v.top + v.height / 2;
+            return r.left <= cx && r.right >= cx && r.top <= cy && r.bottom >= cy;
+          };
+          document.querySelectorAll('body *').forEach((el) => {
+            try {
+              if (el.querySelector && el.querySelector('video,audio')) return;
+              if (el.matches && el.matches(real)) return;
+              if (el.closest && el.closest(real)) return;
+              const st = getComputedStyle(el);
+              if (st.position !== 'fixed' && st.position !== 'absolute' && st.position !== 'sticky') return;
+              const r = el.getBoundingClientRect();
+              if (r.width < 60 || r.height < 40) return;
+              // تراكب يغطي الفيديو بأكمله تقريباً = غالباً غلاف المشغّل نفسه
+              if (videos.some((v) => r.width >= v.width * 0.98 && r.height >= v.height * 0.98)) return;
+              if (!videos.some((v) => covers(r, v))) return;
+              el.setAttribute('data-sports-player-blocked-ad', '1');
+              el.style.setProperty('display', 'none', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+            } catch (_) {}
+          });
+        } catch (_) {}
+      })();''');
+    } catch (_) {}
+  }
+
   Widget _buildHiddenWebSourceStatus() {
     return Positioned.fill(
       child: ColoredBox(
