@@ -21,6 +21,7 @@ import '../services/channel_source_resolver.dart';
 import '../services/stream_models.dart';
 import '../services/api_source_resolver.dart';
 import '../services/hls_cache_proxy.dart';
+import '../services/hls_variant_selector.dart';
 import '../services/native_cookie_service.dart';
 import '../services/player_strategies/player_strategy.dart';
 import '../services/player_visibility_service.dart';
@@ -28,6 +29,7 @@ import '../services/preferred_server_service.dart';
 import '../services/site_recipe_service.dart';
 import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
+import 'web_injection_scripts.dart';
 import '../theme/app_theme.dart';
 
 // محرك اكتشاف مصدر WebView -> Native (كل _web* السابقة) صار mixin منفصل
@@ -365,7 +367,14 @@ class _WatchScreenState extends State<WatchScreen>
   @override
   void initState() {
     super.initState();
-    _hlsCacheProxy = HlsCacheProxy(onLog: _slog);
+    _hlsCacheProxy = HlsCacheProxy(
+      onLog: _slog,
+      onVariantsDiscovered: _onHlsVariantsDiscovered,
+      isWebViewActiveNearby: () =>
+          _lastWebMediaResourceHitAt != null &&
+          DateTime.now().difference(_lastWebMediaResourceHitAt!) <
+              const Duration(seconds: 3),
+    );
     SessionLogService.instance.startSession(
       'channelId=${widget.channelId} externalUrl=${widget.externalUrl}',
     );
@@ -1167,11 +1176,14 @@ class _WatchScreenState extends State<WatchScreen>
     try {
       // تبديل جودة/سيرفر يدوي أثناء تشغيل فعلي (مو أول محاولة قادمة من
       // WebView) يجب يكمل من نفس النقطة بدل ما يرجّع الفيديو لبدايته.
-      final resumeFrom = (!fallbackToWeb &&
-              _controller?.value.isInitialized == true &&
-              _position > Duration.zero)
-          ? _position
-          : null;
+      // **لا نشترط بقاء المتحكّم القديم مُهيّأً**: بعد خطأ مصدر قاتل
+      // (`ExoPlaybackException: Source error`) يفقد المتحكّم تهيئته، وكان
+      // هذا الشرط يُسقِط `resumeFrom` لـnull فيبدأ الفيديو **من الصفر** رغم
+      // أننا نتتبّع `_position` بأنفسنا ونسجّلها صحيحة بنفس اللحظة
+      // (`NATIVE_AUTO_RECONNECT ... position=0:07:59`). هذا كان سبب
+      // "يتوقف ثم يعود للبداية" المُبلَّغ بعد التقديم أو بعد دقائق.
+      final resumeFrom =
+          (!fallbackToWeb && _position > Duration.zero) ? _position : null;
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
@@ -1210,6 +1222,10 @@ class _WatchScreenState extends State<WatchScreen>
         final proxied = await _hlsCacheProxy.start(
           sourceUrl: quality.url,
           headers: effectiveHeaders,
+          // الجودات التي أثبت مشغّل الموقع تشغيلها فعلاً بهذي الشبكة —
+          // الوكيل يحصر بها قائمة الجودات المسلَّمة لـExoPlayer فلا يبدأ
+          // بالأثقل ولا يصعد إليها بمنتصف التشغيل (TECHNICAL.md #50).
+          provenVariantKeys: _webProvenVariantKeys,
         );
         if (proxied != null) {
           playbackUri = proxied;
@@ -1232,16 +1248,21 @@ class _WatchScreenState extends State<WatchScreen>
       // بلا نجاح ولا فشل مسجَّل لأكثر من 40 ثانية (بلا هذا الحد). أي تعليق
       // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال مهلة محدودة، فيدخل بمسار
       // المعالجة/إعادة الاتصال الموجود بدل تعليق صامت غير مشخَّص.
-      // خُفِّضت من 15 إلى 9 ثوانٍ: سجلات تشخيص فعلية متعددة تُظهر أن أي
-      // تشغيل ناجح فعلياً يكتمل خلال 3-5 ثوانٍ كحد أقصى (مهما كان المصدر)،
-      // بينما مرشّح ميت فعلياً (اتصال CDN منقطع) كان يُهدر المهلة الكاملة
-      // 15 ثانية قبل الانتقال للمرشّح التالي — مع وجود مرشّحين محتملين أو
-      // أكثر بجلسة واحدة هذا يعني حتى 30 ثانية انتظار قبل ما يبدأ المسلسل،
-      // رغم إن كلا المرشّحين ميّتان فعلياً من ثوانيهما الأولى.
+      // خُفِّضت سابقاً من 15 إلى 9 ثوانٍ (افتراض وقتها: أي تشغيل ناجح
+      // فعلياً يكتمل خلال 3-5 ثوانٍ كحد أقصى) — **سجل تشخيص فعلي لاحق نقض
+      // هذا الافتراض**: تشغيل أنمي نجح فعلياً (`PLAY_SERVER_QUALITY_SUCCESS`)
+      // خلال 6.9 ثانية بالضبط، بلا أي خطأ اتصال (صفر
+      // `HLS_PROXY_SEGMENT_FETCH_ERROR` بكامل السجل) — كان بمجرد أبطأ قليلاً
+      // (شبكة/CDN) لسقط بحد الـ9 ثوانٍ رغم كونه اتصالاً سليماً تماماً، لا
+      // مرشّحاً ميتاً. هذا يفسّر بلاغ مستخدم مباشر: "المشغل الويب يعمل
+      // ولم يلتقطه مشغلي إلا متأخراً" — نجاح متأخر حقيقي كان يخاطر بالسقوط
+      // بالحد القديم. رُفعت لـ13 ثانية: هامش أوسع (~6 ثوانٍ فوق أبطأ نجاح
+      // حقيقي مسجَّل) بدل العودة الكاملة لـ15 (تفادياً لمشكلة "30 ثانية
+      // انتظار بمرشّحين ميّتين" الأصلية اللي بررت التخفيض لـ9 أصلاً).
       await newController.initialize().timeout(
-        const Duration(seconds: 9),
+        const Duration(seconds: 13),
         onTimeout: () => throw TimeoutException(
-            'native initialize() timed out after 9s — url=${_safeLogUrl(quality.url)}'),
+            'native initialize() timed out after 13s — url=${_safeLogUrl(quality.url)}'),
       );
       if (resumeFrom != null) {
         try {
@@ -2232,6 +2253,8 @@ class _WatchScreenState extends State<WatchScreen>
                     child: WebViewWidget(controller: _webController!),
                   ),
                 ),
+              if (_isWebSource && _webController != null && _shouldShowWebPage)
+                _buildOverlayAdEscapeButton(),
               if (_isHiddenWebSourceActive && _hiddenSourceGraceElapsed)
                 _buildHiddenWebSourceStatus(),
               if (_state == _LoadState.ready && !_isWebSource)
@@ -2529,6 +2552,133 @@ class _WatchScreenState extends State<WatchScreen>
   // تعديل ثانٍ: أُضيف نص (_loadingMessage نفسه المستخدَم بـ_buildLoading،
   // يتغيّر تلقائياً مع الوقت) — المؤشر الدائري وحده لم يكن كافياً ليشعر
   // المستخدم أن التشغيل على وشك البدء فعلاً.
+  /// يغذّي قائمة الجودات الموجودة أصلاً (`_openQualitySheet`) بما اكتشفه
+  /// الوكيل داخل القائمة الرئيسية.
+  ///
+  /// **لا ننشئ قائمة موازية**: الورقة الحالية تتعامل أصلاً مع فرق
+  /// WebView/native وتبديل السيرفرات بمنطق ناضج — نحقن الجودات في
+  /// `_activeServer.qualities` فتظهر تلقائياً بقسم "الجودة" هناك.
+  /// الجودة الأولى تبقى "تلقائي" (القائمة الرئيسية = تكيّف ExoPlayer ضمن
+  /// السقف الآمن)، يليها كل الدرجات للاختيار اليدوي.
+  void _onHlsVariantsDiscovered(List<HlsVariant> variants) {
+    if (!mounted || variants.length < 2) return;
+    final server = _activeServer;
+    final current = _activeQuality;
+    if (server == null || current == null) return;
+    // سيرفر مُكتشَف تلقائياً فقط: جوداته روابط وسائط مُثبَتة، بينما سيرفر
+    // من لوحة التحكم قد تكون "جوداته" صفحات ويب لا يصح استبدالها.
+    if (server.label != _autoDiscoveredServerLabel) return;
+
+    final sorted = [...variants]
+      ..sort((a, b) => b.bandwidth.compareTo(a.bandwidth));
+    final variantUrls = sorted.map((v) => v.url).toList();
+    final qualities = <StreamQuality>[
+      if (!variantUrls.contains(current.url))
+        StreamQuality(label: 'تلقائي', url: current.url),
+      for (final variant in sorted)
+        StreamQuality(label: variant.label, url: variant.url),
+    ];
+
+    // نفس القائمة تُبلَّغ مع كل تحديث للقائمة الرئيسية — لا نُعيد البناء
+    // بلا تغيير فعلي (وإلا دارت setState بلا نهاية).
+    final unchanged = server.qualities.length == qualities.length &&
+        List.generate(qualities.length, (i) => server.qualities[i].url)
+            .join('|') ==
+            qualities.map((q) => q.url).join('|');
+    if (unchanged) return;
+
+    _slog('QUALITIES_AVAILABLE',
+        'count=${qualities.length} labels=${qualities.map((q) => q.label).join(",")}');
+    setState(() {
+      _activeServer =
+          StreamServerOption(label: server.label, qualities: qualities);
+    });
+  }
+
+  Widget _buildQualityButton() {
+    return _circleIconButton(
+      icon: Icons.high_quality,
+      tooltip: 'جودة الفيديو',
+      onPressed: _openQualitySheet,
+    );
+  }
+
+  /// زر نجاة مضمون — يعيش بطبقة Flutter فوق الـWebView، خارج متناول
+  /// الصفحة تماماً.
+  ///
+  /// مهما تطوّرت أساليب الإعلانات (تراكب داخل iframe من أصل مختلف لا يصله
+  /// جافاسكربتنا إطلاقاً بقيد المتصفح نفسه، أو شكل جديد لم يتوقّعه
+  /// الكاسح)، يبقى للمستخدم مخرج فوري بضغطة واحدة بدل الخروج من الحلقة.
+  Widget _buildOverlayAdEscapeButton() {
+    return Positioned(
+      top: 8,
+      left: 8,
+      child: SafeArea(
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.45),
+          shape: const CircleBorder(),
+          clipBehavior: Clip.antiAlias,
+          child: IconButton(
+            tooltip: 'إخفاء الإعلانات',
+            iconSize: 18,
+            constraints: const BoxConstraints.tightFor(width: 34, height: 34),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.block, color: Colors.white70),
+            onPressed: _sweepOverlayAdsNow,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// يعيد تشغيل كاسح التراكبات فوراً، ويحذف كذلك أي تراكب يغطي الفيديو
+  /// حتى لو لم يبلغ عتبة الثقة التلقائية — الضغط اليدوي نفسه هو الإشارة:
+  /// المستخدم يرى شيئاً يزعجه الآن.
+  Future<void> _sweepOverlayAdsNow() async {
+    final controller = _webController;
+    if (controller == null) return;
+    _slog('OVERLAY_AD_MANUAL_SWEEP', 'requested by user');
+    try {
+      await controller.runJavaScript(r'''(() => {
+        try {
+          if (window.__sportsPlayerSweepOverlays) window.__sportsPlayerSweepOverlays();
+          const real = 'iframe[src*="challenges.cloudflare.com" i],iframe[src*="hcaptcha.com" i],iframe[src*="recaptcha" i],.cf-turnstile,#cf-chl-widget,#challenge-form,#challenge-running,.g-recaptcha,.h-captcha';
+          const videos = [];
+          document.querySelectorAll('video').forEach((v) => {
+            const r = v.getBoundingClientRect();
+            if (r.width >= 80 && r.height >= 60) videos.push(r);
+          });
+          if (!videos.length) return;
+          // نحصر الحذف اليدوي بما يغطي **مركز** الفيديو: النوافذ المزيّفة
+          // تتوسّط الصورة دائماً (لتُجبر على النقر)، بينما شريط التحكم
+          // الحقيقي يلتصق بحافة سفلية/علوية ولا يمر بالمركز — فلا يُحذف.
+          const covers = (r, v) => {
+            const cx = v.left + v.width / 2;
+            const cy = v.top + v.height / 2;
+            return r.left <= cx && r.right >= cx && r.top <= cy && r.bottom >= cy;
+          };
+          document.querySelectorAll('body *').forEach((el) => {
+            try {
+              if (el.querySelector && el.querySelector('video,audio')) return;
+              if (el.matches && el.matches(real)) return;
+              if (el.closest && el.closest(real)) return;
+              const st = getComputedStyle(el);
+              if (st.position !== 'fixed' && st.position !== 'absolute' && st.position !== 'sticky') return;
+              const r = el.getBoundingClientRect();
+              if (r.width < 60 || r.height < 40) return;
+              // تراكب يغطي الفيديو بأكمله تقريباً = غالباً غلاف المشغّل نفسه
+              if (videos.some((v) => r.width >= v.width * 0.98 && r.height >= v.height * 0.98)) return;
+              if (!videos.some((v) => covers(r, v))) return;
+              el.setAttribute('data-sports-player-blocked-ad', '1');
+              el.style.setProperty('display', 'none', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+            } catch (_) {}
+          });
+        } catch (_) {}
+      })();''');
+    } catch (_) {}
+  }
+
   Widget _buildHiddenWebSourceStatus() {
     return Positioned.fill(
       child: ColoredBox(
@@ -2770,6 +2920,9 @@ class _WatchScreenState extends State<WatchScreen>
                         : 'التبديل إلى الوضع الأفقي',
                     onPressed: _toggleOrientation,
                   ),
+                  if (!_isWebSource &&
+                      (_activeServer?.qualities.length ?? 0) >= 2)
+                    _buildQualityButton(),
                   _circleIconButton(
                     icon: Icons.more_vert,
                     tooltip: 'المزيد من الخيارات',
