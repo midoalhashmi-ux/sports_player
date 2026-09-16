@@ -1160,3 +1160,127 @@ const String kOverlayAdSweeperScript = r'''(() => {
     window.__sportsPlayerSweepOverlays = sweep;
   } catch (_) {}
 })();''';
+
+/// الوصول لما **داخل** الإطارات من نفس الأصل (same-origin).
+///
+/// جافاسكربتنا يعمل بالإطار الرئيسي فقط، ويستعلم `document` مباشرةً — فلو
+/// كان المشغّل الحقيقي داخل `<iframe>` **من نفس دومين الصفحة**، يبقى
+/// خفياً تماماً رغم أن المتصفح يسمح لنا بالوصول إليه بالكامل.
+///
+/// مؤكَّد بسجل فعلي (مسلسل تركي، `ww4.3ick.club`): المشغّل داخل
+/// `/embed/1/207438/2/` بنفس الدومين، فلم يُنقَر زر التشغيل ولم يُلتقط أي
+/// مصدر طوال 16 دورة اكتشاف (`framework=0 generic=2 mediaHits=0`)، وكان
+/// المرشّح الوحيد ملف ووردبريس `wlwmanifest.xml`.
+///
+/// هذا السكربت يدخل كل إطار من نفس الأصل (متداخلاً) ويقوم بثلاثة أمور:
+/// عناصر الوسائط ومصادرها، وسجل الشبكة الخاص بالإطار
+/// (`performance.getEntriesByType`) الذي يكشف قائمة m3u8 التي طلبها
+/// المشغّل الداخلي، ونقرة تشغيل واحدة آمنة. الإطارات من أصل مختلف
+/// يتجاوزها المتصفح تلقائياً (استثناء صامت) — لا محاولة تجاوز إطلاقاً.
+const String kSameOriginFrameProbeScript = r'''(() => {
+  try {
+    if (window.__sportsPlayerFrameProbe) return;
+    window.__sportsPlayerFrameProbe = true;
+
+    const report = (payload) => {
+      try {
+        if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
+          window.SportsPlayerSource.postMessage(JSON.stringify(payload));
+        }
+      } catch (_) {}
+    };
+
+    const mediaLike = (url) => {
+      const value = String(url || '');
+      if (!/^https?:\/\//i.test(value)) return false;
+      return /\.(m3u8|m3u|mpd|mp4|m4v|webm|ts|m4s)(?:$|[?#])/i.test(value) ||
+             /(master|playlist|manifest|hls)(?:[.?&=\/]|$)/i.test(value);
+    };
+
+    const announce = (url, frameUrl) => {
+      if (!mediaLike(url)) return;
+      report({
+        type: 'hls_candidate',
+        url: String(url),
+        source: 'same-origin-frame',
+        mime: '',
+        pageUrl: location.href,
+        frameUrl: frameUrl || location.href,
+        referer: document.referrer || location.href
+      });
+    };
+
+    // يرجع مستند الإطار لو كان من نفس الأصل، وإلا null (بلا أي محاولة تجاوز).
+    const sameOriginDoc = (frame) => {
+      try {
+        const doc = frame.contentDocument;
+        if (!doc || !doc.location) return null;
+        return doc;
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const probeDoc = (doc, win, depth) => {
+      if (!doc || depth > 3) return;
+      const frameUrl = (doc.location && doc.location.href) || '';
+
+      try {
+        doc.querySelectorAll('video,audio,source').forEach((el) => {
+          announce(el.currentSrc || el.src || el.getAttribute('src'), frameUrl);
+        });
+      } catch (_) {}
+
+      // سجل شبكة الإطار نفسه — يكشف ما طلبه المشغّل الداخلي فعلاً.
+      try {
+        if (win && win.performance && win.performance.getEntriesByType) {
+          win.performance.getEntriesByType('resource').forEach((entry) => {
+            announce(entry.name, frameUrl);
+          });
+        }
+      } catch (_) {}
+
+      // نقرة تشغيل واحدة داخل الإطار (نفس تحفّظات الإطار الرئيسي).
+      try {
+        if (!win.__sportsPlayerFrameClicked) {
+          const video = doc.querySelector('video');
+          if (video && video.paused && video.readyState >= 1) {
+            win.__sportsPlayerFrameClicked = true;
+            try { video.muted = true; } catch (_) {}
+            const promise = video.play();
+            if (promise && promise.catch) promise.catch(() => {});
+            report({ type: 'same_origin_frame_played', frameUrl: frameUrl });
+          } else {
+            const button = doc.querySelector(
+              '.jw-icon-playback,.vjs-big-play-button,.plyr__control--overlaid,[class*="play" i][class*="button" i],button[aria-label*="play" i]');
+            if (button) {
+              win.__sportsPlayerFrameClicked = true;
+              button.click();
+              report({ type: 'same_origin_frame_played', frameUrl: frameUrl });
+            }
+          }
+        }
+      } catch (_) {}
+
+      // إطارات متداخلة بنفس الأصل.
+      try {
+        doc.querySelectorAll('iframe').forEach((frame) => {
+          const inner = sameOriginDoc(frame);
+          if (inner) probeDoc(inner, frame.contentWindow, depth + 1);
+        });
+      } catch (_) {}
+    };
+
+    const run = () => {
+      try {
+        document.querySelectorAll('iframe').forEach((frame) => {
+          const doc = sameOriginDoc(frame);
+          if (doc) probeDoc(doc, frame.contentWindow, 1);
+        });
+      } catch (_) {}
+    };
+
+    run();
+    try { setInterval(run, 1200); } catch (_) {}
+  } catch (_) {}
+})();''';

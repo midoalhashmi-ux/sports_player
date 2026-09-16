@@ -26,7 +26,11 @@ import 'hls_variant_selector.dart';
 /// (راجع _playServerQuality) — أي تعليق الآن يتحوّل لفشل واضح خلال 15
 /// ثانية كحد أقصى، أياً كان السبب.
 class HlsCacheProxy {
-  HlsCacheProxy({this.onLog, this.isWebViewActiveNearby});
+  HlsCacheProxy({
+    this.onLog,
+    this.isWebViewActiveNearby,
+    this.onVariantsDiscovered,
+  });
 
   /// (tag, detail) — يُمرَّر لـ_slog بـwatch_screen لتظهر بسجل التشخيص
   /// الذي يصدّره المستخدم، بنفس تنسيق بقية أحداث المشغّل.
@@ -38,6 +42,11 @@ class HlsCacheProxy {
   /// جلبنا (فرضية: اتصالات وكيلنا + WebView المتزامنة قد تتجاوز حد تحمّل
   /// الـCDN المنخفض أصلاً — راجع TECHNICAL.md #47).
   final bool Function()? isWebViewActiveNearby;
+
+  /// يُبلَّغ بكل الجودات المكتشَفة داخل أي قائمة رئيسية تمر بالوكيل —
+  /// تُبنى منها أزرار الجودة بشاشة المشاهدة. يُستدعى بالجودات **كاملة**
+  /// (قبل تطبيق السقف) حتى يبقى للمستخدم خيار يدوي بكل الدرجات.
+  final void Function(List<HlsVariant> variants)? onVariantsDiscovered;
 
   HttpServer? _server;
   http.Client? _client;
@@ -452,9 +461,20 @@ class HlsCacheProxy {
       final bandwidth = int.tryParse(
               RegExp(r'BANDWIDTH=(\d+)').firstMatch(streamInf)?.group(1) ?? '') ??
           0;
-      variants.add(HlsVariant(bandwidth: bandwidth, label: '', url: url));
+      final height =
+          RegExp(r'RESOLUTION=\d+x(\d+)').firstMatch(streamInf)?.group(1);
+      final label = height != null
+          ? '${height}p'
+          : (bandwidth > 0 ? '${(bandwidth / 1000).round()} كيلوبت/ث' : 'تلقائي');
+      variants.add(HlsVariant(bandwidth: bandwidth, label: label, url: url));
     }
     if (variants.length < 2) return blocks;
+
+    // نبلّغ بالقائمة **الكاملة** قبل السقف — أزرار الجودة بالواجهة يجب أن
+    // تعرض كل الدرجات، فالسقف تلقائي والمستخدم يبقى سيّد اختياره.
+    try {
+      onVariantsDiscovered?.call(List<HlsVariant>.unmodifiable(variants));
+    } catch (_) {}
 
     final allowed = HlsVariantSelector.allowedUrls(
       variants,
@@ -527,7 +547,8 @@ class HlsCacheProxy {
   Future<void> _handleSegment(HttpRequest request, String originalUrl) async {
     var bytes = _segmentCache[originalUrl];
     if (bytes == null) {
-      bytes = await _fetchSegmentWithRetry(originalUrl);
+      _dropStalePrefetches(originalUrl);
+      bytes = await _fetchSegmentWithRetry(originalUrl, foreground: true);
       if (bytes != null) _cacheSegment(originalUrl, bytes);
     }
     // جسم فارغ (200 OK بلا بيانات) مصدر فعلي غير نظري — بعض خوادم CDN
@@ -570,7 +591,39 @@ class HlsCacheProxy {
     await request.response.close();
   }
 
-  Future<List<int>?> _fetchSegmentWithRetry(String url) async {
+  /// يُلغي الجلب المسبق الذي لم يعد له معنى بعد قفزة بالفيديو (seek).
+  ///
+  /// **سبب وجودها (مؤكَّد بسجل فعلي)**: عند التقديم لدقيقة 8، يطلب ExoPlayer
+  /// شريحة بعيدة، بينما طابور الجلب المسبق لا يزال مملوءاً بشرائح البداية
+  /// (`seg-2`, `seg-6`, `seg-7`, `seg-24`). تلك الشرائح الميتة كانت تحتجز
+  /// **كل** فتحات التزامن الثلاث بمهلة 15 ثانية × 3 محاولات = حتى 45 ثانية
+  /// لكل واحدة، فتتضوّر الشريحة التي يحتاجها المشغّل فعلاً الآن → تجمّد →
+  /// `Source error` → إعادة اتصال. راجع TECHNICAL.md #53.
+  void _dropStalePrefetches(String requestedUrl) {
+    if (_prefetchQueue.isEmpty) return;
+    final index = _segmentSequence.indexOf(requestedUrl);
+    if (index < 0) return;
+    final horizon = index + _prefetchAhead + 4;
+    final stale = _prefetchQueue
+        .where((url) {
+          final position = _segmentSequence.indexOf(url);
+          return position < index || position > horizon;
+        })
+        .toList();
+    if (stale.isEmpty) return;
+    for (final url in stale) {
+      _prefetchQueue.remove(url);
+      _prefetching.remove(url);
+    }
+    _log('HLS_PREFETCH_DROPPED_STALE',
+        'dropped=${stale.length} around=$index remaining=${_prefetchQueue.length}');
+  }
+
+  /// `foreground`: طلب يحتاجه المشغّل الآن (يحجب التشغيل) — يستحق مهلة
+  /// كاملة. الجلب المسبق بالخلفية يأخذ مهلة أقصر بكثير: تعليقه الطويل هو
+  /// ما كان يخنق فتحات التزامن ويجمّد المشاهدة.
+  Future<List<int>?> _fetchSegmentWithRetry(String url,
+      {bool foreground = false}) async {
     // ملتقَط الجيل *وليس* الـclient نفسه: قبل الإصلاح كان `client` يُلتقَط
     // مرة واحدة بأول السطر ويُعاد استخدامه بكل محاولات إعادة الجلب الثلاث
     // — لو `stop()` استُدعيت بينهما (تبديل المرشّح لرابط بث آخر أثناء نفس
@@ -584,7 +637,8 @@ class HlsCacheProxy {
     // فعلياً يُسرّع تحرّر فتحات الجلب المتوازي (`_maxConcurrentPrefetch`)
     // لصالح الجلسة الجديدة بدل حجزها بمحاولات ميتة.
     final generation = _proxyGeneration;
-    for (var attempt = 0; attempt < 3; attempt++) {
+    final maxAttempts = foreground ? 3 : 2;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
       if (attempt > 0) {
         await Future.delayed(Duration(milliseconds: 200 * attempt * attempt));
       }
@@ -599,7 +653,7 @@ class HlsCacheProxy {
       try {
         final resp = await client
             .get(Uri.parse(url), headers: _upstreamHeaders)
-            .timeout(const Duration(seconds: 15));
+            .timeout(Duration(seconds: foreground ? 15 : 6));
         if (resp.statusCode >= 200 && resp.statusCode < 300) {
           return resp.bodyBytes;
         }

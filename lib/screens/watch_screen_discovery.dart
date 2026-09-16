@@ -466,6 +466,10 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       _setWebSessionState(_WebSessionState.drmWebOnly);
       return;
     }
+    if (type == 'same_origin_frame_played') {
+      _slog('SAME_ORIGIN_FRAME_PLAYED', 'frame=${_safeLogUrl(decoded['frameUrl']?.toString() ?? '')}');
+      return;
+    }
     if (type == 'overlay_ad_blocked') {
       // تشخيص فقط — يثبت بالسجل أن الكاسح البنيوي اشتغل فعلاً وعلى ماذا،
       // بدل الاعتماد على وصف المستخدم لشكل الإعلان.
@@ -711,6 +715,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     // ولا يعتمد أي اسم كلاس، فيصمد أمام أي إعلان جديد مهما تغيّر شكله أو
     // لغته (راجع kOverlayAdSweeperScript وTECHNICAL.md #51).
     await controller.runJavaScript(kOverlayAdSweeperScript);
+    // يدخل الإطارات من نفس الأصل (يسمح بها المتصفح بالكامل) — بدونها يبقى
+    // مشغّل داخل iframe بنفس الدومين خفياً تماماً عن الاكتشاف.
+    await controller.runJavaScript(kSameOriginFrameProbeScript);
   }
 
   Future<List<String>> _detectPublicMediaSources(WebViewController controller) async {
@@ -1488,7 +1495,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         }
 
         final iframeCandidate = await _findBestIframeCandidate(controller);
-        if (iframeCandidate != null && !_webIframePromotionInFlight && !_webPlaybackReady) {
+        // `_webPlaybackReady` تعني "أظهرنا الصفحة للمستخدم"، **لا** "وجدنا
+        // الفيديو". مؤكَّد بسجل فعلي (مسلسل تركي، ww4.3ick.club): اكتُشف
+        // video.js على الصفحة **الخارجية** فأُعلنت جاهزة، فامتنعت ترقية
+        // الـiframe الذي يحوي المشغّل الحقيقي (`/embed/1/207438/2/`) —
+        // ومنها 16 دورة اكتشاف بلا أي مرشّح (`mediaHits=0`) وفشل تام
+        // بالالتقاط رغم أن الفيديو يعمل بالصفحة. فما دام لا يوجد **أي**
+        // دليل وسائط، الترقية تبقى مسموحة.
+        final noMediaEvidenceYet = _webMediaResourceHits == 0;
+        if (iframeCandidate != null &&
+            !_webIframePromotionInFlight &&
+            (!_webPlaybackReady || noMediaEvidenceYet)) {
           final candidateUri = Uri.tryParse(iframeCandidate);
           final candidateHost = candidateUri?.host.toLowerCase() ?? '';
           final currentHost = _webSourceOrigin?.toLowerCase() ?? '';

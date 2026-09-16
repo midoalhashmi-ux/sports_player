@@ -112,15 +112,31 @@ void main() {
   });
 
   group('allowedUrls — سقف التكيّف داخل القائمة الرئيسية', () {
-    test('تحصر القائمة بالجودة المُثبَتة', () {
+    test('سقف لا مطابقة: تسمح بكل ما هو ≤ أعلى جودة مُثبَتة', () {
       final proven = {
         HlsVariantSelector.variantKey('$_base/uyjeu9vq4p2b_n/seg-1.ts')!
       };
       final allowed =
           HlsVariantSelector.allowedUrls(_fourTiers(), provenKeys: proven);
       expect(allowed, isNotNull);
-      expect(allowed!.length, 1);
-      expect(allowed.single, contains('_n/'));
+      // _n (المُثبَتة) و_l (أدنى منها) — بلا _h و_x
+      expect(allowed!.length, 2);
+      expect(allowed.any((u) => u.contains('_n/')), isTrue);
+      expect(allowed.any((u) => u.contains('_l/')), isTrue);
+      expect(allowed.any((u) => u.contains('_h/')), isFalse);
+      expect(allowed.any((u) => u.contains('_x/')), isFalse);
+    });
+
+    test('إثبات الأدنى وحده لا يحبس المشاهدة عليه بلا داعٍ', () {
+      // نفس حالة سجل الأنمي: أول إثبات كان _l، فكان السقف القديم يُبقي
+      // جودة واحدة فقط (kept=1/2) ويحبس الحلقة على 480p.
+      final proven = {
+        HlsVariantSelector.variantKey('$_base/uyjeu9vq4p2b_l/seg-1.ts')!
+      };
+      final allowed =
+          HlsVariantSelector.allowedUrls(_twoTiers(), provenKeys: proven);
+      expect(allowed, isNotNull);
+      expect(allowed!.length, 1, reason: 'بجودتين فقط، _l هي كل ما دون السقف');
     });
 
     test('تحذف الأعلى فقط حين لا يوجد إثبات', () {

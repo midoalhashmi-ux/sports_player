@@ -117,14 +117,27 @@ class HlsVariantSelector {
     if (variants.length < 2) return null;
 
     if (provenKeys.isNotEmpty) {
-      final allowed = <String>{
-        for (final variant in variants)
-          if (provenKeys.contains(variantKey(variant.url) ?? '')) variant.url,
-      };
-      if (allowed.isNotEmpty && allowed.length < variants.length) {
-        return allowed;
+      // **سقف لا مطابقة**: نسمح بكل جودة ≤ أعلى جودة مُثبَتة، لا بالمُثبَتة
+      // وحدها. مشغّل الموقع يبدأ عادةً من أدنى درجة ثم يصعد، فلو التقطنا
+      // أول إثبات (الأدنى) وحصرنا القائمة به لحبسنا المشاهدة على 480p طوال
+      // الحلقة — وهذا ما حصل فعلاً بسجل `HLS_VARIANT_CEILING: kept=1/2`.
+      // السقف يُبقي مجال التكيّف كاملاً تحت المُثبَت، ويمنع فقط الطبقات
+      // الأثقل التي لم يُثبِت أحد أن الشبكة تتحمّلها.
+      var ceiling = -1;
+      for (final variant in variants) {
+        final key = variantKey(variant.url);
+        if (key != null && provenKeys.contains(key) && variant.bandwidth > ceiling) {
+          ceiling = variant.bandwidth;
+        }
       }
-      if (allowed.length == variants.length) return null;
+      if (ceiling >= 0) {
+        final allowed = <String>{
+          for (final variant in variants)
+            if (variant.bandwidth <= ceiling) variant.url,
+        };
+        if (allowed.isNotEmpty && allowed.length < variants.length) return allowed;
+        return null;
+      }
     }
 
     if (variants.length < _extraTierThreshold) return null;

@@ -369,6 +369,7 @@ class _WatchScreenState extends State<WatchScreen>
     super.initState();
     _hlsCacheProxy = HlsCacheProxy(
       onLog: _slog,
+      onVariantsDiscovered: _onHlsVariantsDiscovered,
       isWebViewActiveNearby: () =>
           _lastWebMediaResourceHitAt != null &&
           DateTime.now().difference(_lastWebMediaResourceHitAt!) <
@@ -1172,14 +1173,20 @@ class _WatchScreenState extends State<WatchScreen>
       _activeServer = server;
       _activeQuality = quality;
     });
+    // أول رابط يُشغَّل لهذا المصدر هو "التلقائي" (القائمة الرئيسية) —
+    // نحفظه ليعود إليه المستخدم من زر الجودة بعد أي اختيار يدوي.
+    if (_manualQualityUrl == null) _activeQualityUrlForAuto = quality;
     try {
       // تبديل جودة/سيرفر يدوي أثناء تشغيل فعلي (مو أول محاولة قادمة من
       // WebView) يجب يكمل من نفس النقطة بدل ما يرجّع الفيديو لبدايته.
-      final resumeFrom = (!fallbackToWeb &&
-              _controller?.value.isInitialized == true &&
-              _position > Duration.zero)
-          ? _position
-          : null;
+      // **لا نشترط بقاء المتحكّم القديم مُهيّأً**: بعد خطأ مصدر قاتل
+      // (`ExoPlaybackException: Source error`) يفقد المتحكّم تهيئته، وكان
+      // هذا الشرط يُسقِط `resumeFrom` لـnull فيبدأ الفيديو **من الصفر** رغم
+      // أننا نتتبّع `_position` بأنفسنا ونسجّلها صحيحة بنفس اللحظة
+      // (`NATIVE_AUTO_RECONNECT ... position=0:07:59`). هذا كان سبب
+      // "يتوقف ثم يعود للبداية" المُبلَّغ بعد التقديم أو بعد دقائق.
+      final resumeFrom =
+          (!fallbackToWeb && _position > Duration.zero) ? _position : null;
       final oldController = _controller;
       oldController?.removeListener(_videoListener);
       await oldController?.dispose();
@@ -2548,6 +2555,134 @@ class _WatchScreenState extends State<WatchScreen>
   // تعديل ثانٍ: أُضيف نص (_loadingMessage نفسه المستخدَم بـ_buildLoading،
   // يتغيّر تلقائياً مع الوقت) — المؤشر الدائري وحده لم يكن كافياً ليشعر
   // المستخدم أن التشغيل على وشك البدء فعلاً.
+  /// الجودات المتاحة للمصدر الحالي (من القائمة الرئيسية التي مرّت بالوكيل)،
+  /// الأعلى أولاً — تُبنى منها أزرار الجودة. فارغة = المصدر بجودة واحدة
+  /// فلا يُعرض الزر أصلاً.
+  List<HlsVariant> _availableQualities = const <HlsVariant>[];
+
+  /// رابط الجودة المختارة يدوياً، أو null = تلقائي (يتكيّف ExoPlayer وحده
+  /// ضمن السقف الآمن).
+  String? _manualQualityUrl;
+
+  void _onHlsVariantsDiscovered(List<HlsVariant> variants) {
+    if (!mounted || variants.length < 2) return;
+    final sorted = [...variants]
+      ..sort((a, b) => b.bandwidth.compareTo(a.bandwidth));
+    // مقارنة بالروابط: نفس القائمة تُبلَّغ مع كل تحديث للقائمة الرئيسية،
+    // فلا نعيد البناء بلا داعٍ.
+    final sameAsCurrent = _availableQualities.length == sorted.length &&
+        List.generate(sorted.length, (i) => sorted[i].url)
+            .every((url) => _availableQualities.any((q) => q.url == url));
+    if (sameAsCurrent) return;
+    _slog('QUALITIES_AVAILABLE',
+        'count=${sorted.length} labels=${sorted.map((q) => q.label).join(",")}');
+    setState(() => _availableQualities = List<HlsVariant>.unmodifiable(sorted));
+  }
+
+  /// يبدّل الجودة يدوياً مع استئناف نفس اللحظة — `_position` نتتبّعه بأنفسنا
+  /// فلا يضيع مكان المشاهدة بالتبديل.
+  Future<void> _switchQuality(HlsVariant? variant) async {
+    final server = _activeServer;
+    if (server == null) return;
+    final resumeAt = _position;
+    setState(() => _manualQualityUrl = variant?.url);
+    _slog('QUALITY_SWITCH_REQUESTED',
+        'label=${variant?.label ?? 'تلقائي'} resumeAt=$resumeAt');
+    final target = variant == null
+        ? _activeQualityUrlForAuto
+        : StreamQuality(label: variant.label, url: variant.url);
+    if (target == null) return;
+    await _playServerQuality(server, target);
+  }
+
+  /// الرابط الأصلي (القائمة الرئيسية) الذي يعيد الوضع التلقائي.
+  StreamQuality? _activeQualityUrlForAuto;
+
+  Widget _buildQualityButton() {
+    return _circleIconButton(
+      icon: Icons.high_quality,
+      tooltip: 'جودة الفيديو',
+      onPressed: _openQualitySheet,
+    );
+  }
+
+  Future<void> _openQualitySheet() async {
+    final variants = _availableQualities;
+    if (variants.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF16181C),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Row(
+                children: [
+                  Icon(Icons.high_quality, color: Colors.white70, size: 20),
+                  SizedBox(width: 10),
+                  Text('جودة الفيديو',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+            const Divider(height: 1, color: Colors.white12),
+            ListTile(
+              dense: true,
+              leading: Icon(Icons.auto_awesome,
+                  size: 20,
+                  color: _manualQualityUrl == null
+                      ? Colors.redAccent
+                      : Colors.white54),
+              title: const Text('تلقائي',
+                  style: TextStyle(color: Colors.white, fontSize: 14)),
+              subtitle: const Text('يتكيّف مع سرعة اتصالك',
+                  style: TextStyle(color: Colors.white38, fontSize: 11)),
+              trailing: _manualQualityUrl == null
+                  ? const Icon(Icons.check, color: Colors.redAccent, size: 18)
+                  : null,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                _switchQuality(null);
+              },
+            ),
+            for (final variant in variants)
+              ListTile(
+                dense: true,
+                leading: Icon(Icons.hd,
+                    size: 20,
+                    color: _manualQualityUrl == variant.url
+                        ? Colors.redAccent
+                        : Colors.white54),
+                title: Text(variant.label,
+                    style: const TextStyle(color: Colors.white, fontSize: 14)),
+                subtitle: variant.bandwidth > 0
+                    ? Text('${(variant.bandwidth / 1000).round()} كيلوبت/ث',
+                        style: const TextStyle(
+                            color: Colors.white38, fontSize: 11))
+                    : null,
+                trailing: _manualQualityUrl == variant.url
+                    ? const Icon(Icons.check, color: Colors.redAccent, size: 18)
+                    : null,
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  _switchQuality(variant);
+                },
+              ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// زر نجاة مضمون — يعيش بطبقة Flutter فوق الـWebView، خارج متناول
   /// الصفحة تماماً.
   ///
@@ -2865,6 +3000,8 @@ class _WatchScreenState extends State<WatchScreen>
                         : 'التبديل إلى الوضع الأفقي',
                     onPressed: _toggleOrientation,
                   ),
+                  if (_availableQualities.length >= 2 && !_isWebSource)
+                    _buildQualityButton(),
                   _circleIconButton(
                     icon: Icons.more_vert,
                     tooltip: 'المزيد من الخيارات',
