@@ -2481,7 +2481,18 @@ class _WatchScreenState extends State<WatchScreen>
             child: SizedBox(
               width: width,
               height: height,
-              child: VideoPlayer(controller),
+              // مفتاح فريد لكل مثيل controller: بدونه Flutter يحاول "تحديث"
+              // نفس عنصر منصة العرض القديم بدل التخلص منه بالكامل وإنشاء
+              // واحد جديد عند تبديل الجودة/السيرفر أثناء تشغيل فعلي —
+              // مؤكَّد بسجل تشخيص فعلي (`UNCAUGHT_ERROR: Could not find
+              // corresponding view type for playerId`) يحدث بالضبط عند
+              // `await oldController?.dispose()` بمنتصف `_playServerQuality`:
+              // لو حصلت إعادة بناء (rebuild) لأي سبب غير مرتبط خلال هذي
+              // الفجوة الزمنية القصيرة (الحقل `_controller` لا يزال يشير
+              // للقديم المُتخلَّص منه فعلياً لحين اكتمال التهيئة الجديدة)
+              // يحاول Flutter إعادة استخدام عنصر منصة العرض بمعرّف مُزال
+              // فعلاً من الجهة الأصلية (Android) فينهار التشغيل بالكامل.
+              child: VideoPlayer(controller, key: ObjectKey(controller)),
             ),
           ),
         ),
