@@ -2658,6 +2658,49 @@ class _WatchScreenState extends State<WatchScreen>
     );
   }
 
+  /// زر شارة (badge) بشكل حبّة دواء — نص الجودة الحالية + سهم صغير للأسفل
+  /// — بدل أيقونة مجرَّدة (Icons.hd) لا تدل بذاتها على وجود اختيارات
+  /// متعددة. نفس دالة الفتح (`_openQualitySheet`) المستخدمة سابقاً بقائمة
+  /// "المزيد من الخيارات" (أُزيل عنصرها المكرِّر هناك، هذا الزر يحل محله).
+  Widget _buildQualityBadgeButton() {
+    final rawLabel = _activeQuality?.label.trim() ?? '';
+    final label = rawLabel.isNotEmpty ? rawLabel : 'الجودة';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: Tooltip(
+        message: 'تغيير الجودة أو السيرفر',
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(20),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: _openQualitySheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.hd, color: Colors.white, size: 18),
+                  const SizedBox(width: 3),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Icon(Icons.arrow_drop_down,
+                      color: Colors.white, size: 18),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _circleIconButton({
     required IconData icon,
     required String tooltip,
@@ -2772,6 +2815,17 @@ class _WatchScreenState extends State<WatchScreen>
                       tooltip: 'القفز للبث المباشر',
                       onPressed: _jumpToLive,
                     ),
+                  // زر مستقل وواضح لتبديل الجودة/السيرفر — قبل هذا التعديل
+                  // كان هذا الإجراء مدفوناً فقط داخل قائمة "⋮ المزيد من
+                  // الخيارات" بلا أي إشارة ظاهرة من شريط التحكم نفسه إن
+                  // جودات متعددة متاحة (طلب صريح من المستخدم). الشكل
+                  // (تسمية الجودة الحالية + سهم منسدل صغير) يطابق تعارف
+                  // منصات المشاهدة المعروفة (يوتيوب/نتفليكس) لزر "قائمة
+                  // اختيار"، لا زر تبديل بضغطة واحدة.
+                  if (_session != null &&
+                      (_session!.hasMultipleServers ||
+                          _session!.hasMultipleQualities))
+                    _buildQualityBadgeButton(),
                   _circleIconButton(
                     icon: _isLandscape
                         ? Icons.screen_lock_rotation
@@ -2919,18 +2973,9 @@ class _WatchScreenState extends State<WatchScreen>
                   _cycleFit();
                 },
               ),
-              if (_session != null &&
-                  (_session!.hasMultipleServers ||
-                      _session!.hasMultipleQualities))
-                ListTile(
-                  leading: const Icon(Icons.hd, color: Colors.white),
-                  title: const Text('الجودة والسيرفر',
-                      style: TextStyle(color: Colors.white)),
-                  onTap: () {
-                    Navigator.pop(sheetContext);
-                    _openQualitySheet();
-                  },
-                ),
+              // عنصر "الجودة والسيرفر" هنا انتقل لزر شارة مستقل وواضح
+              // بشريط التحكم الرئيسي (_buildQualityBadgeButton) — إبقاؤه
+              // هنا أيضاً كان يعني مدخلَين مختلفين لنفس الإجراء بلا فائدة.
               ListTile(
                 leading: const Icon(Icons.speed, color: Colors.white),
                 title: const Text('سرعة التشغيل',
