@@ -434,22 +434,29 @@ class _WatchScreenState extends State<WatchScreen>
     final effectiveBuffering = value.isBuffering && !positionAdvanced;
     final playingChanged = _isPlaying != value.isPlaying;
     final bufferingFlagChanged = _isBuffering != effectiveBuffering;
-    // Update the raw fields unconditionally (the stall watchdog and the
-    // progress bar/time text next time controls are shown both need
-    // accurate values), but only ask Flutter to rebuild this whole
-    // screen when something actually visible changed, or the on-screen
-    // progress bar/time text needs the fresh position while it's shown.
-    // video_player fires this listener several times a second during
-    // normal playback; rebuilding the entire Stack (many Positioned/
-    // AnimatedOpacity children) on every tick for no visible reason was
-    // wasted work landing on the same frame as decode/render — reported
-    // as a brief, recurring stutter across several unrelated sources,
-    // which points at UI-thread jank rather than a per-source issue.
+    // Update the raw fields unconditionally (the stall watchdog still
+    // reads them), but only ask Flutter to rebuild this whole screen when
+    // something actually visible outside the seek bar changed. video_player
+    // fires this listener several times a second during normal playback;
+    // rebuilding the entire Stack (~15 conditional branches, several
+    // AnimatedOpacity/gradients) on every tick for no visible reason was
+    // wasted work landing on the same frame as decode/render — reported as
+    // a brief, recurring stutter across several unrelated sources, which
+    // points at UI-thread jank rather than a per-source issue.
+    // كان هذا الحارس يتوقف فقط لو الأزرار مخفية (`!_controlsVisible`) —
+    // بالضبط اللحظة التي *لا* يشاهد فيها المستخدم شريط التقدّم أصلاً. لما
+    // تظهر الأزرار (كل نقرة، وكل سحب فعلي على الشريط — أي لحظة يراقب
+    // المستخدم الحركة بها) كان setState(){} الكامل يُستدعى بنفس معدّل
+    // النبضات هذا (عدة مرات/ثانية) بلا أي شرط. الآن شريط التقدّم/الوقت
+    // بـ_buildControls يستمع لـ_controller مباشرة (ValueListenableBuilder)
+    // فلا يحتاج setState الشاشة كاملة لتحديثه إطلاقاً — هذا الحارس يبقى
+    // مقصوراً على التغييرات المرئية الحقيقية الأخرى (تشغيل/إيقاف، مؤشر
+    // التخزين المؤقت) بغض النظر عن ظهور الأزرار.
     _isPlaying = value.isPlaying;
     _isBuffering = effectiveBuffering;
     _position = value.position;
     _duration = value.duration;
-    if (playingChanged || bufferingFlagChanged || _controlsVisible) {
+    if (playingChanged || bufferingFlagChanged) {
       setState(() {});
     }
     if (effectiveBuffering && !wasBuffering) {
@@ -548,10 +555,10 @@ class _WatchScreenState extends State<WatchScreen>
   void _handleNativePlaybackError() {
     if (!mounted) return;
     final server = _activeServer;
-    final quality = _activeQuality;
+    final currentQuality = _activeQuality;
     if (_userPausedPlayback ||
         server == null ||
-        quality == null ||
+        currentQuality == null ||
         _nativeAutoReconnectAttempts >= _nativeMaxAutoReconnectAttempts) {
       _cancelNativeReconnect();
       setState(() {
@@ -561,6 +568,30 @@ class _WatchScreenState extends State<WatchScreen>
       return;
     }
     _nativeAutoReconnectAttempts++;
+    // "تكيّف تلقائي" جزئي: كل إعادة اتصال قبل هذا التعديل كانت تعيد بالضبط
+    // نفس رابط الجودة الفاشل حتى 8 مرات متتالية بلا أي تغيير. لو المستخدم
+    // مثبَّت على جودة مُجبَرة (رابط رندشن واحد ثابت، ليس أول عنصر بالقائمة —
+    // ذاك دائماً "تلقائي"، راجع تعليق _onHlsVariantsDiscovered) وفشلت هذي
+    // الجودة تحديداً 4 مرات متتالية، الأرجح إن العطل بهذا الرندشن بعينه على
+    // الخادم — لا فائدة من استهلاك بقية المحاولات عليه. التراجع لـ"تلقائي"
+    // مرة واحدة يمنح ExoPlayer فرصة اختيار رندشن آخر يعمل فعلياً بنفس
+    // القائمة، بدل استسلام مؤكَّد بعد استنفاد كل المحاولات على رابط قد يكون
+    // معطوباً تحديداً. لا يتكرر لانهائياً: بمجرد التراجع تصبح "تلقائي" هي
+    // الجودة النشطة فعلياً (_playServerQuality يحدّث _activeQuality)، فالشرط
+    // (currentQuality.url != autoQuality.url) لا يتحقق ثانية.
+    final autoQuality =
+        server.qualities.isNotEmpty ? server.qualities.first : null;
+    final shouldDowngradeToAuto =
+        _nativeAutoReconnectAttempts == (_nativeMaxAutoReconnectAttempts ~/ 2) + 1 &&
+            autoQuality != null &&
+            currentQuality.url != autoQuality.url;
+    final retryQuality = shouldDowngradeToAuto ? autoQuality! : currentQuality;
+    if (shouldDowngradeToAuto) {
+      _slog(
+        'NATIVE_AUTO_RECONNECT_DOWNGRADE',
+        'from=${_safeLogUrl(currentQuality.url)} to=${_safeLogUrl(retryQuality.url)} attempt=$_nativeAutoReconnectAttempts',
+      );
+    }
     // تأخير شبه فوري بدل ثوانٍ كاملة — أول محاولة بعد 200ms فقط، يزيد
     // تدريجياً كل محاولة فاشلة (حتى لا يضرب خادماً ميتاً فعلياً بحلقة
     // ضيقة)، بحد أقصى 2 ثانية فقط حتى بأبعد محاولة.
@@ -573,7 +604,7 @@ class _WatchScreenState extends State<WatchScreen>
     _nativeReconnectTimer?.cancel();
     _nativeReconnectTimer = Timer(Duration(milliseconds: delayMs), () {
       if (!mounted || _userPausedPlayback) return;
-      unawaited(_playServerQuality(server, quality));
+      unawaited(_playServerQuality(server, retryQuality));
     });
   }
 
@@ -2504,7 +2535,17 @@ class _WatchScreenState extends State<WatchScreen>
             child: SizedBox(
               width: width,
               height: height,
-              child: VideoPlayer(controller),
+              // مفتاح فريد لكل مثيل controller: بدونه Flutter يحاول "تحديث"
+              // نفس عنصر منصة العرض القديم بدل التخلص منه بالكامل وإنشاء
+              // واحد جديد عند تبديل الجودة/السيرفر أثناء تشغيل فعلي —
+              // يحدث بالضبط عند `await oldController?.dispose()` بمنتصف
+              // `_playServerQuality`: لو حصلت إعادة بناء (rebuild) لأي سبب
+              // غير مرتبط خلال هذي الفجوة الزمنية القصيرة (الحقل
+              // `_controller` لا يزال يشير للقديم المُتخلَّص منه فعلياً
+              // لحين اكتمال التهيئة الجديدة) يحاول Flutter إعادة استخدام
+              // عنصر منصة العرض بمعرّف مُزال فعلاً من الجهة الأصلية
+              // (Android) فينهار التشغيل بالكامل.
+              child: VideoPlayer(controller, key: ObjectKey(controller)),
             ),
           ),
         ),
@@ -2595,11 +2636,48 @@ class _WatchScreenState extends State<WatchScreen>
     });
   }
 
+  /// شارة (badge) بشكل حبّة دواء — نص الجودة الحالية + سهم صغير للأسفل —
+  /// بدل أيقونة مجرَّدة (Icons.high_quality) لا تدل بذاتها على وجود
+  /// اختيارات متعددة. طلب صريح من المستخدم: يفهم المشاهد فوراً أنه زر
+  /// "قائمة اختيار" (نفس تعارف يوتيوب/نتفليكس)، لا زر تبديل بضغطة واحدة.
+  /// نفس دالة الفتح (`_openQualitySheet`) الموجودة أصلاً، بلا أي تغيير
+  /// عليها أو على منطق اكتشاف الجودات — تعديل شكلي فقط لهذا الزر.
   Widget _buildQualityButton() {
-    return _circleIconButton(
-      icon: Icons.high_quality,
-      tooltip: 'جودة الفيديو',
-      onPressed: _openQualitySheet,
+    final rawLabel = _activeQuality?.label.trim() ?? '';
+    final label = rawLabel.isNotEmpty ? rawLabel : 'الجودة';
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 3),
+      child: Tooltip(
+        message: 'تغيير الجودة أو السيرفر',
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.35),
+          borderRadius: BorderRadius.circular(20),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(20),
+            onTap: _openQualitySheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.hd, color: Colors.white, size: 18),
+                  const SizedBox(width: 3),
+                  Text(
+                    label,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const Icon(Icons.arrow_drop_down,
+                      color: Colors.white, size: 18),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -2968,56 +3046,76 @@ class _WatchScreenState extends State<WatchScreen>
               padding: const EdgeInsets.fromLTRB(14, 0, 6, 4),
               child: Row(
                 children: [
-                  if (canSeek) ...[
-                    Text(_formatDuration(_position),
+                  if (canSeek && _controller != null) ...[
+                    // شريط التقدّم/الوقت يستمع مباشرة لـ_controller (هو
+                    // نفسه ValueNotifier<VideoPlayerValue>) بدل الاعتماد على
+                    // setState الشاشة كاملة — راجع _videoListener: بدونه كان
+                    // كل نبضة موضع (عدة مرات/ثانية طوال ظهور الأزرار) تعيد
+                    // بناء الـStack كاملة (~15 فرعاً + تدرّجات + أيقونات) لا
+                    // فقط هذا الشريط، وهذا هدر حقيقي يزاحم فك/عرض الفيديو
+                    // بنفس الفريم. النطاق الآن محصور بهذي الثلاث عناصر فقط.
+                    ValueListenableBuilder<VideoPlayerValue>(
+                      valueListenable: _controller!,
+                      builder: (context, value, _) => Text(
+                        _formatDuration(value.position),
                         style: const TextStyle(
-                            color: Colors.white70, fontSize: 12)),
-                    Expanded(
-                      child: SliderTheme(
-                        // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر الكرة
-                        // وتظهر فقط أثناء السحب الفعلي (راجع _isScrubbingSlider) —
-                        // غير ذلك خط نظيف بلا كرة ثابتة الظهور.
-                        data: SliderTheme.of(context).copyWith(
-                          trackHeight: _isScrubbingSlider ? 3.5 : 2,
-                          thumbShape: RoundSliderThumbShape(
-                              enabledThumbRadius: _isScrubbingSlider ? 7 : 0),
-                          overlayShape: const RoundSliderOverlayShape(
-                              overlayRadius: 14),
-                        ),
-                        child: Slider(
-                          value: _position.inMilliseconds
-                              .clamp(
-                                  0,
-                                  _duration.inMilliseconds == 0
-                                      ? 1
-                                      : _duration.inMilliseconds)
-                              .toDouble(),
-                          min: 0,
-                          max: _duration.inMilliseconds == 0
-                              ? 1
-                              : _duration.inMilliseconds.toDouble(),
-                          activeColor: Colors.redAccent,
-                          inactiveColor: Colors.white30,
-                          onChangeStart: (_) {
-                            _wasPlayingBeforeScrub = _isPlaying;
-                            setState(() => _isScrubbingSlider = true);
-                          },
-                          onChanged: (value) => _controller
-                              ?.seekTo(Duration(milliseconds: value.toInt())),
-                          onChangeEnd: (_) {
-                            setState(() => _isScrubbingSlider = false);
-                            // ExoPlayer can drop playWhenReady after a seek
-                            // past the buffered window on some sources —
-                            // without this, dragging the slider silently
-                            // pauses playback until the user taps play again.
-                            if (_wasPlayingBeforeScrub) _controller?.play();
-                          },
-                        ),
+                            color: Colors.white70, fontSize: 12),
                       ),
                     ),
-                    Text(_formatDuration(_duration),
+                    Expanded(
+                      child: ValueListenableBuilder<VideoPlayerValue>(
+                        valueListenable: _controller!,
+                        builder: (context, value, _) {
+                          final durationMs = value.duration.inMilliseconds;
+                          return SliderTheme(
+                            // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر الكرة
+                            // وتظهر فقط أثناء السحب الفعلي (راجع _isScrubbingSlider) —
+                            // غير ذلك خط نظيف بلا كرة ثابتة الظهور.
+                            data: SliderTheme.of(context).copyWith(
+                              trackHeight: _isScrubbingSlider ? 3.5 : 2,
+                              thumbShape: RoundSliderThumbShape(
+                                  enabledThumbRadius:
+                                      _isScrubbingSlider ? 7 : 0),
+                              overlayShape: const RoundSliderOverlayShape(
+                                  overlayRadius: 14),
+                            ),
+                            child: Slider(
+                              value: value.position.inMilliseconds
+                                  .clamp(0, durationMs == 0 ? 1 : durationMs)
+                                  .toDouble(),
+                              min: 0,
+                              max: durationMs == 0
+                                  ? 1
+                                  : durationMs.toDouble(),
+                              activeColor: Colors.redAccent,
+                              inactiveColor: Colors.white30,
+                              onChangeStart: (_) {
+                                _wasPlayingBeforeScrub = _isPlaying;
+                                setState(() => _isScrubbingSlider = true);
+                              },
+                              onChanged: (v) => _controller
+                                  ?.seekTo(Duration(milliseconds: v.toInt())),
+                              onChangeEnd: (_) {
+                                setState(() => _isScrubbingSlider = false);
+                                // ExoPlayer can drop playWhenReady after a seek
+                                // past the buffered window on some sources —
+                                // without this, dragging the slider silently
+                                // pauses playback until the user taps play again.
+                                if (_wasPlayingBeforeScrub) _controller?.play();
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    ValueListenableBuilder<VideoPlayerValue>(
+                      valueListenable: _controller!,
+                      builder: (context, value, _) => Text(
+                        _formatDuration(value.duration),
                         style: const TextStyle(
-                            color: Colors.white70, fontSize: 12)),
+                            color: Colors.white70, fontSize: 12),
+                      ),
+                    ),
                   ] else
                     const Spacer(),
                   _circleIconButton(
