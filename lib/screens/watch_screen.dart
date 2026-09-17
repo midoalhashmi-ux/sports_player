@@ -1309,6 +1309,17 @@ class _WatchScreenState extends State<WatchScreen>
   Future<void> _suspendWebPlaybackForNativeTrial(bool suspend) async {
     final web = _webController;
     if (web == null) return;
+    // **حدّ ضروري تبيّن بسجل لاحق**: الإيقاف مشروع فقط حين تكون الصفحة
+    // مخفية ويجري الاكتشاف بالخلفية. أما حين يكون المشغّل الويب ظاهراً
+    // للمستخدم ويعمل (`_webPlaybackReady` — يحصل مع vidmoly من الثانية
+    // الخامسة تقريباً) فإيقافه يوقف الفيديو **الذي يشاهده الآن** طوال
+    // محاولة خلفية قد تفشل أصلاً. سجل فعلي أظهر مشغّل الموقع متوقفاً
+    // ~27 ثانية من أصل 58 لهذا السبب بالضبط، فلم يتجاوز الشريحة الثانية.
+    if (suspend && _webPlaybackReady && _shouldShowWebPage) {
+      _slog('WEB_SUSPEND_SKIPPED', 'reason=web_player_visible_and_playing');
+      return;
+    }
+    _slog('WEB_PLAYBACK_SUSPEND', 'suspend=$suspend');
     try {
       await web.runJavaScript('''(() => {
         const suspend = $suspend;
