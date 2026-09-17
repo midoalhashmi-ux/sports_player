@@ -68,32 +68,51 @@ separately — a GitHub push alone does **not** update the live Worker.
 1. **Get the log.** Ask for the exported `sports_player_debug_log.txt` if the
    user hasn't attached one — "it doesn't work" with no log is close to
    undiagnosable in this codebase given how much state it tracks.
-2. **Read it start to finish with timestamps.** Every line is
+2. **Start at the bottom, not the top.** Every session now ends with a
+   `SESSION_SUMMARY` line (entry host, player type, candidate count, native
+   attempts, where the time went, final web state) and, when a segment
+   failed, a `SEGMENT_AB_TEST` line. Those two answer most questions before
+   you read a single other line:
+
+   - `SEGMENT_AB_TEST: dart=failed | webview=status=200 bytes=1.8MB ms=900`
+     → **our HTTP client is the problem, not the CDN.** The WebView can
+     fetch what we cannot, so the fix direction is relaying through it —
+     not header/TLS guesswork (two such theories already died unconfirmed
+     in this project).
+   - both sides failing → the CDN is starving everyone; there is no client
+     fix, and the honest answer is to stop burning native attempts on it.
+   - `SOURCE_FINGERPRINT` shows the token's query keys (`asn=`, `sp=`,
+     `e=`…) — how a new provider differs from ones already known to work.
+
+   `MEDIA_RESOURCE` is logged once per unique URL now (the repeat count is
+   in the summary), so the log no longer drowns in re-reports.
+
+3. **Read it start to finish with timestamps.** Every line is
    `[+N.NNNs] TAG: details`. Note the *gaps* between timestamps as much as the
    tags themselves — a 10+ second gap between candidate discovery and the
    actual trial attempt is itself a clue (see known-bugs.md, case C).
-3. **Build a one-paragraph narrative of what actually happened**, in plain
+4. **Build a one-paragraph narrative of what actually happened**, in plain
    language, before touching any code: what was tried, what failed, what the
    final state was. If the narrative doesn't match what the user reported
    ("didn't work" but the log shows segments streaming fine), that mismatch
    *is* the bug — see `references/known-bugs.md` case B.
-4. **Grep the exact log tag string in `watch_screen.dart`** to jump straight
+5. **Grep the exact log tag string in `watch_screen.dart`** to jump straight
    to the emitting code (`_slog('TAG_NAME', ...)`). Read outward from there —
    the state that gets set right before/after, and what governs it.
-5. **State the hypothesis in one sentence**, then verify it by reading the
+6. **State the hypothesis in one sentence**, then verify it by reading the
    surrounding code — don't patch until you can point at the specific
    `setState`/condition that produces the log's exact sequence. `references/
    state-machine.md` has the state enums and what each one is supposed to
    gate, so you're not rediscovering the architecture each time.
-6. **Fix minimally.** Every fix that has shipped in this project was a few
+7. **Fix minimally.** Every fix that has shipped in this project was a few
    lines — a missing guard clause, a `_state` never reset, a redundant network
    call. If a fix looks like it needs a rewrite of the detection pipeline,
    the hypothesis is probably still wrong — go back to step 3.
-7. **Verify with `dart analyze`**, then explain the fix to the user in terms
+8. **Verify with `dart analyze`**, then explain the fix to the user in terms
    of the specific log lines it addresses, not in the abstract. Concrete beats
    generic here — the user has been burned before by explanations that don't
    map to what they actually saw.
-8. If a fix doesn't hold, that's expected — this pipeline has a lot of
+9. If a fix doesn't hold, that's expected — this pipeline has a lot of
    surface area. Ask for a fresh log from the *same* failure and re-run the
    method rather than stacking more speculative changes on the last guess.
 

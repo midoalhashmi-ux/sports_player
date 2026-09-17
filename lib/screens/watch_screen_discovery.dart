@@ -170,6 +170,18 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   String? _episodeEmbedShortcutUrl;
   Timer? _episodeEmbedFallbackTimer;
 
+  /// روابط الوسائط التي سُجّلت مرة على الأقل + عدّاد التكرارات المكتومة —
+  /// راجع التعليق بمعالج `media_resource`.
+  final Map<String, Completer<String?>> _pendingSegmentProbes = {};
+  final Set<String> _webLoggedMediaResources = <String>{};
+  int _webMediaResourceRepeats = 0;
+
+  /// نتيجة فحص الشريحة المقارن، لعرضها ببطاقة الملخّص — راجع
+  /// `_runSegmentAbTest`.
+  String? _segmentAbTestResult;
+  bool _sessionSummaryLogged = false;
+  DateTime? _webSessionStartedAt;
+
   /// مؤقّت "لا تنتظر الصفحة تكمل" — راجع `onPageStarted`.
   Timer? _webEarlyDetectTimer;
   // WebView always calls onPageFinished after a navigation attempt, even
@@ -435,6 +447,14 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   void _handleWebIntelligenceMessage(WebViewController controller, Map<dynamic, dynamic> decoded) {
     if (!identical(controller, _webController)) return;
     final type = decoded['type']?.toString() ?? '';
+    if (type == 'segment_probe') {
+      final completer =
+          _pendingSegmentProbes.remove(decoded['requestId']?.toString() ?? '');
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(decoded['result']?.toString() ?? '');
+      }
+      return;
+    }
     if (type == 'manifest_fetched') {
       // لا نمرّر هذي الرسالة لـ _captureMessageWebContext — pageUrl فيها هو
       // رابط المانفست نفسه لا صفحة القناة، فلا نريده يستبدل سياق الترويسات.
@@ -518,10 +538,19 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           _slog('WEB_PROVEN_VARIANT', 'key=$provenKey');
         }
       }
-      _slog(
-        'MEDIA_RESOURCE',
-        'url=${_safeLogUrl(rawResourceUrl)} segmentEvidence=$segmentEvidence score=$_webMediaEvidenceScore hits=$_webMediaResourceHits',
-      );
+      // **ضجيج يخفي الإشارة**: `reportMediaResources` يقرأ
+      // `performance.getEntriesByType` كل 1.8 ثانية ويعيد إرسال **نفس**
+      // المدخلات القديمة كل مرة — سجل المستخدم الأخير كان 262 سطراً من
+      // أصل 492 لشريحتين اثنتين فقط. نسجّل كل رابط مرة واحدة، ونكتفي
+      // بعدّاد تراكمي لما بعدها.
+      if (_webLoggedMediaResources.add(rawResourceUrl)) {
+        _slog(
+          'MEDIA_RESOURCE',
+          'url=${_safeLogUrl(rawResourceUrl)} segmentEvidence=$segmentEvidence score=$_webMediaEvidenceScore hits=$_webMediaResourceHits',
+        );
+      } else {
+        _webMediaResourceRepeats++;
+      }
       if (_looksLikeHls(rawResourceUrl)) {
         _registerWebCandidate(
           rawResourceUrl,
@@ -774,6 +803,109 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     } catch (_) {
       return const [];
     }
+  }
+
+  /// **الفحص الحاسم**: يجلب *نفس* رابط الشريحة عبر WebView ويضع النتيجة
+  /// بجانب نتيجة عميل Dart بسطر واحد.
+  ///
+  /// السؤال الذي عطّل هذا المشروع أكثر من مرة هو: حين يفشل التشغيل الأصلي
+  /// بينما مشغّل الصفحة يعمل — **هل العلّة بعميلنا أم بالـCDN؟** السجل لم
+  /// يكن يجيب عليه أبداً، فتحوّلت كل جولة لتخمين (بصمة ترويسات، TLS...)
+  /// ضاع أكثر من واحد منها بلا تأكيد. هذا السطر يحسمه لأي مصدر جديد:
+  ///
+  ///   - `webview=ok` ونحن فشلنا ← العلّة عميلنا، والحل معروف (تمرير
+  ///     الشرائح الأولى عبر WebView حتى ينطلق التشغيل).
+  ///   - كلاهما فشل ← الـCDN نفسه يخنق الجميع، ولا شيء نفعله؛ الأفضل
+  ///     الاستسلام لـWebView فوراً بدل إحراق محاولتين × 13 ثانية.
+  ///
+  /// لا يُنقل جسم الشريحة عبر الجسر إطلاقاً — فقط حالتها وحجمها وزمنها.
+  Future<void> _runSegmentAbTest(String segmentUrl, String dartOutcome) async {
+    final controller = _webController;
+    if (controller == null || _segmentAbTestResult != null) return;
+    // علامة مبكرة تمنع فحصاً ثانياً متزامناً.
+    _segmentAbTestResult = 'pending';
+    final requestId = DateTime.now().microsecondsSinceEpoch.toString();
+    final completer = Completer<String?>();
+    _pendingSegmentProbes[requestId] = completer;
+    try {
+      final urlJson = jsonEncode(segmentUrl);
+      final requestIdJson = jsonEncode(requestId);
+      await controller.runJavaScript('''(function() {
+        var started = Date.now();
+        function post(payload) {
+          try {
+            if (window.SportsPlayerSource && window.SportsPlayerSource.postMessage) {
+              window.SportsPlayerSource.postMessage(JSON.stringify(
+                  {type:'segment_probe', requestId:$requestIdJson, result:payload}));
+            }
+          } catch (_) {}
+        }
+        fetch($urlJson, {credentials:'omit'}).then(function(res) {
+          return res.arrayBuffer().then(function(buf) {
+            post('status=' + res.status + ' bytes=' + (buf ? buf.byteLength : 0) +
+                 ' ms=' + (Date.now() - started));
+          });
+        }).catch(function(err) {
+          post('failed ms=' + (Date.now() - started) +
+               ' error=' + ((err && err.message) ? err.message : String(err)));
+        });
+      })();''');
+      final webOutcome = await completer.future
+          .timeout(const Duration(seconds: 20), onTimeout: () => null);
+      final web = webOutcome == null || webOutcome.isEmpty
+          ? 'no-response'
+          : webOutcome.trim();
+      _segmentAbTestResult = 'dart=$dartOutcome | webview=$web';
+      _slog('SEGMENT_AB_TEST',
+          'url=${_safeLogUrl(segmentUrl)} $_segmentAbTestResult');
+    } catch (e) {
+      _segmentAbTestResult = 'dart=$dartOutcome | webview=error:$e';
+      _pendingSegmentProbes.remove(requestId);
+    }
+  }
+
+  /// بطاقة ملخّص مضغوطة تُكتب بنهاية أي مسار حاسم (نجاح أصلي، أو
+  /// الاستسلام لـWebView، أو إغلاق الشاشة).
+  ///
+  /// سجل جلسة واحدة يتجاوز 500 سطر، وأول ما أحتاجه عند فتحه هو نفس الأسئلة
+  /// الستة كل مرة: أي موقع، أي مشغّل، كم مرشّحاً، أين ذهب الوقت، وما
+  /// النتيجة. جمعها بسطر واحد يوفّر تمشيط السجل كاملاً — ولأي **مصدر
+  /// جديد** لم نره قبلاً، هذا أسرع طريق لمعرفة أين وقف بالضبط.
+  void _logSessionSummary(String reason) {
+    if (_sessionSummaryLogged) return;
+    _sessionSummaryLogged = true;
+    final entry = Uri.tryParse(_webOriginalUrl ?? '')?.host ?? '-';
+    final player = _webVidmolyPlayerMode
+        ? 'vidmoly/jw'
+        : (_webVideoJsPlayerMode ? 'videojs' : 'generic');
+    final elapsed = _webSessionStartedAt == null
+        ? '-'
+        : '${DateTime.now().difference(_webSessionStartedAt!).inMilliseconds / 1000}s';
+    _slog(
+      'SESSION_SUMMARY',
+      'reason=$reason entry=$entry player=$player promoted=$_webPromotedPlayerMode '
+      'candidates=${_webCandidateRegistry.length} proven=${_webProvenVariantKeys.length} '
+      'nativeAttempts=$_webNativeAttempts/$_webMaxNativeAttempts '
+      'failedSources=${_webFailedNativeSources.length} '
+      'mediaHits=$_webMediaResourceHits (unique=${_webLoggedMediaResources.length}, muted=$_webMediaResourceRepeats) '
+      'webState=$_webSessionState elapsed=$elapsed '
+      'abTest=${_segmentAbTestResult ?? "not-run"}',
+    );
+    // بصمة المصدر: شكل التوكن وحده يفرّق بين مزوّدي الاستضافة تلقائياً
+    // (vidtube يعمل، vidmoly يفشل بثلاثة سجلات) — فتتراكم قاعدة تمييز بلا
+    // أي قائمة نطاقات مكتوبة يدوياً.
+    final sample = _webCandidateRegistry.keys.firstWhere(
+      (u) => _looksLikeHls(u),
+      orElse: () => '',
+    );
+    if (sample.isEmpty) return;
+    final uri = Uri.tryParse(sample);
+    if (uri == null) return;
+    _slog(
+      'SOURCE_FINGERPRINT',
+      'host=${uri.host} tokenKeys=${uri.queryParameters.keys.join(",")} '
+      'path=${uri.pathSegments.take(2).join("/")}',
+    );
   }
 
   int _scoreDetectedSource(String url) => CandidateScoring.scoreDetectedSource(url);
@@ -2213,6 +2345,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _episodeEmbedShortcutUrl = null;
     _episodeEmbedFallbackTimer?.cancel();
     _episodeEmbedFallbackTimer = null;
+    _sessionSummaryLogged = false;
+    _webSessionStartedAt = DateTime.now();
+    _segmentAbTestResult = null;
+    _webLoggedMediaResources.clear();
+    _webMediaResourceRepeats = 0;
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
     _webCandidateEvidence.clear();

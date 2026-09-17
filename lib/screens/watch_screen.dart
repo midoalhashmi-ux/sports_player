@@ -402,6 +402,8 @@ class _WatchScreenState extends State<WatchScreen>
     _hlsCacheProxy = HlsCacheProxy(
       onLog: _slog,
       onVariantsDiscovered: _onHlsVariantsDiscovered,
+      onForegroundSegmentFailed: (url, outcome) =>
+          unawaited(_runSegmentAbTest(url, outcome)),
       isWebViewActiveNearby: () =>
           _lastWebMediaResourceHitAt != null &&
           DateTime.now().difference(_lastWebMediaResourceHitAt!) <
@@ -1590,6 +1592,7 @@ class _WatchScreenState extends State<WatchScreen>
         // صفحة المشغّل التي أوصلتنا هنا تستحق الحفظ: المرة القادمة لنفس
         // الحلقة تُفتح مباشرةً بلا صفحة الموقع إطلاقاً.
         _rememberEpisodeEmbed();
+        _logSessionSummary('native_playback_won');
         _smartLog('NATIVE', 'playback proof success; switching WebView -> Native');
       }
       _slog(
@@ -1792,6 +1795,7 @@ class _WatchScreenState extends State<WatchScreen>
           // لمسات عشوائية أثناء الاكتشاف الصامت) رغم إن WebView هو فعلياً
           // المشغّل النهائي بهذه الحالة.
           if (mounted) setState(() => _state = _LoadState.ready);
+          _logSessionSummary('native_given_up_webview_only');
         }
         return;
       }
@@ -2440,6 +2444,9 @@ class _WatchScreenState extends State<WatchScreen>
 
   @override
   void dispose() {
+    // ملخّص أخير حتى لو أُغلقت الشاشة قبل أي نتيجة — أكثر الحالات التي
+    // يرسل فيها المستخدم سجلاً هي بالضبط "لم يشتغل فخرجت".
+    if (_isWebSource) _logSessionSummary('screen_disposed');
     SessionLogService.instance.endSession('screen disposed (state=$_state, isWebSource=$_isWebSource)');
     _webDetectorTimer?.cancel();
     _webStartupTimeoutTimer?.cancel();

@@ -48,6 +48,13 @@ class HlsCacheProxy {
   /// (قبل تطبيق السقف) حتى يبقى للمستخدم خيار يدوي بكل الدرجات.
   final void Function(List<HlsVariant> variants)? onVariantsDiscovered;
 
+  /// (رابط الشريحة، وصف فشلنا) — يُستدعى مرة واحدة فقط: عند أول شريحة
+  /// يطلبها المشغّل فعلاً ونعجز عن جلبها. المستدعي يشغّل عندها الفحص
+  /// المقارن (راجع `_runSegmentAbTest` بـwatch_screen_discovery).
+  final void Function(String url, String outcome)? onForegroundSegmentFailed;
+
+  bool _reportedSegmentFailure = false;
+
   HttpServer? _server;
   http.Client? _client;
   Map<String, String> _upstreamHeaders = const {};
@@ -319,6 +326,7 @@ class HlsCacheProxy {
     _prefetchQueue.clear();
     _activePrefetches = 0;
     _playbackConfirmed = false;
+    _reportedSegmentFailure = false;
     _sourceHasKnownEnd = false;
     _provenVariantKeys = const <String>{};
     if (server != null) {
@@ -710,6 +718,13 @@ class HlsCacheProxy {
     // lowerLimit > upperLimit) — يُعامَل الآن كفشل جلب عادي (502)، بنفس
     // مسار `bytes == null` أعلاه، بدل استثناء غير متوقَّع.
     if (bytes == null || bytes.isEmpty) {
+      if (!_reportedSegmentFailure) {
+        _reportedSegmentFailure = true;
+        try {
+          onForegroundSegmentFailed?.call(
+              originalUrl, bytes == null ? 'failed' : 'empty-body');
+        } catch (_) {}
+      }
       request.response.statusCode = HttpStatus.badGateway;
       await request.response.close();
       return;
