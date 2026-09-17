@@ -16,6 +16,16 @@ const String kWebProtectionScript = r'''(() => {
       try {
         if (window.__sportsPlayerProtectionInstalled) return;
         window.__sportsPlayerProtectionInstalled = true;
+        // سجل كل مؤقّت/مراقب نُنشئه هنا، ليقدر kQuiesceScript يوقفها كلها
+        // دفعة واحدة بعد نجاح التشغيل الأصلي — راجع تعليقه.
+        window.__sportsPlayerTimers = window.__sportsPlayerTimers || [];
+        window.__sportsPlayerObservers = window.__sportsPlayerObservers || [];
+        const spInterval = (fn, ms) => {
+          try { const id = setInterval(fn, ms); window.__sportsPlayerTimers.push(id); return id; } catch (_) { return 0; }
+        };
+        const spObserve = (observer, target, options) => {
+          try { observer.observe(target, options); window.__sportsPlayerObservers.push(observer); } catch (_) {}
+        };
         const blocked = (url) => {
           try {
             const u = new URL(url, location.href);
@@ -254,7 +264,7 @@ const String kWebProtectionScript = r'''(() => {
           style.textContent = `[id*=\"popup\" i],[class*=\"popup\" i],[id*=\"popunder\" i],[class*=\"popunder\" i],[id*=\"advert\" i],[class*=\"advert\" i],[id*=\"adsbox\" i],[class*=\"adsbox\" i],[class*=\"overlay-ad\" i],[class*=\"interstitial\" i],[id*=\"otp\" i],[class*=\"otp\" i],[id*=\"verification\" i],[class*=\"verification\" i],[id*=\"subscribe\" i],[class*=\"subscribe\" i]{display:none!important;visibility:hidden!important;pointer-events:none!important;} iframe[src*=\"challenges.cloudflare.com\" i],iframe[src*=\"hcaptcha.com\" i],iframe[src*=\"recaptcha\" i],.cf-turnstile,#cf-chl-widget,#challenge-form,#challenge-running,.g-recaptcha,.h-captcha{display:block!important;visibility:visible!important;pointer-events:auto!important;}`;
         (document.head || document.documentElement).appendChild(style);
          hideUnsafePrompts();
-         try { new MutationObserver(() => hideUnsafePrompts()).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['class','id','href','action','placeholder','name']}); } catch (_) {}
+         spObserve(new MutationObserver(() => hideUnsafePrompts()), document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['class','id','href','action','placeholder','name']});
 
         // Universal player intelligence: iframe URLs can appear/change only after Play.
         const iframeKey = (f) => { try { return `${f.src || ''}|${f.id || ''}|${f.className || ''}`; } catch (_) { return ''; } };
@@ -290,8 +300,8 @@ const String kWebProtectionScript = r'''(() => {
           } catch (_) {}
         };
         inspectIframes();
-        try { new MutationObserver(() => inspectIframes()).observe(document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['src','id','class','style']}); } catch (_) {}
-        try { setInterval(inspectIframes, 1200); } catch (_) {}
+        spObserve(new MutationObserver(() => inspectIframes()), document.documentElement || document, {subtree:true, childList:true, attributes:true, attributeFilter:['src','id','class','style']});
+        spInterval(inspectIframes, 1200);
 
         const mediaResourceSeen = new Set();
         // مؤكَّد بسجل تشخيص فعلي (موقع مليء بإعلانات/تتبّع): إيجابيات كاذبة
@@ -342,7 +352,7 @@ const String kWebProtectionScript = r'''(() => {
           } catch (_) {}
         };
         reportMediaResources();
-        try { setInterval(reportMediaResources, 1800); } catch (_) {}
+        spInterval(reportMediaResources, 1800);
 
         // Video.js intelligence: some hosts expose the master only after the
         // player instance is created or after Play. Inspect the public player
@@ -402,7 +412,7 @@ const String kWebProtectionScript = r'''(() => {
             } catch (_) {}
           };
           detectVideoJs();
-           setInterval(detectVideoJs, 900);
+           spInterval(detectVideoJs, 900);
         } catch (_) {}
 
         // JWPlayer intelligence: same idea as the Video.js block above, but
@@ -422,7 +432,7 @@ const String kWebProtectionScript = r'''(() => {
             } catch (_) {}
           };
           detectJwPlayer();
-          setInterval(detectJwPlayer, 900);
+          spInterval(detectJwPlayer, 900);
         } catch (_) {}
 
         // Playback heartbeat: a large class of embedded players use MSE,
@@ -473,7 +483,7 @@ const String kWebProtectionScript = r'''(() => {
           } catch (_) {}
         };
         inspectPlayback();
-        try { setInterval(inspectPlayback, 450); } catch (_) {}
+        spInterval(inspectPlayback, 450);
 
         try {
           const originalRequestMediaKeySystemAccess = navigator.requestMediaKeySystemAccess;
@@ -1010,6 +1020,17 @@ const String kOverlayAdSweeperScript = r'''(() => {
       } catch (_) {}
     };
 
+    // **ثغرة مؤكَّدة من لقطتَي شاشة أرسلهما المستخدم**: كان الكاسح يرجع 0
+    // لكل عنصر حين لا يجد عنصر <video> بحجم معقول — وهذا بالضبط حال
+    // اللقطة الأولى: الإعلان المقلَّد ظهر فوق **صورة الغلاف قبل بدء
+    // التشغيل**، حيث لم يكن JWPlayer قد أنشأ عنصر <video> بعد (أو أنشأه
+    // بحجم صفري). فكان الكاسح أعمى تماماً باللحظة التي يظهر فيها الإعلان
+    // فعلياً.
+    //
+    // البديل حين لا يوجد <video> صالح: حاوية المشغّل نفسها، وإلا فالنافذة
+    // كاملةً — نحن داخل مستند تضمين لا يحوي شيئاً غير المشغّل أصلاً، فأي
+    // تراكب يغطّي وسطه هو المقصود بالضبط. البوابة الإلزامية (رابط خارجي أو
+    // خارج حاوية المشغّل) تبقى كما هي، فلا تتوسّع دائرة الحجب.
     const videoRects = () => {
       const rects = [];
       try {
@@ -1017,6 +1038,21 @@ const String kOverlayAdSweeperScript = r'''(() => {
           const r = v.getBoundingClientRect();
           if (r.width >= 80 && r.height >= 60) rects.push(r);
         });
+      } catch (_) {}
+      if (rects.length) return rects;
+      try {
+        document.querySelectorAll(PLAYER_BOX).forEach((box) => {
+          const r = box.getBoundingClientRect();
+          if (r.width >= 200 && r.height >= 120) rects.push(r);
+        });
+      } catch (_) {}
+      if (rects.length) return rects;
+      try {
+        const w = window.innerWidth || 0;
+        const h = window.innerHeight || 0;
+        if (w >= 200 && h >= 120) {
+          rects.push({left: 0, top: 0, right: w, bottom: h, width: w, height: h});
+        }
       } catch (_) {}
       return rects;
     };
@@ -1117,6 +1153,29 @@ const String kOverlayAdSweeperScript = r'''(() => {
 
     const THRESHOLD = 75;
 
+    // تشخيص: تراكب بدا مريباً لكنه لم يبلغ العتبة. بدون هذا، أي إعلان ينجو
+    // لا يترك أثراً بالسجل إطلاقاً (تراكب DOM بحت، لا حدث شبكة ولا تنقّل)،
+    // فتتحوّل كل جولة إصلاح لتخمين. يُبلَّغ مرة واحدة لكل عنصر فقط.
+    const reportedNearMiss = new WeakSet();
+    const reportNearMiss = (el, score) => {
+      try {
+        if (score <= 0 || reportedNearMiss.has(el)) return;
+        reportedNearMiss.add(el);
+        const rect = el.getBoundingClientRect();
+        const text = ((el.innerText || '') + '').trim().slice(0, 60);
+        report({
+          type: 'overlay_ad_spared',
+          score: score,
+          threshold: THRESHOLD,
+          tag: el.tagName || '',
+          cls: String(el.className || '').slice(0, 60),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          text: text,
+        });
+      } catch (_) {}
+    };
+
     const sweep = () => {
       notePlayback();
       try {
@@ -1131,7 +1190,11 @@ const String kOverlayAdSweeperScript = r'''(() => {
           if (!el || seen.has(el)) return;
           seen.add(el);
           const score = suspicion(el);
-          if (score >= THRESHOLD) neutralize(el, score);
+          if (score >= THRESHOLD) {
+            neutralize(el, score);
+          } else {
+            reportNearMiss(el, score);
+          }
         });
       } catch (_) {}
     };
@@ -1154,7 +1217,10 @@ const String kOverlayAdSweeperScript = r'''(() => {
     } catch (_) {}
 
     sweep();
-    try { setInterval(sweep, 1500); } catch (_) {}
+    try {
+      window.__sportsPlayerTimers = window.__sportsPlayerTimers || [];
+      window.__sportsPlayerTimers.push(setInterval(sweep, 1500));
+    } catch (_) {}
 
     // نقطة دخول يدوية: زر النجاة بواجهة Flutter يستدعيها مباشرة.
     window.__sportsPlayerSweepOverlays = sweep;
@@ -1281,6 +1347,50 @@ const String kSameOriginFrameProbeScript = r'''(() => {
     };
 
     run();
-    try { setInterval(run, 1200); } catch (_) {}
+    try {
+      window.__sportsPlayerTimers = window.__sportsPlayerTimers || [];
+      window.__sportsPlayerTimers.push(setInterval(run, 1200));
+    } catch (_) {}
   } catch (_) {}
 })();''';
+
+/// يُسكِت الصفحة بالكامل بعد أن يفوز التشغيل الأصلي (ExoPlayer).
+///
+/// **سبب وجوده — مؤكَّد بسجل تشخيص**: بعد
+/// `PLAY_SERVER_QUALITY_SUCCESS ... final state: NATIVE` عند الثانية 35.5،
+/// استمر السجل يمتلئ حتى آخره بـ`MEDIA_RESOURCE` و`JWPLAYER_PLAYER_DETECTED`
+/// **كل ثانية تقريباً**. أي أن خمسة مؤقّتات مُحقَنة (450ms، 900ms×2،
+/// 1200ms، 1800ms) بقيت تمسح الـDOM وتعبر جسر جافاسكربت←Dart وتكتب بالسجل
+/// طوال المشاهدة — على الخيط نفسه الذي يرسم الفيديو. ومعها بقي مشغّل
+/// الصفحة يسحب نفس الفيديو بالتوازي.
+///
+/// بعد فوز التشغيل الأصلي لا شيء من هذا له معنى: الصفحة مخفية تماماً
+/// (`_isWebSource = false`) ولا أحد يراها. نوقف المؤقّتات والمراقبات
+/// ونوقف أي وسائط، **لكن نُبقي المستند نفسه حياً** لأن إنقاذ المانفست
+/// (`_relayManifestViaWebView`) قد يحتاج جلسته الحقيقية لاحقاً لو تعثّر
+/// التشغيل.
+const String kQuiesceWebPageScript = r"""(() => {
+  try {
+    (window.__sportsPlayerTimers || []).forEach((id) => {
+      try { clearInterval(id); } catch (_) {}
+    });
+    window.__sportsPlayerTimers = [];
+  } catch (_) {}
+  try {
+    (window.__sportsPlayerObservers || []).forEach((o) => {
+      try { o.disconnect(); } catch (_) {}
+    });
+    window.__sportsPlayerObservers = [];
+  } catch (_) {}
+  try {
+    document.querySelectorAll('video,audio').forEach((v) => {
+      try { v.muted = true; v.pause(); } catch (_) {}
+    });
+  } catch (_) {}
+  try {
+    if (typeof jwplayer === 'function') {
+      const jw = jwplayer();
+      if (jw && typeof jw.pause === 'function') jw.pause(true);
+    }
+  } catch (_) {}
+})();""";

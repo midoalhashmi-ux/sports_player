@@ -164,6 +164,14 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // prize pages, app-store redirects, etc.), so it gets blocked to keep the
   // original channel page intact.
   bool _webInitialLoadCompleted = false;
+
+  /// اختصار صفحة المشغّل المحفوظ لهذي الحلقة (راجع `EpisodeEmbedService`)،
+  /// والمؤقّت الذي يتراجع للمسار الكامل لو لم يوصل الاختصار لأي مصدر.
+  String? _episodeEmbedShortcutUrl;
+  Timer? _episodeEmbedFallbackTimer;
+
+  /// مؤقّت "لا تنتظر الصفحة تكمل" — راجع `onPageStarted`.
+  Timer? _webEarlyDetectTimer;
   // WebView always calls onPageFinished after a navigation attempt, even
   // when that navigation actually failed (e.g. ERR_CONNECTION_RESET on the
   // main frame — confirmed by a real log where onWebResourceError correctly
@@ -479,6 +487,19 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       // بدل الاعتماد على وصف المستخدم لشكل الإعلان.
       _slog('OVERLAY_AD_BLOCKED',
           'score=${decoded['score']} tag=${decoded['tag']}');
+      return;
+    }
+    if (type == 'overlay_ad_spared') {
+      // تراكب بدا مريباً لكنه لم يبلغ عتبة الحجب. بدون هذا السطر، أي إعلان
+      // ينجو لا يترك أي أثر بالسجل إطلاقاً (تراكب DOM بحت: لا حدث شبكة ولا
+      // تنقّل) — فكل جولة إصلاح تتحوّل لتخمين من لقطة شاشة. هنا نعرف
+      // بالضبط كم نقطة نقصته وما هو.
+      _slog(
+        'OVERLAY_AD_SPARED',
+        'score=${decoded['score']}/${decoded['threshold']} tag=${decoded['tag']} '
+        'cls=${decoded['cls']} size=${decoded['w']}x${decoded['h']} '
+        'text=${decoded['text']}',
+      );
       return;
     }
     if (type == 'media_resource') {
@@ -882,21 +903,48 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       for (final v in prioritized) {
         if (seen.add(v.url)) ordered.add(MapEntry(v.label, v.url));
       }
+      // **إصلاح سرعة/جودة معاً، مبني على سجل المستخدم**: كنا نأخذ أول جودة
+      // من الترتيب أعلاه ونشغّلها وحدها — أي قائمة **بجودة واحدة مثبَّتة**
+      // لا تكيّف فيها إطلاقاً. وحين كان WebView قد أثبت للتو أثقل جودة
+      // (`WEB_PROVEN_VARIANT ..._x`)، صارت هي بالضبط ما نبدأ به:
+      // `HLS_VARIANTS_PRIORITIZED: first=1072p` ← ثم فشل تلو فشل.
+      //
+      // الأفضل من "ابدأ بالأخف" هو ألّا نختار أصلاً: نكتب القائمة الرئيسية
+      // كما هي (بروابط مطلقة) كملف محلي ونسلّمها لـExoPlayer. عندها يبقى
+      // التكيّف التلقائي حياً — يبدأ محافظاً بنفسه ويصعد حسب الشبكة
+      // الفعلية — ويطبّق الوكيل المحلي سقف الجودات المُثبَتة فوق ذلك
+      // (`_applyVariantCeiling`) فلا يقفز لطبقة لم يثبت أحد أنها تعمل.
+      // ولا تُفقَد أي جودة من الاختيار اليدوي: `ordered` تبقى كما هي.
+      final masterFile = await _writeRelayedManifestFile(lines, manifestUrl);
+      if (masterFile != null) {
+        return _RelayedManifest.master(masterFile, ordered);
+      }
       return _RelayedManifest.variants(ordered);
     }
 
     if (!text.contains('#EXTINF')) return null;
-    final rewritten = lines.map((line) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty || trimmed.startsWith('#')) return line;
-      return _resolveRelativeUrl(trimmed, manifestUrl);
-    }).join('\n');
+    final file = await _writeRelayedManifestFile(lines, manifestUrl);
+    return file == null ? null : _RelayedManifest.localFile(file);
+  }
+
+  /// يكتب قائمة تشغيل مُنقَذة كملف محلي بروابط مطلقة.
+  ///
+  /// نفس الكتابة كانت مكرّرة لقائمة الشرائح، وصارت الآن تخدم القائمة
+  /// الرئيسية أيضاً (راجع `_RelayedManifest.master`). الروابط تُحوَّل
+  /// لمطلقة لأن الملف يسكن `file://` فلا أساس نسبي له إطلاقاً.
+  Future<File?> _writeRelayedManifestFile(
+      List<String> lines, String manifestUrl) async {
     try {
+      final rewritten = lines.map((line) {
+        final trimmed = line.trim();
+        if (trimmed.isEmpty || trimmed.startsWith('#')) return line;
+        return _resolveRelativeUrl(trimmed, manifestUrl);
+      }).join('\n');
       final dir = await getTemporaryDirectory();
       final file = File(
           '${dir.path}/relayed_manifest_${DateTime.now().microsecondsSinceEpoch}.m3u8');
       await file.writeAsString(rewritten);
-      return _RelayedManifest.localFile(file);
+      return file;
     } catch (_) {
       return null;
     }
@@ -908,6 +956,75 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // "sources")، فتحصل على نقاط ترجيح "مصدر من إطار عمل معروف" رغم إنها
   // ليست فيديو إطلاقاً. هذا الفحص يرفضها بغض النظر عن أي نقاط ترجيح أخرى.
   bool _isNonMediaAsset(String url) => CandidateScoring.isNonMediaAsset(url);
+
+  /// يحمّل اختصار صفحة المشغّل المحفوظ لهذي الحلقة، إن وُجد وصلح.
+  ///
+  /// يرجع `null` (= افتح صفحة الموقع كالمعتاد) حين لا اختصار، أو حين يكون
+  /// الاختصار على نفس مضيف الصفحة الأصلية (عندها لا يوفّر شيئاً).
+  Future<Uri?> _loadEpisodeEmbedShortcut(Uri sourceUri) async {
+    final channelId = widget.channelId;
+    if (channelId == null || channelId.isEmpty) return null;
+    final saved = await EpisodeEmbedService.load(channelId);
+    if (saved == null || !mounted) return null;
+    final embedUri = Uri.tryParse(saved.embedUrl);
+    if (embedUri == null ||
+        embedUri.host.isEmpty ||
+        embedUri.host.toLowerCase() == sourceUri.host.toLowerCase()) {
+      return null;
+    }
+    _episodeEmbedShortcutUrl = saved.embedUrl;
+    _webLastPromotedIframeUrl = saved.embedUrl;
+    _webPromotedPlayerMode = true;
+    _webSourceOrigin = embedUri.host;
+    _webVidmolyPlayerMode = saved.playerMode == 'vidmoly';
+    _webVideoJsPlayerMode = saved.playerMode == 'videojs';
+    _applyPromotedDocumentContext(saved.embedUrl);
+    _slog(
+      'EPISODE_EMBED_SHORTCUT',
+      'url=${_safeLogUrl(saved.embedUrl)} playerMode=${saved.playerMode} '
+      'skipping=${_safeLogUrl(sourceUri.toString())}',
+    );
+    // شبكة أمان: لو لم يصل الاختصار لأي مرشّح حقيقي خلال مهلة معقولة
+    // (المزوّد بدّل نطاقه، أو حُذفت الحلقة عنده)، نحذفه ونعود للمسار
+    // الكامل من صفحة الموقع بدل أن نعلق على رابط ميت.
+    final generation = _webSessionGeneration;
+    _episodeEmbedFallbackTimer?.cancel();
+    _episodeEmbedFallbackTimer = Timer(const Duration(seconds: 12), () {
+      if (!_webSessionIsActive(generation)) return;
+      if (_webPlaybackReady || _webCandidateRegistry.isNotEmpty) return;
+      final web = _webController;
+      if (web == null) return;
+      _slog('EPISODE_EMBED_SHORTCUT_FAILED',
+          'url=${_safeLogUrl(saved.embedUrl)} — reverting to full page');
+      unawaited(EpisodeEmbedService.invalidate(channelId));
+      _episodeEmbedShortcutUrl = null;
+      _webPromotedPlayerMode = false;
+      _webLastPromotedIframeUrl = null;
+      _webSourceOrigin = sourceUri.host;
+      unawaited(web.loadRequest(sourceUri, headers: _effectiveStreamHeaders()));
+    });
+    return embedUri;
+  }
+
+  /// يحفظ صفحة المشغّل التي انتهى إليها اكتشاف هذي الحلقة، بعد أن يثبت
+  /// التشغيل فعلاً — فتُفتح مباشرةً بالمرة القادمة.
+  void _rememberEpisodeEmbed() {
+    final channelId = widget.channelId;
+    final embedUrl = _webLastPromotedIframeUrl ?? _episodeEmbedShortcutUrl;
+    if (channelId == null || channelId.isEmpty || embedUrl == null) return;
+    final mode = _webVidmolyPlayerMode
+        ? 'vidmoly'
+        : (_webVideoJsPlayerMode ? 'videojs' : 'generic');
+    _episodeEmbedFallbackTimer?.cancel();
+    _episodeEmbedFallbackTimer = null;
+    unawaited(EpisodeEmbedService.remember(
+      channelId,
+      embedUrl: embedUrl,
+      playerMode: mode,
+    ));
+    _slog('EPISODE_EMBED_REMEMBERED',
+        'url=${_safeLogUrl(embedUrl)} playerMode=$mode');
+  }
 
   /// يضبط `referer`/`origin` على مستند المشغّل الذي رقّيناه للتو، بدل
   /// انتظار `onPageFinished` الخاص به (راجع التعليق بموضع الاستدعاء).
@@ -1358,6 +1475,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     if (!mounted || _webPlaybackReady) return;
     _webPlaybackReady = true;
     _webStartupTimeoutTimer?.cancel();
+    // حتى لو انتهى الأمر بالتشغيل داخل WebView (لا تشغيل أصلي)، صفحة
+    // المشغّل التي وصلنا إليها صحيحة ومثبَتة — تستحق الحفظ للمرة القادمة.
+    _rememberEpisodeEmbed();
     await _applyPlayerFocus(controller);
     if (!mounted) return;
     setState(() {
@@ -2032,6 +2152,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     // مختلف تماماً، فلا يُورَّث الإثبات القديم.
     _webProvenVariantKeys.clear();
     _webStartupTimeoutTimer?.cancel();
+    _webEarlyDetectTimer?.cancel();
+    _webEarlyDetectTimer = null;
+    _episodeEmbedShortcutUrl = null;
+    _episodeEmbedFallbackTimer?.cancel();
+    _episodeEmbedFallbackTimer = null;
     _webSeenSources.clear();
     _webFailedNativeSources.clear();
     _webCandidateEvidence.clear();
@@ -2138,7 +2263,38 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
             _slog('NAV_ALLOWED', _safeLogUrl(request.url));
             return NavigationDecision.navigate;
           },
+          onPageStarted: (_) {
+            // **إصلاح تأخير مؤكَّد بسجل تشخيص**: `onPageFinished` لا يُطلَق
+            // إلا بعد أن ينتهي **كل** مورد فرعي بالصفحة — بما فيها نطاقات
+            // إعلانات ميتة. سجل المستخدم (ristoanime) أمضى **23 ثانية**
+            // هناك: `ERR_NAME_NOT_RESOLVED` عند +19.4s،
+            // `ERR_CONNECTION_CLOSED` عند +21.4s،
+            // `ERR_TOO_MANY_REDIRECTS` عند +23.0s، ثم `PAGE_FINISHED` عند
+            // +23.03s مباشرة بعدها. بينما عنصر <iframe> الذي نحتاجه كان
+            // موجوداً بالـDOM قبل ذلك بكثير.
+            //
+            // `webview_flutter` لا يتيح اعتراض الموارد الفرعية على أندرويد،
+            // فلا نستطيع حجب تلك النطاقات. لكن لا داعي لانتظارها أصلاً:
+            // نبدأ الاكتشاف بعد مهلة قصيرة من بدء التحميل، ولو وصل
+            // `onPageFinished` قبلها يلغيها ويعمل كالمعتاد.
+            _webEarlyDetectTimer?.cancel();
+            if (_webDrmDetected) return;
+            final generation = _webSessionGeneration;
+            _webEarlyDetectTimer =
+                Timer(const Duration(milliseconds: 2500), () {
+              if (!_webSessionIsActive(generation)) return;
+              if (_webInitialLoadCompleted || _webMainFrameLoadFailed) return;
+              if (_webDetectorTimer != null || _webDetectionInFlight) return;
+              final web = _webController;
+              if (web == null) return;
+              _slog('KICK_AUTO_DETECT',
+                  'from onPageStarted (page still loading), generation=$generation');
+              unawaited(_autoDetectWebSource(web));
+            });
+          },
           onPageFinished: (finishedUrl) async {
+            _webEarlyDetectTimer?.cancel();
+            _webEarlyDetectTimer = null;
             _webInitialLoadCompleted = true;
             _slog('PAGE_FINISHED', _safeLogUrl(finishedUrl));
             // بعد نجاح التشغيل الأصلي (nativePlaying)، الـ WebView يبقى حياً
@@ -2247,7 +2403,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         ));
       _webController = controller;
       _startWebStartupTimeout(controller, _webSessionGeneration);
-      await controller.loadRequest(sourceUri, headers: _effectiveStreamHeaders());
+      // **اختصار الحلقة المُتعلَّم**: لو سبق أن وصلنا لصفحة مشغّل هذي
+      // الحلقة بعينها ونجح التشغيل بعدها، نفتحها مباشرةً ونتخطّى صفحة
+      // الموقع كلياً — هي المرحلة التي أكلت 23 ثانية بسجل المستخدم
+      // (انتظار نطاقات إعلانات ميتة) قبل أن يبدأ الاكتشاف أصلاً. راجع
+      // EpisodeEmbedService لسبب حفظ رابط التضمين لا رابط الوسائط.
+      final shortcut = await _loadEpisodeEmbedShortcut(sourceUri);
+      if (!mounted) return;
+      await controller.loadRequest(
+        shortcut ?? sourceUri,
+        headers: _effectiveStreamHeaders(),
+      );
       if (!mounted) return;
       setState(() => _state = _LoadState.loading);
     } catch (_) {

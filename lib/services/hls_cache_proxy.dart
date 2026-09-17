@@ -159,6 +159,28 @@ class HlsCacheProxy {
   /// (يعني جلسة جديدة بدأت) بحلول وقت اكتمالها.
   int _proxyGeneration = 0;
 
+  /// هل أثبت ExoPlayer فعلاً أنه بدأ يشغّل من هذا الوكيل؟
+  ///
+  /// **سبب وجوده — مؤكَّد بسجل تشخيص**: عند بدء أي محاولة تشغيل، كان الوكيل
+  /// يطلق حتى ثلاثة اتصالات جلب مسبق بالتوازي مع الشريحة الأولى التي ينتظرها
+  /// ExoPlayer فعلاً. على وصلة محدودة (وتوكن المصدر بسجل المستخدم يحمل
+  /// `sp=4000`، يرجّح أنه سقف سرعة) هذا يعني أن الشريحة الحاسمة تتقاسم
+  /// النطاق مع شرائح لن يحتاجها أحد بعد ثانيتين. السجل يُظهر النتيجة ست
+  /// مرات متطابقة: `seg-1` يزحف ~12.5 ثانية ثم
+  /// `Connection closed while receiving data`، فيسقط `initialize()` بمهلته.
+  ///
+  /// الآن: صفر جلب مسبق حتى يؤكّد المشغّل أنه يعمل فعلاً — أول شريحة تأخذ
+  /// النطاق كاملاً. بعد التأكيد يعود الجلب المسبق كما كان بالضبط.
+  bool _playbackConfirmed = false;
+
+  /// يُستدعى من `watch_screen` فور `PLAY_SERVER_QUALITY_SUCCESS`.
+  void confirmPlayback() {
+    if (_playbackConfirmed) return;
+    _playbackConfirmed = true;
+    _log('HLS_PROXY_PREFETCH_ENABLED', 'reason=playback_confirmed');
+    _pumpPrefetchQueue();
+  }
+
   /// المصدر معلوماته الحقيقية تُكتشَف فقط بعد أول قائمة تشغيل تُجلب فعلياً
   /// (`_rewritePlaylist` تحدّثها). القيمة الافتراضية `false` قبل ذلك تعني
   /// "نتعامل معه كبث مباشر مؤقتاً" — الأكثر أماناً حتى نتأكد فعلياً.
@@ -296,6 +318,7 @@ class HlsCacheProxy {
     _prefetching.clear();
     _prefetchQueue.clear();
     _activePrefetches = 0;
+    _playbackConfirmed = false;
     _sourceHasKnownEnd = false;
     _provenVariantKeys = const <String>{};
     if (server != null) {
@@ -617,6 +640,8 @@ class HlsCacheProxy {
   }
 
   void _prefetchUrl(String url) {
+    // لا جلب مسبق إطلاقاً قبل أن يثبت التشغيل — راجع `_playbackConfirmed`.
+    if (!_playbackConfirmed) return;
     // _prefetchQueue.contains(url) لم يعد يُفحَص هنا: أي رابط بالطابور يكون
     // فعلاً بـ_prefetching دائماً بنفس اللحظة (يُضافان معاً أدناه، ويُزالان
     // معاً فقط عند اكتمال الجلب) — فحص القائمة إضافي بلا فائدة (ومسح خطي

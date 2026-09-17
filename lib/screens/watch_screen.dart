@@ -27,6 +27,7 @@ import '../services/player_strategies/player_strategy.dart';
 import '../services/player_visibility_service.dart';
 import '../services/preferred_server_service.dart';
 import '../services/playback_prefs_service.dart';
+import '../services/episode_embed_service.dart';
 import '../services/site_recipe_service.dart';
 import '../services/stream_network_client.dart';
 import '../services/session_log_service.dart';
@@ -104,11 +105,27 @@ class _RelayedManifest {
   factory _RelayedManifest.localFile(File file) =>
       _RelayedManifest._(localFile: file);
 
-  bool get isLocalFile => localFile != null;
+  /// قائمة رئيسية مُنقَذة: نحتفظ بالملف المحلي **و**بقائمة الجودات معاً.
+  ///
+  /// الملف هو ما يُشغَّل فعلاً (يبقي التكيّف التلقائي حياً — راجع التعليق
+  /// بموضع الاستخدام)، والقائمة تُغذّي ورقة اختيار الجودة.
+  factory _RelayedManifest.master(
+    File file,
+    List<MapEntry<String, String>> variants,
+  ) =>
+      _RelayedManifest._(localFile: file, variants: variants);
 
-  String describe() => isLocalFile
-      ? 'local_file(${localFile!.path.split('/').last})'
-      : 'variants(${variants?.length ?? 0})';
+  bool get isLocalFile => localFile != null;
+  bool get hasVariants => (variants?.isNotEmpty ?? false);
+
+  String describe() {
+    final file = localFile?.path.split('/').last;
+    if (file != null && hasVariants) {
+      return 'master_local_file($file, variants:${variants!.length})';
+    }
+    if (file != null) return 'local_file($file)';
+    return 'variants(${variants?.length ?? 0})';
+  }
 }
 
 /// A short-lived registry for media candidates observed during the current
@@ -1206,6 +1223,133 @@ class _WatchScreenState extends State<WatchScreen>
     } catch (_) {}
   }
 
+  /// الهامش الأفقي الذي يحجزه `Slider` لكرة السحب على كل جهة. قيمة ثابتة
+  /// بـFlutter (`_kSliderTrackInset` داخل `slider.dart`، غير مُصدَّرة) —
+  /// نكرّرها هنا لتنطبق طبقات المسار الثلاث فوق بعضها بلا إزاحة.
+  static const double _kSliderTrackInset = 24;
+
+  /// نسبة ما جرى تحميله مسبقاً من الفيديو (0..1).
+  ///
+  /// `buffered` قائمة مدَيات لا مدى واحداً (تنشأ فجوات بعد أي قفزة)، والذي
+  /// يهمّ المشاهد هو "إلى أين وصل التحميل المتصل من موضعه الحالي" — لا
+  /// مجموع كل ما نُزّل. لذا نأخذ نهاية المدى الذي **يحتوي** الموضع الحالي،
+  /// وإلا فأبعد نهاية متاحة.
+  double _bufferedFraction(VideoPlayerValue value) {
+    final totalMs = value.duration.inMilliseconds;
+    if (totalMs <= 0 || value.buffered.isEmpty) return 0;
+    final positionMs = value.position.inMilliseconds;
+    var endMs = 0;
+    for (final range in value.buffered) {
+      final startMs = range.start.inMilliseconds;
+      final rangeEndMs = range.end.inMilliseconds;
+      if (positionMs >= startMs && positionMs <= rangeEndMs) {
+        endMs = rangeEndMs;
+        break;
+      }
+      if (rangeEndMs > endMs) endMs = rangeEndMs;
+    }
+    return (endMs / totalMs).clamp(0.0, 1.0);
+  }
+
+  /// طبقة واحدة من مسار شريط التقدّم، بمحاذاة الـ`Slider` فوقها تماماً.
+  Widget _sliderTrackLayer({
+    required double widthFactor,
+    required double height,
+    required Color color,
+  }) {
+    return Positioned.fill(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: _kSliderTrackInset),
+        child: Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: FractionallySizedBox(
+            widthFactor: widthFactor,
+            child: Container(
+              height: height,
+              decoration: BoxDecoration(
+                color: color,
+                borderRadius: BorderRadius.circular(height),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// راجع `kQuiesceWebPageScript`.
+  Future<void> _quiesceWebPage() async {
+    final web = _webController;
+    if (web == null) return;
+    try {
+      await web.runJavaScript(kQuiesceWebPageScript);
+      _slog('WEB_PAGE_QUIESCED', 'reason=native_playback_won');
+    } catch (_) {}
+  }
+
+  /// يوقف مشغّل الصفحة فعلياً (لا يكتمه فقط) طوال محاولة التشغيل الأصلي،
+  /// ويستأنفه لو فشلت.
+  ///
+  /// **أهم إصلاح سرعة بهذي الجولة، مؤكَّد بسجل تشخيص**: كنا نكتم مشغّل
+  /// الموقع فقط — والكتم لا يوقف التحميل إطلاقاً. فبينما ينتظر ExoPlayer
+  /// شريحته الأولى، كان مشغّل الموقع يواصل سحب **نفس الفيديو من نفس الـCDN**
+  /// بكامل سرعته. سجل المستخدم يُظهر النتيجة ست مرات متطابقة بلا استثناء:
+  ///
+  ///   seg-1 ... elapsedMs=12524 ... Connection closed while receiving data
+  ///   seg-1 ... elapsedMs=12658 ... (نفس الشيء)  × 6
+  ///   webViewActiveNearby=true                    ← في كل واحدة منها
+  ///
+  /// وبنفس اللحظة كانت قوائم التشغيل (`.m3u8`، بضعة كيلوبايت) تُجلب بـ400
+  /// ميلي ثانية و`status=200` — فليس رفضاً من الـCDN ولا مشكلة ترويسات:
+  /// البيانات كانت تتدفّق فعلاً ثم تنقطع. هذي **مجاعة نطاق** خالصة، ونحن
+  /// من كان يسبّبها لنفسه.
+  ///
+  /// الإيقاف مؤقت تماماً: أي فشل يستأنف المشغّل فوراً فيبقى WebView ملاذاً
+  /// أخيراً سليماً كما كان.
+  Future<void> _suspendWebPlaybackForNativeTrial(bool suspend) async {
+    final web = _webController;
+    if (web == null) return;
+    try {
+      await web.runJavaScript('''(() => {
+        const suspend = $suspend;
+        const FLAG = 'data-sports-player-trial-state';
+        document.querySelectorAll('video,audio').forEach((v) => {
+          try {
+            if (suspend) {
+              if (!v.hasAttribute(FLAG)) {
+                v.setAttribute(FLAG, (v.muted ? '1' : '0') + (v.paused ? '1' : '0'));
+              }
+              v.muted = true;
+              v.pause();
+            } else {
+              const prev = v.getAttribute(FLAG);
+              if (prev !== null) {
+                v.muted = prev.charAt(0) === '1';
+                v.removeAttribute(FLAG);
+                if (prev.charAt(1) === '0') { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
+              }
+            }
+          } catch (_) {}
+        });
+        // JWPlayer/video.js يديران التحميل المسبق بطبقتهما الخاصة فوق عنصر
+        // <video> — إيقاف العنصر وحده لا يكفي دائماً لإيقاف جلب الشرائح.
+        try {
+          if (typeof jwplayer === 'function') {
+            const jw = jwplayer();
+            if (jw && typeof jw.pause === 'function') { suspend ? jw.pause(true) : jw.play(true); }
+          }
+        } catch (_) {}
+        try {
+          if (window.videojs && typeof window.videojs.getAllPlayers === 'function') {
+            window.videojs.getAllPlayers().forEach((p) => {
+              try { suspend ? p.pause() : p.play(); } catch (_) {}
+            });
+          }
+        } catch (_) {}
+      })();''');
+    } catch (_) {}
+  }
+
   @override
   Future<void> _playServerQuality(
       StreamServerOption server, StreamQuality quality,
@@ -1374,7 +1518,7 @@ class _WatchScreenState extends State<WatchScreen>
       _duration = Duration.zero;
       _isPlaying = false;
       newController.addListener(_videoListener);
-      if (fallbackToWeb) await _muteWebForNativeTrial(true);
+      if (fallbackToWeb) await _suspendWebPlaybackForNativeTrial(true);
       // شبكة أمان عامة: مؤكَّد بسجل تشخيص فعلي أن initialize() قد يعلق
       // بلا نجاح ولا فشل مسجَّل لأكثر من 40 ثانية (بلا هذا الحد). أي تعليق
       // فعلي الآن يتحوّل لفشل واضح ومسجَّل خلال مهلة محدودة، فيدخل بمسار
@@ -1428,6 +1572,13 @@ class _WatchScreenState extends State<WatchScreen>
         // ويُعاد إنشاؤها من الصفر — وهذا سبب "إعادة تشغيل الصفحة" العشوائية.
         _webDetectorTimer?.cancel();
         _webDetectorTimer = null;
+        // إسكات الصفحة كاملةً: مؤقّتاتنا المُحقَنة ومراقباتها ووسائطها.
+        // بدون هذا كانت تبقى تعمل حتى نهاية المشاهدة (راجع
+        // kQuiesceWebPageScript — النمط موثَّق حرفياً بسجل المستخدم).
+        unawaited(_quiesceWebPage());
+        // صفحة المشغّل التي أوصلتنا هنا تستحق الحفظ: المرة القادمة لنفس
+        // الحلقة تُفتح مباشرةً بلا صفحة الموقع إطلاقاً.
+        _rememberEpisodeEmbed();
         _smartLog('NATIVE', 'playback proof success; switching WebView -> Native');
       }
       _slog(
@@ -1435,6 +1586,9 @@ class _WatchScreenState extends State<WatchScreen>
         'url=${_safeLogUrl(quality.url)} fallbackToWeb=$fallbackToWeb — final state: ${fallbackToWeb ? 'NATIVE (switched from WebView)' : 'NATIVE (direct)'}',
       );
       _cancelNativeReconnect();
+      // من الآن فقط يُسمح للوكيل بالجلب المسبق — قبل هذي اللحظة كان يزاحم
+      // الشريحة الأولى على نفس النطاق (راجع `_playbackConfirmed`).
+      _hlsCacheProxy.confirmPlayback();
       setState(() {
         _state = _LoadState.ready;
         if (fallbackToWeb) _isWebSource = false;
@@ -1485,7 +1639,7 @@ class _WatchScreenState extends State<WatchScreen>
           await failedController?.dispose();
         } catch (_) {}
         unawaited(_hlsCacheProxy.stop());
-        await _muteWebForNativeTrial(false);
+        await _suspendWebPlaybackForNativeTrial(false);
         final failedUrl = _normalizeCandidate(quality.url);
         _webFailedNativeSources.add(failedUrl);
         _webSeenSources.add(failedUrl);
@@ -1523,6 +1677,16 @@ class _WatchScreenState extends State<WatchScreen>
           if (relayed != null && mounted) {
             _slog('MANIFEST_RELAY_SUCCESS',
                 'url=${_safeLogUrl(failedUrl)} kind=${relayed.describe()}');
+            // قائمة رئيسية مُنقَذة: نشغّل الملف المحلي (تكيّف تلقائي كامل)
+            // لكن نبني قائمة الجودات من `variants` كالعادة حتى يبقى
+            // الاختيار اليدوي متاحاً. الترتيب مهم: نبني القائمة أولاً ثم
+            // نشغّل، فتكون الورقة جاهزة لحظة نجاح التشغيل.
+            final relayedQualities = relayed.hasVariants
+                ? [
+                    for (final v in relayed.variants!)
+                      StreamQuality(label: v.key, url: v.value),
+                  ]
+                : const <StreamQuality>[];
             if (relayed.isLocalFile) {
               // بصيغة file:// (لا مسار عادي) حتى يتعرف Uri.parse بجهة
               // _playServerQuality عليه كرابط صالح — ExoPlayer يدعم رؤوس
@@ -1530,21 +1694,32 @@ class _WatchScreenState extends State<WatchScreen>
               // السيجمنت البعيدة اللي يذكرها الملف (موثّق من فحص كود
               // video_player_android نفسه).
               final fileUri = Uri.file(relayed.localFile!.path).toString();
+              final autoLabel =
+                  relayed.hasVariants ? _adaptiveQualityLabel : quality.label;
+              final autoQuality = StreamQuality(label: autoLabel, url: fileUri);
+              final relayedServer = StreamServerOption(
+                label: server.label,
+                qualities: [autoQuality, ...relayedQualities],
+              );
+              if (relayed.hasVariants && mounted) {
+                setState(() {
+                  _session = StreamSession.success(
+                    kind: StreamKind.hls,
+                    isLive: _session?.isLive ?? true,
+                    servers: [relayedServer],
+                  );
+                });
+              }
               await _playServerQuality(
-                StreamServerOption(label: server.label, qualities: [
-                  StreamQuality(label: quality.label, url: fileUri)
-                ]),
-                StreamQuality(label: quality.label, url: fileUri),
+                relayedServer,
+                autoQuality,
                 fallbackToWeb: true,
                 playbackHeaders: playbackHeaders,
                 formatHintOverride: VideoFormat.hls,
               );
               return;
             }
-            final qualities = [
-              for (final v in relayed.variants!)
-                StreamQuality(label: v.key, url: v.value),
-            ];
+            final qualities = relayedQualities;
             final relayedServer =
                 StreamServerOption(label: server.label, qualities: qualities);
             if (mounted) {
@@ -2257,6 +2432,7 @@ class _WatchScreenState extends State<WatchScreen>
     SessionLogService.instance.endSession('screen disposed (state=$_state, isWebSource=$_isWebSource)');
     _webDetectorTimer?.cancel();
     _webStartupTimeoutTimer?.cancel();
+    _webEarlyDetectTimer?.cancel();
     _webPromotionFallbackTimer?.cancel();
     _webVidmolyRevealTimer?.cancel();
     if (identical(_activeInstance, this)) _activeInstance = null;
@@ -3255,43 +3431,74 @@ class _WatchScreenState extends State<WatchScreen>
                         valueListenable: _controller!,
                         builder: (context, value, _) {
                           final durationMs = value.duration.inMilliseconds;
-                          return SliderTheme(
-                            // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر الكرة
-                            // وتظهر فقط أثناء السحب الفعلي (راجع _isScrubbingSlider) —
-                            // غير ذلك خط نظيف بلا كرة ثابتة الظهور.
-                            data: SliderTheme.of(context).copyWith(
-                              trackHeight: _isScrubbingSlider ? 3.5 : 2,
-                              thumbShape: RoundSliderThumbShape(
-                                  enabledThumbRadius:
-                                      _isScrubbingSlider ? 7 : 0),
-                              overlayShape: const RoundSliderOverlayShape(
-                                  overlayRadius: 14),
-                            ),
-                            child: Slider(
-                              value: value.position.inMilliseconds
-                                  .clamp(0, durationMs == 0 ? 1 : durationMs)
-                                  .toDouble(),
-                              min: 0,
-                              max: durationMs == 0
-                                  ? 1
-                                  : durationMs.toDouble(),
-                              activeColor: Colors.redAccent,
-                              inactiveColor: Colors.white30,
-                              onChangeStart: (_) {
-                                _wasPlayingBeforeScrub = _isPlaying;
-                                setState(() => _isScrubbingSlider = true);
-                              },
-                              onChanged: (v) => _controller
-                                  ?.seekTo(Duration(milliseconds: v.toInt())),
-                              onChangeEnd: (_) {
-                                setState(() => _isScrubbingSlider = false);
-                                // ExoPlayer can drop playWhenReady after a seek
-                                // past the buffered window on some sources —
-                                // without this, dragging the slider silently
-                                // pauses playback until the user taps play again.
-                                if (_wasPlayingBeforeScrub) _controller?.play();
-                              },
-                            ),
+                          final trackHeight = _isScrubbingSlider ? 3.5 : 2.0;
+                          // **طلب صريح من المستخدم**: خطّان لا خط واحد —
+                          // خط التقدّم الأحمر، وخلفه خط أبيض شفاف يبيّن ما
+                          // جرى **تحميله مسبقاً**، تماماً كما يعرضه مشغّل
+                          // JW بصفحات المصادر.
+                          //
+                          // `Slider` لا يملك مفهوم "مدى ثانٍ" إطلاقاً، فنبني
+                          // الطبقات بأنفسنا ونجعل مساره غير النشط شفافاً:
+                          //   ١) خط أساس خافت جداً = بقية الفيديو
+                          //   ٢) خط أبيض شفاف = المُحمَّل مسبقاً
+                          //   ٣) الـSlider نفسه = التقدّم + كرة السحب
+                          // الهوامش الأفقية تطابق `_kSliderTrackInset` حتى
+                          // تنطبق الطبقات الثلاث بلا أي إزاحة.
+                          return Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              _sliderTrackLayer(
+                                widthFactor: 1.0,
+                                height: trackHeight,
+                                color: Colors.white.withValues(alpha: 0.18),
+                              ),
+                              _sliderTrackLayer(
+                                widthFactor: _bufferedFraction(value),
+                                height: trackHeight,
+                                color: Colors.white.withValues(alpha: 0.42),
+                              ),
+                              SliderTheme(
+                                // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر
+                                // الكرة وتظهر فقط أثناء السحب الفعلي
+                                // (راجع _isScrubbingSlider).
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: trackHeight,
+                                  thumbShape: RoundSliderThumbShape(
+                                      enabledThumbRadius:
+                                          _isScrubbingSlider ? 7 : 0),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                      overlayRadius: 14),
+                                ),
+                                child: Slider(
+                                  value: value.position.inMilliseconds
+                                      .clamp(0, durationMs == 0 ? 1 : durationMs)
+                                      .toDouble(),
+                                  min: 0,
+                                  max: durationMs == 0 ? 1 : durationMs.toDouble(),
+                                  activeColor: Colors.redAccent,
+                                  // شفاف: الطبقتان أعلاه هما ما يُرى خلف
+                                  // التقدّم، وإلا غطّاهما المسار غير النشط.
+                                  inactiveColor: Colors.transparent,
+                                  onChangeStart: (_) {
+                                    _wasPlayingBeforeScrub = _isPlaying;
+                                    setState(() => _isScrubbingSlider = true);
+                                  },
+                                  onChanged: (v) => _controller
+                                      ?.seekTo(Duration(milliseconds: v.toInt())),
+                                  onChangeEnd: (_) {
+                                    setState(() => _isScrubbingSlider = false);
+                                    // ExoPlayer can drop playWhenReady after a
+                                    // seek past the buffered window on some
+                                    // sources — without this, dragging the
+                                    // slider silently pauses playback until the
+                                    // user taps play again.
+                                    if (_wasPlayingBeforeScrub) {
+                                      _controller?.play();
+                                    }
+                                  },
+                                ),
+                              ),
+                            ],
                           );
                         },
                       ),
