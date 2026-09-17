@@ -30,6 +30,7 @@ class HlsCacheProxy {
     this.onLog,
     this.isWebViewActiveNearby,
     this.onVariantsDiscovered,
+    this.onForegroundSegmentFailed,
   });
 
   /// (tag, detail) — يُمرَّر لـ_slog بـwatch_screen لتظهر بسجل التشخيص
