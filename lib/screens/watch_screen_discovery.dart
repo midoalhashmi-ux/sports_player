@@ -972,18 +972,29 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         embedUri.host.toLowerCase() == sourceUri.host.toLowerCase()) {
       return null;
     }
-    _episodeEmbedShortcutUrl = saved.embedUrl;
-    _webLastPromotedIframeUrl = saved.embedUrl;
-    _webPromotedPlayerMode = true;
-    _webSourceOrigin = embedUri.host;
-    _webVidmolyPlayerMode = saved.playerMode == 'vidmoly';
-    _webVideoJsPlayerMode = saved.playerMode == 'videojs';
-    _applyPromotedDocumentContext(saved.embedUrl);
     _slog(
       'EPISODE_EMBED_SHORTCUT',
       'url=${_safeLogUrl(saved.embedUrl)} playerMode=${saved.playerMode} '
       'skipping=${_safeLogUrl(sourceUri.toString())}',
     );
+    _applyEpisodeEmbedShortcutState(saved, sourceUri);
+    return embedUri;
+  }
+
+  /// يضبط حالة الجلسة على "نحن الآن داخل صفحة المشغّل مباشرةً"، ويسلّح
+  /// شبكة الأمان التي تعيدنا للمسار الكامل لو لم يوصل الاختصار لشيء.
+  ///
+  /// مشترك بين مصدرَي الاختصار: المحفوظ محلياً، والقادم من الذاكرة
+  /// المشتركة بالووركر.
+  void _applyEpisodeEmbedShortcutState(EpisodeEmbed embed, Uri sourceUri) {
+    final channelId = widget.channelId ?? '';
+    _episodeEmbedShortcutUrl = embed.embedUrl;
+    _webLastPromotedIframeUrl = embed.embedUrl;
+    _webPromotedPlayerMode = true;
+    _webSourceOrigin = Uri.tryParse(embed.embedUrl)?.host ?? _webSourceOrigin;
+    _webVidmolyPlayerMode = embed.playerMode == 'vidmoly';
+    _webVideoJsPlayerMode = embed.playerMode == 'videojs';
+    _applyPromotedDocumentContext(embed.embedUrl);
     // شبكة أمان: لو لم يصل الاختصار لأي مرشّح حقيقي خلال مهلة معقولة
     // (المزوّد بدّل نطاقه، أو حُذفت الحلقة عنده)، نحذفه ونعود للمسار
     // الكامل من صفحة الموقع بدل أن نعلق على رابط ميت.
@@ -995,7 +1006,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       final web = _webController;
       if (web == null) return;
       _slog('EPISODE_EMBED_SHORTCUT_FAILED',
-          'url=${_safeLogUrl(saved.embedUrl)} — reverting to full page');
+          'url=${_safeLogUrl(embed.embedUrl)} — reverting to full page');
       unawaited(EpisodeEmbedService.invalidate(channelId));
       _episodeEmbedShortcutUrl = null;
       _webPromotedPlayerMode = false;
@@ -1003,7 +1014,6 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       _webSourceOrigin = sourceUri.host;
       unawaited(web.loadRequest(sourceUri, headers: _effectiveStreamHeaders()));
     });
-    return embedUri;
   }
 
   /// يحفظ صفحة المشغّل التي انتهى إليها اكتشاف هذي الحلقة، بعد أن يثبت
@@ -1022,8 +1032,54 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
       embedUrl: embedUrl,
       playerMode: mode,
     ));
+    // ونشاركها مع بقية المستخدمين: أول مشاهد يدفع ثمن الاكتشاف مرة واحدة،
+    // ومن بعده يفتح الجميع صفحة المشغّل مباشرة. فاشل صامت تماماً.
+    unawaited(EpisodeEmbedService.reportShared(
+      channelId,
+      embedUrl: embedUrl,
+      playerMode: mode,
+    ));
     _slog('EPISODE_EMBED_REMEMBERED',
         'url=${_safeLogUrl(embedUrl)} playerMode=$mode');
+  }
+
+  /// يسأل الذاكرة المشتركة بالخلفية، ويقفز لصفحة المشغّل إن جاءت نتيجة
+  /// **قبل** أن يصل الاكتشاف العادي لأي شيء.
+  ///
+  /// **لا يؤخّر شيئاً إطلاقاً**: يُطلَق بعد `loadRequest` مباشرةً فتمضي
+  /// صفحة الموقع بتحميلها كالمعتاد بالتوازي. وهذا هو بيت القصيد — المرحلة
+  /// البطيئة فعلاً هي تحميل تلك الصفحة (23 ثانية بسجل المستخدم)، فالقفز
+  /// أثناءها يوفّر معظمها. ولو تأخّر الردّ أو لم يوجد سجل، لا شيء يتغيّر.
+  Future<void> _trySharedEmbedShortcut(Uri sourceUri, int generation) async {
+    final channelId = widget.channelId;
+    if (channelId == null || channelId.isEmpty) return;
+    final shared = await EpisodeEmbedService.fetchShared(channelId);
+    if (shared == null || !mounted) return;
+    if (!_webSessionIsActive(generation)) return;
+    // الاكتشاف العادي سبقنا — لا نقاطع شيئاً يعمل.
+    if (_webPlaybackReady ||
+        _webCandidateRegistry.isNotEmpty ||
+        _webPromotedPlayerMode) {
+      return;
+    }
+    final embedUri = Uri.tryParse(shared.embedUrl);
+    if (embedUri == null ||
+        embedUri.host.isEmpty ||
+        embedUri.host.toLowerCase() == sourceUri.host.toLowerCase()) {
+      return;
+    }
+    final web = _webController;
+    if (web == null) return;
+    _slog('EPISODE_EMBED_SHARED_HIT',
+        'url=${_safeLogUrl(shared.embedUrl)} playerMode=${shared.playerMode}');
+    // نحفظها محلياً أيضاً فتصير المرة القادمة فورية بلا أي طلب شبكة.
+    unawaited(EpisodeEmbedService.remember(
+      channelId,
+      embedUrl: shared.embedUrl,
+      playerMode: shared.playerMode,
+    ));
+    _applyEpisodeEmbedShortcutState(shared, sourceUri);
+    unawaited(web.loadRequest(embedUri, headers: _effectiveStreamHeaders()));
   }
 
   /// يضبط `referer`/`origin` على مستند المشغّل الذي رقّيناه للتو، بدل
@@ -2415,6 +2471,12 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         headers: _effectiveStreamHeaders(),
       );
       if (!mounted) return;
+      // بلا اختصار محلي: نسأل الذاكرة المشتركة **بالتوازي** مع تحميل صفحة
+      // الموقع — فلا تتأخّر هذي الجلسة ولو ثانية واحدة، ولو جاءت نتيجة
+      // قبل أن يصل الاكتشاف لشيء قفزنا لصفحة المشغّل مباشرة.
+      if (shortcut == null) {
+        unawaited(_trySharedEmbedShortcut(sourceUri, _webSessionGeneration));
+      }
       setState(() => _state = _LoadState.loading);
     } catch (_) {
       if (!mounted) return;

@@ -1,6 +1,10 @@
 import 'dart:convert';
+import 'dart:math';
 
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+
+import 'worker_config.dart';
 
 /// يتذكّر، لكل حلقة/قناة بعينها، **صفحة المشغّل** (iframe التضمين) التي
 /// انتهى إليها الاكتشاف ونجح التشغيل بعدها فعلاً.
@@ -102,6 +106,91 @@ class EpisodeEmbedService {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('$_keyPrefix$channelId');
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------
+  // الذاكرة المشتركة عبر Cloudflare Worker
+  //
+  // الذاكرة المحلية أعلاه تخدم إعادة فتح نفس الحلقة على نفس الجهاز فقط.
+  // ما يلي يجعل **أول مشاهد** يدفع ثمن الاكتشاف مرة واحدة، ومن بعده يفتح
+  // كل مستخدم صفحة المشغّل مباشرة. تفاصيل الحماية (تحقّق صارم من شكل
+  // الرابط + اشتراط تأكيد من جهازين مستقلين قبل تقديم أي رابط) بملف
+  // `cloudflare-worker/src/episode_embed.js` بمستودع BinSheikh.
+  // ---------------------------------------------------------------------
+
+  static const _keyDeviceId = 'episode_embed_device_id_v1';
+
+  /// معرّف عشوائي محلي بحت: لا يُشتق من أي معرّف جهاز حقيقي، ولا يُخزَّن
+  /// بالخادم كما هو (يُخزَّن مجزّأً). غرضه الوحيد أن يعدّ الخادم
+  /// **الأجهزة المختلفة** التي أبلغت عن نفس الرابط، فلا يستطيع جهاز واحد
+  /// وحده أن يزرع رابطاً يُقدَّم للجميع.
+  static Future<String?> _deviceId() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final existing = prefs.getString(_keyDeviceId);
+      if (existing != null && existing.length >= 16) return existing;
+      final random = Random.secure();
+      final generated = List<String>.generate(
+        16,
+        (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+      ).join();
+      await prefs.setString(_keyDeviceId, generated);
+      return generated;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// يسأل الخادم عن صفحة مشغّل هذي الحلقة. صامت تماماً عند أي فشل (لا
+  /// شبكة، خادم متعثّر، لا سجل) — المستدعي يكمل بالمسار الكامل.
+  static Future<EpisodeEmbed?> fetchShared(
+    String channelId, {
+    Duration timeout = const Duration(seconds: 4),
+  }) async {
+    if (channelId.isEmpty) return null;
+    try {
+      final uri = Uri.parse('$kWorkerBaseUrl/episodeEmbed')
+          .replace(queryParameters: {'channelId': channelId});
+      final response = await http.get(uri).timeout(timeout);
+      if (response.statusCode != 200) return null;
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map || decoded['found'] != true) return null;
+      final url = decoded['embedUrl']?.toString() ?? '';
+      if (!url.startsWith('https://')) return null;
+      return EpisodeEmbed(
+        embedUrl: url,
+        playerMode: decoded['playerMode']?.toString() ?? 'generic',
+        savedAt: DateTime.now(),
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// يُبلّغ الخادم بصفحة المشغّل التي نجحت. صامت تماماً عند أي فشل — هذا
+  /// تحسين لمن يأتي بعدنا، لا شيء بالجلسة الحالية يتوقف عليه.
+  static Future<void> reportShared(
+    String channelId, {
+    required String embedUrl,
+    required String playerMode,
+  }) async {
+    if (channelId.isEmpty || !embedUrl.startsWith('https://')) return;
+    try {
+      final deviceId = await _deviceId();
+      if (deviceId == null) return;
+      await http
+          .post(
+            Uri.parse('$kWorkerBaseUrl/episodeEmbed'),
+            headers: const {'Content-Type': 'application/json'},
+            body: jsonEncode({
+              'channelId': channelId,
+              'embedUrl': embedUrl,
+              'playerMode': playerMode,
+              'deviceId': deviceId,
+            }),
+          )
+          .timeout(const Duration(seconds: 6));
     } catch (_) {}
   }
 }
