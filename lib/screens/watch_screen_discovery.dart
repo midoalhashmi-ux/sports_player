@@ -145,6 +145,17 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   /// نفس الجودة للتشغيل الأصلي بدل الأعلى دائماً (راجع
   /// `HlsVariantSelector` وTECHNICAL.md #50).
   final Set<String> _webProvenVariantKeys = <String>{};
+  /// مضيفات كل مرشّح وسائط رآه هذا الاكتشاف فعلاً — أوسع من
+  /// `_webCandidateRegistry` عمداً: مصادر تُكتشف بفحص إطار المشغّل أو
+  /// بالفحص العام قد لا تدخل السجل إطلاقاً (سجل حقيقي: `SOURCES_SCAN
+  /// framework=4 generic=1 registry=0` طوال الجلسة).
+  final Set<String> _webSeenCandidateHosts = <String>{};
+
+  /// هل رأينا حركة مشغّل حقيقية بهذه الجلسة؟ يُستخدم حارساً للتنقّل:
+  /// قبلها نسمح بقفزة المرآة الأولى بلا دليل، وبعدها لا نسمح إلا لمضيف
+  /// أثبت أنه يخدم محتوى فعلياً.
+  bool _webSawPlayerEvidence = false;
+
   final Map<String, _WebNetworkCandidate> _webCandidateRegistry =
       <String, _WebNetworkCandidate>{};
   // بنية "تحويل جلب المانفست عبر WebView" — راجع _relayManifestViaWebView.
@@ -434,6 +445,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
         a.isNotEmpty && b.isNotEmpty && (a == b || _registrableDomain(a) == _registrableDomain(b));
     if (sameSite(host, _webEntryHost ?? '')) return true;
     if (sameSite(host, _webSourceOrigin ?? '')) return true;
+    for (final seenHost in _webSeenCandidateHosts) {
+      if (sameSite(host, seenHost)) return true;
+    }
     for (final candidate in _webCandidateRegistry.values) {
       final candidateHost = Uri.tryParse(candidate.url)?.host.toLowerCase() ?? '';
       if (sameSite(host, candidateHost)) return true;
@@ -879,7 +893,15 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           var xhr = new XMLHttpRequest();
           xhr.open('GET', $urlJson, true);
           xhr.responseType = 'arraybuffer';
-          xhr.withCredentials = true;
+          // **بلا credentials** — وهذا ما يفعله hls.js افتراضياً.
+          //
+          // دليل قاطع من السجل: الفحص بـ`withCredentials=true` فشل عند
+          // 28.897s بـ`xhr-error` خلال 247ms، ثم جلبت الصفحة **نفس
+          // المقطع** بنجاح عند 29.051s (`segmentEvidence=true`). السبب:
+          // الطلب الموثَّق (credentialed) يشترط `Access-Control-Allow-
+          // Origin` بأصل صريح و`Allow-Credentials: true`، وشبكات التوزيع
+          // هذي تُرجع `*` — فيرفضه المتصفح فوراً بينما الطلب العادي يمرّ.
+          xhr.withCredentials = false;
           xhr.timeout = 15000;
           xhr.onload = function() {
             var len = xhr.response ? xhr.response.byteLength : 0;
@@ -1970,6 +1992,15 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           ..._webCandidateRegistry.keys,
         }.toList();
         if (!_webSessionIsActive(generation)) return;
+        // تسجيل الدليل **قبل** أي شيء آخر: حارس التنقّل يعتمد عليه، وكل
+        // اختطاف إعلاني مؤكَّد وقع بعد ظهور مرشّحات حقيقية بدقائق.
+        if (sources.isNotEmpty) {
+          _webSawPlayerEvidence = true;
+          for (final source in sources) {
+            final host = Uri.tryParse(source)?.host.toLowerCase() ?? '';
+            if (host.isNotEmpty) _webSeenCandidateHosts.add(host);
+          }
+        }
         _slog(
           'SOURCES_SCAN',
           'attempt=$attempts framework=${frameworkSources.length} generic=${genericSources.length} registry=${_webCandidateRegistry.length} total=${sources.length}',
@@ -2404,6 +2435,8 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _webCandidateEvidence.clear();
     _webCandidateLastReason.clear();
     _webCandidateRegistry.clear();
+    _webSeenCandidateHosts.clear();
+    _webSawPlayerEvidence = false;
     _webManifestRelayAttemptedUrls.clear();
     setState(() {
       _state = _LoadState.loading;
@@ -2497,7 +2530,18 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
                 // (dozens of HLS_CANDIDATE_FROM_JS entries already logged),
                 // so this still catches all of them without blocking the
                 // very first, evidence-free redirect a legitimate mirror needs.
-                if (_webCandidateRegistry.isNotEmpty &&
+                //
+                // **توسعة مبنية على سجل حقيقي**: كان الشرط
+                // `_webCandidateRegistry.isNotEmpty` وحده، ومصدر
+                // (akane-banashi/vmeas.cloud) لم يملأ السجل إطلاقاً
+                // (`registry=0` بكل الفحوص) رغم `framework=4 generic=1`.
+                // فسقط الحارس، وسُمح عند 17.7s بقفزة إلى
+                // `vv.feasingpremed.qpon` ثم سلسلة إعلانات انتهت بتحميل
+                // `get.flickvpn.com` خمسين مرة — وضاعت صفحة المشغّل
+                // بالكامل. `_webSawPlayerEvidence` يغطي المرشّحات التي لا
+                // تدخل السجل، مع إبقاء استثناء «قفزة المرآة الأولى بلا
+                // دليل» كما هو.
+                if ((_webCandidateRegistry.isNotEmpty || _webSawPlayerEvidence) &&
                     !_isTrustedNavigationHost(requestHost)) {
                   _slog(
                     'NAV_BLOCKED_UNTRUSTED_HOST',
