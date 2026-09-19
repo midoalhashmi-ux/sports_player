@@ -1225,10 +1225,11 @@ class _WatchScreenState extends State<WatchScreen>
     } catch (_) {}
   }
 
-  /// الهامش الأفقي الذي يحجزه `Slider` لكرة السحب على كل جهة. قيمة ثابتة
-  /// بـFlutter (`_kSliderTrackInset` داخل `slider.dart`، غير مُصدَّرة) —
-  /// نكرّرها هنا لتنطبق طبقات المسار الثلاث فوق بعضها بلا إزاحة.
-  static const double _kSliderTrackInset = 24;
+  /// نصف قطر كرة السحب: صفر خاملاً (مخفية تماماً مثل يوتيوب) ويظهر أثناء
+  /// السحب. `RectangularSliderTrackShape` يحجز هذا المقدار بالضبط على كل
+  /// جهة، فهو أيضاً الهامش الذي يجب أن تنزاح به طبقاتنا الثلاث حتى تنطبق
+  /// على مسار الـ`Slider` بلا أي إزاحة.
+  double get _sliderThumbRadius => _isScrubbingSlider ? 7.0 : 0.0;
 
   /// نسبة ما جرى تحميله مسبقاً من الفيديو (0..1).
   ///
@@ -1261,17 +1262,17 @@ class _WatchScreenState extends State<WatchScreen>
   }) {
     return Positioned.fill(
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: _kSliderTrackInset),
+        padding: EdgeInsets.symmetric(horizontal: _sliderThumbRadius),
         child: Align(
           alignment: AlignmentDirectional.centerStart,
           child: FractionallySizedBox(
             widthFactor: widthFactor,
-            child: Container(
+            // **حواف قائمة لا دائرية**: شريط يوتيوب مستطيل تماماً، وحوافه
+            // الدائرية كانت أوضح فرق شكلي عنه (بلاغ صريح: «الشكل لم
+            // يعجبني، أريده مثل يوتيوب بالضبط»).
+            child: SizedBox(
               height: height,
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(height),
-              ),
+              child: ColoredBox(color: color),
             ),
           ),
         ),
@@ -1774,7 +1775,24 @@ class _WatchScreenState extends State<WatchScreen>
           _errorMessage = '';
         });
         final web = _webController;
-        if (web != null && _webNativeAttempts < _webMaxNativeAttempts && !_webDrmDetected) {
+        // اختبار A/B أثبت أن **كلا العميلين** فشل بجلب نفس السيجمنت
+        // (`dart=failed | webview=no-response`) — الخادم لا يخدم هذا
+        // المقطع لهذا الجهاز إطلاقاً، لا عميلنا وحده. محاولة أصلية ثانية
+        // بنفس المصدر مضيعة مؤكَّدة: بالسجل الفعلي كلّفت 27 ثانية إضافية
+        // وانتهت بنفس المهلة حرفياً (62 ثانية إجمالاً قبل الاحتياط).
+        // نستسلم فوراً لمشغّل الويب — وهو يعمل فعلاً بهذه الحالة.
+        final abTestProvesServerSide = _segmentAbTestResult != null &&
+            _segmentAbTestResult!.contains('dart=failed') &&
+            (_segmentAbTestResult!.contains('webview=no-response') ||
+                _segmentAbTestResult!.contains('webview=error'));
+        if (abTestProvesServerSide) {
+          _slog('NATIVE_TRIAL_ABORTED_SERVER_SIDE',
+              'abTest=$_segmentAbTestResult — لا فائدة من محاولة أصلية أخرى');
+        }
+        if (web != null &&
+            _webNativeAttempts < _webMaxNativeAttempts &&
+            !_webDrmDetected &&
+            !abTestProvesServerSide) {
           _startWebStartupTimeout(web, _webSessionGeneration);
           _setWebSessionState(_WebSessionState.webFallback);
           Future<void>.delayed(const Duration(milliseconds: 1200), () {
@@ -1791,6 +1809,15 @@ class _WatchScreenState extends State<WatchScreen>
           _setWebSessionState(_webDrmDetected
               ? _WebSessionState.drmWebOnly
               : _WebSessionState.webReady);
+          // **الكشف إلزامي هنا**: بهذه النقطة مشغّل الويب هو المشغّل
+          // النهائي الوحيد، و`_shouldShowWebPage` يبقى false ما دامت
+          // صفحة المصدر مخفية افتراضياً — فيُرسَم WebView بـopacity 0
+          // وداخل IgnorePointer: الفيديو يعمل ويُسمع صوته والشاشة سوداء.
+          // (بلاغ فعلي: «أنمي لم يعمل أبداً» بينما السجل يُظهر
+          // WEB_PLAYBACK_EVIDENCE playing=true currentTime=19.95.)
+          // انحدار أُدخل عند جعل `_showSourcePage` false افتراضياً: قبلها
+          // كانت الصفحة ظاهرة دائماً فعمل الاحتياط ضمناً.
+          _webPageRevealedByUser = true;
           // بدون هذا، _state يبقى "جاري التحميل" للأبد بعد استنفاد كل
           // محاولات التشغيل الأصلي — يظهر مؤشر تحميل دائم فوق فيديو يعمل
           // فعلياً بداخل WebView (شوهد بسجل تشخيص فعلي: السيجمنتات تُجلب
@@ -3468,7 +3495,9 @@ class _WatchScreenState extends State<WatchScreen>
                           // كان 2px ("صغير جداً" — بلاغ مباشر). يوتيوب
                           // يستخدم ~3px ويكبّره عند اللمس؛ نأخذ أعرض قليلاً
                           // كما طُلب.
-                          final trackHeight = _isScrubbingSlider ? 7.0 : 4.5;
+                          // قياسات يوتيوب نفسها (3px خاملاً / 5px أثناء
+                          // التفاعل) مزيدة بمقدار بسيط كما طُلب.
+                          final trackHeight = _isScrubbingSlider ? 6.0 : 4.0;
                           // **طلب صريح من المستخدم**: خطّان لا خط واحد —
                           // خط التقدّم الأحمر، وخلفه خط أبيض شفاف يبيّن ما
                           // جرى **تحميله مسبقاً**، تماماً كما يعرضه مشغّل
@@ -3479,7 +3508,7 @@ class _WatchScreenState extends State<WatchScreen>
                           //   ١) خط أساس خافت جداً = بقية الفيديو
                           //   ٢) خط أبيض شفاف = المُحمَّل مسبقاً
                           //   ٣) الـSlider نفسه = التقدّم + كرة السحب
-                          // الهوامش الأفقية تطابق `_kSliderTrackInset` حتى
+                          // الهوامش الأفقية تطابق `_sliderThumbRadius` حتى
                           // تنطبق الطبقات الثلاث بلا أي إزاحة.
                           return Stack(
                             alignment: Alignment.center,
@@ -3487,12 +3516,12 @@ class _WatchScreenState extends State<WatchScreen>
                               _sliderTrackLayer(
                                 widthFactor: 1.0,
                                 height: trackHeight,
-                                color: Colors.white.withValues(alpha: 0.18),
+                                color: Colors.white.withValues(alpha: 0.20),
                               ),
                               _sliderTrackLayer(
                                 widthFactor: _bufferedFraction(value),
                                 height: trackHeight,
-                                color: Colors.white.withValues(alpha: 0.42),
+                                color: Colors.white.withValues(alpha: 0.40),
                               ),
                               SliderTheme(
                                 // مثل يوتيوب: خط رفيع جداً افتراضياً، تكبر
@@ -3500,11 +3529,16 @@ class _WatchScreenState extends State<WatchScreen>
                                 // (راجع _isScrubbingSlider).
                                 data: SliderTheme.of(context).copyWith(
                                   trackHeight: trackHeight,
+                                  // مسار مستطيل يطابق الطبقتين أسفله شكلاً.
+                                  trackShape:
+                                      const RectangularSliderTrackShape(),
                                   thumbShape: RoundSliderThumbShape(
-                                      enabledThumbRadius:
-                                          _isScrubbingSlider ? 9 : 0),
+                                      enabledThumbRadius: _sliderThumbRadius),
+                                  // يوتيوب لا يعرض هالة حول الكرة إطلاقاً؛
+                                  // الهالة الكبيرة كانت تُظهر دائرة رمادية
+                                  // واسعة عند كل لمسة.
                                   overlayShape: const RoundSliderOverlayShape(
-                                      overlayRadius: 14),
+                                      overlayRadius: 0),
                                 ),
                                 child: Slider(
                                   value: value.position.inMilliseconds
@@ -3512,7 +3546,10 @@ class _WatchScreenState extends State<WatchScreen>
                                       .toDouble(),
                                   min: 0,
                                   max: durationMs == 0 ? 1 : durationMs.toDouble(),
-                                  activeColor: Colors.redAccent,
+                                  // أحمر يوتيوب الصريح (#FF0000) لا
+                                  // redAccent المائل للوردي.
+                                  activeColor: const Color(0xFFFF0000),
+                                  thumbColor: const Color(0xFFFF0000),
                                   // شفاف: الطبقتان أعلاه هما ما يُرى خلف
                                   // التقدّم، وإلا غطّاهما المسار غير النشط.
                                   inactiveColor: Colors.transparent,
