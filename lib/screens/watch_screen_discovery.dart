@@ -165,6 +165,9 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   // original channel page intact.
   bool _webInitialLoadCompleted = false;
 
+  /// تنقّل واحد طلبناه نحن صراحةً — يتخطّى حارس تعدّد الأصول مرة واحدة فقط.
+  bool _webAllowNextNavigation = false;
+
   /// اختصار صفحة المشغّل المحفوظ لهذي الحلقة (راجع `EpisodeEmbedService`)،
   /// والمؤقّت الذي يتراجع للمسار الكامل لو لم يوصل الاختصار لأي مصدر.
   String? _episodeEmbedShortcutUrl;
@@ -199,7 +202,12 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
   bool _webVerificationCheckInFlight = false;
   // Kept backward-compatible with existing Firestore documents: absence of
   // settings/player.showSourcePage means visible.
-  bool _showSourcePage = true;
+  // **الافتراضي صار الإخفاء** — قرار المستخدم للنشر، وهو أيضاً أهم إصلاح
+  // سرعة بهذي الجولة: صفحة المصدر الظاهرة تعني أن مشغّلها يسحب نفس الفيديو
+  // بالتوازي مع محاولتنا، فتتقاسمان وصلة ضيقة وتُقطع أضعفهما. ثلاثة سجلات
+  // تثبتها: الجلسة الوحيدة التي فاز فيها التشغيل الأصلي بسرعة (15.2s) هي
+  // الوحيدة التي لم يكن مشغّل الصفحة قد بدأ السحب فيها بعد.
+  bool _showSourcePage = false;
   bool _webPageRevealedByUser = false;
   // شاشة "تم تشغيل المصدر في الخلفية" غالباً مرحلة عابرة (بضع ثوانٍ) قبل
   // ما يتحول التشغيل للمشغل الأصلي — إظهارها فوراً يسبب وميضاً مزعجاً.
@@ -717,6 +725,14 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           }
           return;
         }
+        // المرشّحات بدأت تصل للتو — المهلة انتهت بفارق ثوانٍ عن نجاح كان
+        // على وشك الحدوث (شوهد فعلياً: التراجع عند +22.4s ثم أول
+        // MEDIA_RESOURCE عند +22.7s). نمنحها دورة أخرى بدل هدم ما بُني.
+        if (_webCandidateRegistry.isNotEmpty || _webMediaResourceHits > 0) {
+          _slog('IFRAME_PROMOTE_TIMEOUT_DEFERRED',
+              'candidates=${_webCandidateRegistry.length} hits=$_webMediaResourceHits');
+          return;
+        }
         if (_webIframePromotionAttempts < 2 && parentUrl != null && parentUrl.isNotEmpty) {
           _slog('IFRAME_PROMOTE_TIMEOUT_REVERT', 'url=${_safeLogUrl(iframeUrl)} backTo=${_safeLogUrl(parentUrl)}');
           // فشل الوصفة المحفوظة (لو كانت هي سبب هذي الترقية) — رجوع فوري
@@ -735,6 +751,13 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
           }
           _webPromotedPlayerMode = false;
           _webSourceOrigin = Uri.tryParse(parentUrl)?.host;
+          // **حجبنا تراجعنا بأنفسنا** (مؤكَّد بسجل): الصفحة الأصلية
+          // `topcinema.io` تحوّل فوراً لنطاقها الفرعي `web5.topcinema.fan`،
+          // فيرى حارس `onNavigationRequest` تنقّلاً عبر أصلَين ويمنعه:
+          //   NAV_BLOCKED_CROSS_ORIGIN: from=topcinema.io to=web5.topcinema.fan
+          // نجا المسار بالصدفة فقط لأن الصفحة كانت محمّلة سلفاً. نسمح
+          // للتنقّل التالي مباشرةً (مرة واحدة) لأننا نحن من طلبه.
+          _webAllowNextNavigation = true;
           try {
             await current.loadRequest(Uri.parse(parentUrl), headers: _effectiveStreamHeaders());
           } catch (_) {}
@@ -2346,6 +2369,7 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
     _episodeEmbedFallbackTimer?.cancel();
     _episodeEmbedFallbackTimer = null;
     _sessionSummaryLogged = false;
+    _webAllowNextNavigation = false;
     _webSessionStartedAt = DateTime.now();
     _segmentAbTestResult = null;
     _webLoggedMediaResources.clear();
@@ -2403,6 +2427,11 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
             if (!_isAllowedWebNavigation(request.url)) {
               _slog('NAV_BLOCKED_DISALLOWED', _safeLogUrl(request.url));
               return NavigationDecision.prevent;
+            }
+            if (_webAllowNextNavigation) {
+              _webAllowNextNavigation = false;
+              _slog('NAV_ALLOWED_SELF_INITIATED', _safeLogUrl(request.url));
+              return NavigationDecision.navigate;
             }
             if (_webInitialLoadCompleted) {
               final requestHost = Uri.tryParse(request.url)?.host.toLowerCase() ?? '';

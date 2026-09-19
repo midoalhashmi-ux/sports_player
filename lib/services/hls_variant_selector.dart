@@ -90,14 +90,40 @@ class HlsVariantSelector {
         (key != null && provenKeys.contains(key) ? proven : rest).add(variant);
       }
       if (proven.isNotEmpty) {
-        return List<HlsVariant>.unmodifiable([...proven, ...rest]);
+        // **الطبقة الوسطى من بين المُثبَتة**، لا أعلاها. الإثبات يعني أن
+        // مشغّل الموقع جلب شريحة منها، لا أن الشبكة تحتملها باطّراد — وقد
+        // يكون قد صعد إليها لحظة واحدة ثم نزل. البداية من الوسط تعطي صورة
+        // معقولة فوراً، والتكيّف التلقائي يصحّح خلال ثوانٍ بلا أي انتظار
+        // إضافي قبل التشغيل (لا يوجد قياس سرعة مسبق — ذلك كان سيؤخّر
+        // البداية، عكس المطلوب).
+        return List<HlsVariant>.unmodifiable([
+          ..._middleFirst(proven),
+          ...rest,
+        ]);
       }
     }
 
     if (sorted.length < _extraTierThreshold) {
       return List<HlsVariant>.unmodifiable(sorted);
     }
-    return List<HlsVariant>.unmodifiable([...sorted.skip(1), sorted.first]);
+    // بلا أي إثبات: نبدأ من الوسط أيضاً. الأعلى تبقى متاحة يدوياً وللتكيّف
+    // الصاعد، لكنها ليست نقطة البداية — السجلات أثبتت أنها أكثر ما يفشل.
+    return List<HlsVariant>.unmodifiable(_middleFirst(sorted));
+  }
+
+  /// يعيد ترتيب قائمة **مرتّبة تنازلياً** بحيث تتصدّرها الطبقة الوسطى،
+  /// ويبقى الباقي بترتيبه التنازلي بعدها.
+  ///
+  /// جودتان: الأدنى أولاً (لا "وسط" بينهما، والأدنى أأمن للبداية).
+  /// ثلاث فأكثر: العنصر بالمنتصف.
+  static List<HlsVariant> _middleFirst(List<HlsVariant> sorted) {
+    if (sorted.length < 2) return sorted;
+    final middleIndex = sorted.length ~/ 2;
+    return [
+      sorted[middleIndex],
+      for (var i = 0; i < sorted.length; i++)
+        if (i != middleIndex) sorted[i],
+    ];
   }
 
   /// روابط الجودات المسموح لـExoPlayer التكيّف بينها داخل قائمة رئيسية.

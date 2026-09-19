@@ -2,9 +2,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Reads the optional player-page visibility switch from settings/player.
 ///
-/// The field is intentionally optional and defaults to true so existing
-/// installations keep their current WebView behaviour until the dashboard
-/// setting is explicitly changed.
+/// الحقل اختياري بلوحة التحكم. **الافتراضي الآن `false` (إخفاء)** بعد أن
+/// أثبتت ثلاثة سجلات تشخيص أن إظهار صفحة المصدر يبطّئ الالتقاط فعلياً:
+/// مشغّل الصفحة الظاهر يواصل سحب نفس الفيديو بالتوازي مع محاولة التشغيل
+/// الأصلي، فتتقاسمان الوصلة وتُقطع شريحتنا بعد ~12 ثانية. إظهارها يبقى
+/// ممكناً من اللوحة للتشخيص فقط.
 class PlayerVisibilityService {
   PlayerVisibilityService._();
 
@@ -15,9 +17,9 @@ class PlayerVisibilityService {
           .doc('player')
           .get();
       final value = snapshot.data()?['showSourcePage'];
-      return value is bool ? value : true;
+      return value is bool ? value : false;
     } catch (_) {
-      return true;
+      return false;
     }
   }
 

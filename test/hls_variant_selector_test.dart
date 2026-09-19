@@ -59,15 +59,17 @@ void main() {
       expect(ordered.first.url, contains('_n/'));
     });
 
-    test('الأعلى بين المُثبَتات أولاً', () {
+    test('الأدنى من بين مُثبَتتين هو نقطة البداية', () {
       final proven = {
         HlsVariantSelector.variantKey('$_base/uyjeu9vq4p2b_n/seg-1.ts')!,
         HlsVariantSelector.variantKey('$_base/uyjeu9vq4p2b_l/seg-1.ts')!,
       };
       final ordered =
           HlsVariantSelector.prioritize(_fourTiers(), provenKeys: proven);
-      expect(ordered[0].url, contains('_n/'));
-      expect(ordered[1].url, contains('_l/'));
+      // مُثبَتتان = لا "وسط" بينهما، فالأأمن للبداية هو الأدنى؛ التكيّف
+      // التلقائي يصعد للأعلى خلال ثوانٍ لو تحمّلت الشبكة.
+      expect(ordered[0].url, contains('_l/'));
+      expect(ordered[1].url, contains('_n/'));
     });
 
     test('لا تُحذف أي جودة — الترتيب فقط', () {
@@ -85,24 +87,26 @@ void main() {
         _fourTiers(),
         provenKeys: {'other-host.example/some/other/path'},
       );
-      expect(ordered.first.url, contains('_h/'));
-      expect(ordered.last.url, contains('_x/'));
+      // بلا إثبات مطابق: البداية من الطبقة الوسطى، وكل الجودات باقية.
+      expect(ordered.first.url, contains('_n/'));
+      expect(ordered.length, 4);
     });
   });
 
   group('prioritize — بلا أي إثبات', () {
-    test('تؤخّر الأعلى للآخر حين تكون الجودات 3 فأكثر', () {
+    test('تبدأ من الطبقة الوسطى حين تكون الجودات 3 فأكثر', () {
       final ordered = HlsVariantSelector.prioritize(_fourTiers());
-      expect(ordered.first.url, contains('_h/'),
-          reason: 'تبدأ بما دون الأعلى مباشرة');
-      expect(ordered.last.url, contains('_x/'),
-          reason: 'الأعلى تبقى متاحة يدوياً لكن ليست البداية');
+      expect(ordered.first.url, contains('_n/'),
+          reason: 'صورة معقولة فوراً، ثم يصحّح التكيّف التلقائي');
+      expect(ordered.length, 4,
+          reason: 'لا تُحذف أي جودة — الترتيب فقط');
     });
 
-    test('تُبقي الأعلى أولاً حين تكون جودتين فقط', () {
+    test('جودتان: تبدأ بالأدنى', () {
       final ordered = HlsVariantSelector.prioritize(_twoTiers());
-      expect(ordered.first.url, contains('_n/'),
-          reason: 'مصادر الجودتين نجحت فعلياً بالأعلى — لا تخفيض بلا سبب');
+      expect(ordered.first.url, contains('_l/'),
+          reason: 'لا وسط بين اثنتين — الأدنى أأمن نقطة بداية');
+      expect(ordered.length, 2);
     });
 
     test('جودة واحدة تمرّ كما هي', () {

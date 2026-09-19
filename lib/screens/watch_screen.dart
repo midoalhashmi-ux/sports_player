@@ -1317,6 +1317,10 @@ class _WatchScreenState extends State<WatchScreen>
     // الخامسة تقريباً) فإيقافه يوقف الفيديو **الذي يشاهده الآن** طوال
     // محاولة خلفية قد تفشل أصلاً. سجل فعلي أظهر مشغّل الموقع متوقفاً
     // ~27 ثانية من أصل 58 لهذا السبب بالضبط، فلم يتجاوز الشريحة الثانية.
+    // صفحة المصدر صارت مخفية افتراضياً، فهذا الشرط لم يعد يتحقق إلا حين
+    // يُظهرها المشرف للتشخيص من اللوحة — عندها فقط نمتنع عن الإيقاف حتى لا
+    // نوقف فيديو يشاهده أحد. بالنشر العادي: الإيقاف يعمل دائماً، فتأخذ
+    // محاولتنا الوصلة كاملةً.
     if (suspend && _webPlaybackReady && _shouldShowWebPage) {
       _slog('WEB_SUSPEND_SKIPPED', 'reason=web_player_visible_and_playing');
       return;
@@ -2648,13 +2652,10 @@ class _WatchScreenState extends State<WatchScreen>
               if (_webSessionState == _WebSessionState.humanVerificationRequired)
                 _buildHumanVerificationBanner(),
               if (_state == _LoadState.error) _buildError(),
-              if (_state == _LoadState.ready &&
-                  !_isWebSource &&
-                  _isBuffering &&
-                  _bufferIndicatorVisible)
-                const Center(
-                  child: CircularProgressIndicator(color: Colors.white),
-                ),
+              // مؤشّر التخزين المؤقت لم يعد هنا: كان دائرة مستقلة بمركز
+              // الشاشة فتظهر **بجانب** زر التشغيل لا حوله (بلاغ مع لقطة).
+              // صار يُرسَم كحلقة محيطة بالزر نفسه — راجع `_circleIconButton`
+              // بالمعامل `busy`.
               if (_state == _LoadState.ready &&
                   !_isWebSource &&
                   _isBuffering &&
@@ -3253,6 +3254,9 @@ class _WatchScreenState extends State<WatchScreen>
     double iconSize = 24,
     Widget? child,
     bool bounce = false,
+    /// حلقة تحميل **محيطة** بالزر بدل دائرة مستقلة بجانبه (طلب صريح مع
+    /// لقطة شاشة). قطرها يساوي قطر الزر تماماً فتبدو إطاراً له.
+    bool busy = false,
   }) {
     // خلفية أخف بكثير من قبل — التدرّج الأسود خلف شريط التحكم بأكمله
     // (راجع _buildControls) يكفي وحده لوضوح الأيقونات فوق أي فيديو، فلا
@@ -3270,9 +3274,20 @@ class _WatchScreenState extends State<WatchScreen>
             child: SizedBox(
               width: size,
               height: size,
-              child: Center(
-                child: child ??
-                    Icon(icon, color: Colors.white, size: iconSize),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  if (busy)
+                    SizedBox(
+                      width: size,
+                      height: size,
+                      child: const CircularProgressIndicator(
+                        strokeWidth: 3,
+                        color: Colors.white,
+                      ),
+                    ),
+                  child ?? Icon(icon, color: Colors.white, size: iconSize),
+                ],
               ),
             ),
           ),
@@ -3410,6 +3425,7 @@ class _WatchScreenState extends State<WatchScreen>
                     size: 84,
                     iconSize: 46,
                     bounce: true,
+                    busy: !_isWebSource && _isBuffering && _bufferIndicatorVisible,
                     onPressed: _togglePlay,
                   ),
                   const SizedBox(width: 12),
@@ -3449,7 +3465,10 @@ class _WatchScreenState extends State<WatchScreen>
                         valueListenable: _controller!,
                         builder: (context, value, _) {
                           final durationMs = value.duration.inMilliseconds;
-                          final trackHeight = _isScrubbingSlider ? 3.5 : 2.0;
+                          // كان 2px ("صغير جداً" — بلاغ مباشر). يوتيوب
+                          // يستخدم ~3px ويكبّره عند اللمس؛ نأخذ أعرض قليلاً
+                          // كما طُلب.
+                          final trackHeight = _isScrubbingSlider ? 7.0 : 4.5;
                           // **طلب صريح من المستخدم**: خطّان لا خط واحد —
                           // خط التقدّم الأحمر، وخلفه خط أبيض شفاف يبيّن ما
                           // جرى **تحميله مسبقاً**، تماماً كما يعرضه مشغّل
@@ -3483,7 +3502,7 @@ class _WatchScreenState extends State<WatchScreen>
                                   trackHeight: trackHeight,
                                   thumbShape: RoundSliderThumbShape(
                                       enabledThumbRadius:
-                                          _isScrubbingSlider ? 7 : 0),
+                                          _isScrubbingSlider ? 9 : 0),
                                   overlayShape: const RoundSliderOverlayShape(
                                       overlayRadius: 14),
                                 ),
