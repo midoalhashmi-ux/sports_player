@@ -1781,13 +1781,17 @@ class _WatchScreenState extends State<WatchScreen>
         // بنفس المصدر مضيعة مؤكَّدة: بالسجل الفعلي كلّفت 27 ثانية إضافية
         // وانتهت بنفس المهلة حرفياً (62 ثانية إجمالاً قبل الاحتياط).
         // نستسلم فوراً لمشغّل الويب — وهو يعمل فعلاً بهذه الحالة.
-        final abTestProvesServerSide = _segmentAbTestResult != null &&
-            _segmentAbTestResult!.contains('dart=failed') &&
-            (_segmentAbTestResult!.contains('webview=no-response') ||
-                _segmentAbTestResult!.contains('webview=error'));
+        // **`no-response` ليس دليلاً** ولا يجوز الاستسلام بسببه: قد يعني
+        // أن الفحص نفسه لم يصل (انتهت مهلته، أو حُجب برد مبهم). الدليل
+        // الوحيد المقبول أن الصفحة **ردّت صراحةً** بفشل أو بحالة خطأ —
+        // وعندها فقط يكون العجز من الخادم لا من عميلنا.
+        final abTest = _segmentAbTestResult ?? '';
+        final abTestProvesServerSide = abTest.contains('dart=failed') &&
+            (abTest.contains('webview=failed') ||
+                RegExp(r'webview=status=[45]\d\d').hasMatch(abTest));
         if (abTestProvesServerSide) {
           _slog('NATIVE_TRIAL_ABORTED_SERVER_SIDE',
-              'abTest=$_segmentAbTestResult — لا فائدة من محاولة أصلية أخرى');
+              'abTest=$abTest — الصفحة نفسها فشلت بجلب المقطع، فالعجز من الخادم');
         }
         if (web != null &&
             _webNativeAttempts < _webMaxNativeAttempts &&

@@ -863,15 +863,40 @@ mixin _StreamDiscoveryMixin on State<WatchScreen> {
             }
           } catch (_) {}
         }
-        fetch($urlJson, {credentials:'omit'}).then(function(res) {
-          return res.arrayBuffer().then(function(buf) {
-            post('status=' + res.status + ' bytes=' + (buf ? buf.byteLength : 0) +
+        // **XHR لا fetch، وبالكوكيز لا بدونها.**
+        //
+        // النسخة السابقة كانت `fetch(url, {credentials:'omit'})` وكانت
+        // تُرجع `no-response` دائماً لمضيفات box-* — فاستُنتج خطأً أن
+        // «الخادم لا يخدم أي عميل». السبب شيئان بالسجل نفسه:
+        //   ١) `net::ERR_BLOCKED_BY_ORB` — كروم يحجب الاستجابة المبهمة
+        //      عبر الأصول، فيفشل الفحص ولو نجح الطلب فعلياً.
+        //   ٢) `credentials:'omit'` يُسقط الكوكيز، ووكيل HLS عندنا يمرّر
+        //      `cookie` صراحةً ضمن الترويسات — أي أنها جزء من التوكن.
+        // hls.js (وهو ما ينجح فعلياً بهذي الصفحة) يستخدم XHR بـ
+        // `responseType='arraybuffer'` ويرسل الكوكيز. نطابقه حرفياً كي
+        // يكون الفحص دليلاً حقيقياً لا نتيجة سالبة كاذبة.
+        try {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', $urlJson, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.withCredentials = true;
+          xhr.timeout = 15000;
+          xhr.onload = function() {
+            var len = xhr.response ? xhr.response.byteLength : 0;
+            post('status=' + xhr.status + ' bytes=' + len +
                  ' ms=' + (Date.now() - started));
-          });
-        }).catch(function(err) {
+          };
+          xhr.onerror = function() {
+            post('failed ms=' + (Date.now() - started) + ' error=xhr-error');
+          };
+          xhr.ontimeout = function() {
+            post('failed ms=' + (Date.now() - started) + ' error=xhr-timeout');
+          };
+          xhr.send();
+        } catch (err) {
           post('failed ms=' + (Date.now() - started) +
                ' error=' + ((err && err.message) ? err.message : String(err)));
-        });
+        }
       })();''');
       final webOutcome = await completer.future
           .timeout(const Duration(seconds: 20), onTimeout: () => null);
